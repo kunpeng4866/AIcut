@@ -814,12 +814,11 @@ fn test_project_io_roundtrip_with_tracks() {
 }
 
 #[test]
-fn test_mcp_tools_list_has_four() {
+fn test_mcp_tools_list_has_seven() {
     let tools = aicut_engine::mcp::list_tools();
-    assert_eq!(tools.len(), 4, "MCP 应有 4 个工具");
+    assert_eq!(tools.len(), 7, "MCP 应有 7 个工具");
     let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
     assert!(names.contains(&"render_project"));
-    assert!(names.contains(&"probe_media"));
-    assert!(names.contains(&"list_presets"));
-    assert!(names.contains(&"validate_project"));
+    assert!(names.contains(&"transcribe_audio"));
+    assert!(names.contains(&"generate_script"));
 }

@@ -36,6 +36,9 @@ pub fn list_tools() -> Vec<ToolDef> {
         ToolDef { name: "probe_media", description: "探测媒体文件元数据（分辨率/时长/编码）", input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"# },
         ToolDef { name: "list_presets", description: "返回可用滤镜预置名列表", input_schema: r#"{"type":"object","properties":{}}"# },
         ToolDef { name: "validate_project", description: "验证 AIcut 工程合法性", input_schema: r#"{"type":"object","properties":{"project":{"type":"object"}}}"# },
+        ToolDef { name: "transcribe_audio", description: "语音转文字 (Whisper)", input_schema: r#"{"type":"object","properties":{"audio_path":{"type":"string"},"language":{"type":"string"}}}"# },
+        ToolDef { name: "generate_script", description: "根据主题生成视频脚本", input_schema: r#"{"type":"object","properties":{"topic":{"type":"string"},"duration":{"type":"number"},"style":{"type":"string"}}}"# },
+        ToolDef { name: "script_to_project", description: "脚本→AIcut工程JSON", input_schema: r#"{"type":"object","properties":{"scenes":{"type":"array"},"assets":{"type":"array"}}}"# },
     ]
 }
 
@@ -90,6 +93,42 @@ pub fn handle_tool_call(request: &ToolRequest) -> ToolResponse {
                 result: Some(serde_json::json!({"errors": errs})),
                 error: None,
             }
+        }
+        "transcribe_audio" => {
+            let path = request.arguments["audio_path"].as_str().unwrap_or("");
+            let lang = request.arguments["language"].as_str().unwrap_or("zh");
+            if path.is_empty() { return ToolResponse { success: false, result: None, error: Some("缺少 audio_path".into()) }; }
+            let provider = crate::provider::WhisperProvider { model_path: "ggml-base.bin".into() };
+            match crate::provider::AsrProvider::transcribe(&provider, path, lang) {
+                Ok(r) => ToolResponse {
+                    success: true,
+                    result: Some(serde_json::to_value(&r).unwrap()),
+                    error: None,
+                },
+                Err(e) => ToolResponse { success: false, result: None, error: Some(e) },
+            }
+        }
+        "generate_script" => {
+            let topic = request.arguments["topic"].as_str().unwrap_or("");
+            let duration = request.arguments["duration"].as_f64().unwrap_or(30.0);
+            let style = request.arguments["style"].as_str().unwrap_or("vlog");
+            let config = crate::provider::LlmConfig::default();
+            let req = crate::provider::ScriptRequest { topic: topic.to_string(), duration_secs: duration, style: style.to_string() };
+            match crate::provider::generate_script(&config, &req) {
+                Ok(script) => ToolResponse { success: true, result: Some(serde_json::to_value(&script).unwrap()), error: None },
+                Err(e) => ToolResponse { success: false, result: None, error: Some(e) },
+            }
+        }
+        "script_to_project" => {
+            let script: crate::provider::ScriptResult = match serde_json::from_value(request.arguments.clone()) {
+                Ok(s) => s,
+                Err(e) => return ToolResponse { success: false, result: None, error: Some(e.to_string()) },
+            };
+            let assets: Vec<String> = request.arguments["assets"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let project = crate::provider::script_to_project(&script, &assets);
+            ToolResponse { success: true, result: Some(serde_json::to_value(&project).unwrap()), error: None }
         }
         _ => ToolResponse { success: false, result: None, error: Some(format!("未知工具: {}", request.name)) },
     }
@@ -166,8 +205,9 @@ mod tests {
     #[test]
     fn test_list_tools() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 7);
         assert!(tools.iter().any(|t| t.name == "render_project"));
+        assert!(tools.iter().any(|t| t.name == "transcribe_audio"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod probe;
 pub mod project_io;
 pub mod subtitle;
 pub mod mcp;
+pub mod provider;
 mod types;
 mod keyframe;
 mod filters;
