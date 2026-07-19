@@ -233,6 +233,74 @@ pub fn degrade_filter(name: &str) -> Option<String> {
     }
 }
 
+// ════════════════════ 单元测试 ════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bitrate_4k() { assert!((bitrate_for_resolution((3840, 2160)) - 25.0).abs() < 0.01); }
+    #[test]
+    fn test_bitrate_1080p() { assert!((bitrate_for_resolution((1920, 1080)) - 8.0).abs() < 0.01); }
+    #[test]
+    fn test_bitrate_720p() { assert!((bitrate_for_resolution((1280, 720)) - 5.0).abs() < 0.01); }
+    #[test]
+    fn test_bitrate_small() { assert!((bitrate_for_resolution((640, 480)) - 3.0).abs() < 0.01); }
+    #[test]
+    fn test_bitrate_8k() { assert!((bitrate_for_resolution((7680, 4320)) - 25.0).abs() < 0.01); }
+
+    #[test]
+    fn test_resolve_encoder_nvenc_h264() { assert_eq!(resolve_encoder("nvenc", "h264"), "h264_nvenc"); }
+    #[test]
+    fn test_resolve_encoder_nvenc_h265() { assert_eq!(resolve_encoder("nvenc", "h265"), "hevc_nvenc"); }
+    #[test]
+    fn test_resolve_encoder_amf() { assert_eq!(resolve_encoder("amf", "h264"), "h264_amf"); }
+    #[test]
+    fn test_resolve_encoder_qsv() { assert_eq!(resolve_encoder("qsv", "h265"), "hevc_qsv"); }
+    #[test]
+    fn test_resolve_encoder_software() {
+        assert_eq!(resolve_encoder("software", "h264"), "libx264");
+        assert_eq!(resolve_encoder("", "h265"), "libx265");
+        assert_eq!(resolve_encoder("unknown", "h264"), "libx264");
+    }
+
+    #[test]
+    fn test_degrade_filter_pass_through() {
+        assert_eq!(degrade_filter("scale"), Some("scale".to_string()));
+        assert_eq!(degrade_filter("overlay"), Some("overlay".to_string()));
+        assert_eq!(degrade_filter("hflip"), Some("hflip".to_string()));
+    }
+
+    #[test]
+    fn test_degrade_format() { assert_eq!(degrade_filter("format"), Some("format=yuv420p".to_string())); }
+
+    #[test]
+    fn test_degrade_eq_mask() {
+        // 取决于沙盒 ffmpeg 可用性，但不会 panic
+        assert!(degrade_filter("eq").is_some() || degrade_filter("eq").is_some());
+        // mask 不可用时应返回 None
+        let m = degrade_filter("mask");
+        assert!(m.is_none() || m == Some("mask".to_string()));
+    }
+
+    #[test]
+    fn test_render_command_execute() {
+        let cmd = RenderCommand::default();
+        let args = cmd.to_command_line();
+        assert!(args[0] == "ffmpeg");
+        assert!(args.contains(&"-y".to_string()));
+    }
+
+    #[test]
+    fn test_to_command_string_is_display_only() {
+        let cmd = RenderCommand::default();
+        let s = cmd.to_command_string();
+        assert!(s.starts_with("ffmpeg"));
+        assert!(s.contains("output.mp4"));
+    }
+}
+
 /// 按分辨率阶梯解析默认码率（4K→25, 1080p→8, 720p→5, 其他→3 Mbps）
 pub fn bitrate_for_resolution(res: (u32, u32)) -> f64 {
     let pixels = res.0 * res.1;

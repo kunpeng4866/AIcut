@@ -175,3 +175,93 @@ pub fn compute_canvas(aspect: &str, base_height: u32) -> (u32, u32) {
     // 未命中 → 默认 16:9
     (((base_height as f64 * 16.0 / 9.0).round()) as u32, base_height)
 }
+
+// ════════════════════ 单元测试 ════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_canvas_16_9() {
+        let (w, h) = compute_canvas("16:9", 1080);
+        assert_eq!((w, h), (1920, 1080));
+    }
+
+    #[test]
+    fn test_compute_canvas_9_16() {
+        let (w, h) = compute_canvas("9:16", 1920);
+        assert_eq!((w, h), (1080, 1920));
+    }
+
+    #[test]
+    fn test_compute_canvas_1_1() {
+        let (w, h) = compute_canvas("1:1", 1080);
+        assert_eq!((w, h), (1080, 1080));
+    }
+
+    #[test]
+    fn test_compute_canvas_unknown_fallback() {
+        let (w, h) = compute_canvas("unknown", 1080);
+        assert_eq!((w, h), (1920, 1080)); // 默认 16:9
+    }
+
+    #[test]
+    fn test_total_duration() {
+        let project = Project {
+            version: "1.0".into(),
+            canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+            assets: vec![],
+            tracks: vec![
+                Track {
+                    id: "t1".into(), track_type: "video".into(), order: 0,
+                    clips: vec![
+                        Clip {
+                            id: "c1".into(), asset_id: "a1".into(),
+                            src_range: Range { start: 0.0, end: 5.0 },
+                            timeline_in: 0.0, timeline_out: 5.0,
+                            transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                            volume: 1.0, speed: 1.0,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+                        },
+                        Clip {
+                            id: "c2".into(), asset_id: "a2".into(),
+                            src_range: Range { start: 0.0, end: 10.0 },
+                            timeline_in: 5.0, timeline_out: 15.0,
+                            transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                            volume: 1.0, speed: 1.0,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+                        },
+                    ],
+                },
+            ],
+        };
+        assert!((project.total_duration() - 15.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_asset_by_id() {
+        let project = Project {
+            version: "1.0".into(),
+            canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+            assets: vec![
+                Asset { id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(), duration: 5.0, width: 1920, height: 1080, codec: "h264".into() },
+                Asset { id: "a2".into(), asset_type: "audio".into(), path: "a.mp3".into(), duration: 3.0, width: 0, height: 0, codec: String::new() },
+            ],
+            tracks: vec![],
+        };
+        assert!(project.asset_by_id("a1").is_some());
+        assert!(project.asset_by_id("a2").is_some());
+        assert!(project.asset_by_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_empty_project_duration() {
+        let project = Project {
+            version: "1.0".into(),
+            canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+            assets: vec![], tracks: vec![],
+        };
+        assert!((project.total_duration() - 0.0).abs() < 0.001);
+    }
+}

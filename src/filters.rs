@@ -642,7 +642,7 @@ fn keyframed(clip: &Clip, path: &str, base: f64) -> f64 {
         .unwrap_or(base)
 }
 
-/// 构建单个视频片段的滤镜链，返回标签名
+/// 构建单个视频片段的滤镜链，返回标签名。asset 不存在返回 None
 fn build_clip_chain(
     c: &Clip,
     ci: usize,
@@ -650,12 +650,12 @@ fn build_clip_chain(
     w: u32,
     h: u32,
     nodes: &mut Vec<String>,
-) -> String {
-    let idx = *asset_to_idx.get(&c.asset_id).unwrap_or(&0);
+) -> Option<String> {
+    let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
     let chain = build_video_chain(c, idx, w, h, &label);
     nodes.push(chain);
-    label
+    Some(label)
 }
 
 /// 对单个片段构造 FFmpeg 视频滤镜串：[N:v]scale=W:H[,setpts=...][,rotate=...][,filters][,colorchannelmixer][label]
@@ -787,9 +787,11 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 continue;
             }
             if clips.len() == 1 {
-                // 单片段轨道：直接 overlay
                 let c = clips[0];
-                let idx = *asset_to_idx.get(&c.asset_id).unwrap_or(&0);
+                let idx = match asset_to_idx.get(&c.asset_id) {
+                    Some(i) => *i,
+                    None => { vci += 1; continue; }
+                };
                 let src = format!("vs{}", vci);
                 let chain = build_video_chain(c, idx, w, h, &src);
                 nodes.push(chain);
@@ -801,7 +803,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 vci += 1;
             } else {
                 // 多片段轨道：顺序链 + 交叉过渡（xfade）
-                let mut track_acc = build_clip_chain(clips[0], vci, &asset_to_idx, w, h, &mut nodes);
+                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, w, h, &mut nodes) else {
+                    vci += 1;
+                    continue;
+                };
                 vci += 1;
 
                 for ci in 1..clips.len() {
@@ -812,7 +817,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let has_transition = prev.filters.iter().any(|f| f.kind == "transition" && f.enabled)
                         || curr.filters.iter().any(|f| f.kind == "transition" && f.enabled);
 
-                    let curr_label = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes);
+                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes) else {
+                        vci += 1;
+                        continue;
+                    };
                     vci += 1;
 
                     if has_transition && gap <= 0.0 {
