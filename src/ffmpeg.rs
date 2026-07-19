@@ -1,6 +1,4 @@
-//! src/ffmpeg.rs — FFmpeg 命令构建器
-//! 对应 TS `ffmpeg.ts`：RenderCommand / FilterChain / buildFFmpegCommand()。
-//! 含「滤镜探测降级」机制：启动时探测沙盒可用滤镜，缺失则降级替代。
+//! src/ffmpeg.rs — FFmpeg 命令构建器 + 滤镜探测降级
 
 use std::collections::HashSet;
 use std::process::Command;
@@ -8,66 +6,24 @@ use std::sync::OnceLock;
 
 /// 1080p30 默认导出码率 (Mbps)
 pub const DEFAULT_BITRATE_MBPS: f64 = 8.0;
-/// 默认视频编码器
 pub const DEFAULT_CODEC: &str = "libx264";
-/// 默认 CRF
 pub const DEFAULT_CRF: u32 = 18;
 
-/// 硬件编码器映射（自动检测 → ffmpeg 编码器名）
 pub const HW_ENCODERS: &[(&str, &str, &str)] = &[
-    ("nvenc", "h264_nvenc", "hevc_nvenc"),   // NVIDIA
-    ("amf", "h264_amf", "hevc_amf"),          // AMD
-    ("qsv", "h264_qsv", "hevc_qsv"),          // Intel QuickSync
+    ("nvenc", "h264_nvenc", "hevc_nvenc"),
+    ("amf", "h264_amf", "hevc_amf"),
+    ("qsv", "h264_qsv", "hevc_qsv"),
 ];
 
-/// 根据编码器预设名和类型（h264/h265）解析实际 ffmpeg 编码器名
 pub fn resolve_encoder(preset: &str, codec_type: &str) -> &'static str {
     if preset.is_empty() || preset == "software" {
         return if codec_type == "h265" { "libx265" } else { DEFAULT_CODEC };
     }
     let is_hevc = codec_type == "h265";
     for (name, h264, hevc) in HW_ENCODERS {
-        if *name == preset {
-            return if is_hevc { hevc } else { h264 };
-        }
+        if *name == preset { return if is_hevc { hevc } else { h264 }; }
     }
     DEFAULT_CODEC
-}
-
-/// 单个滤镜节点（FFmpeg filtergraph 中的一个标签化滤镜）
-#[derive(Debug, Clone, Default)]
-pub struct FilterNode {
-    pub label: String,
-    pub spec: String,
-}
-
-/// 有序滤镜链
-#[derive(Debug, Clone, Default)]
-pub struct FilterChain {
-    pub nodes: Vec<FilterNode>,
-}
-
-impl FilterChain {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push(&mut self, node: FilterNode) {
-        self.nodes.push(node);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-
-    /// 序列化为 FFmpeg `-filter_complex` 字符串（节点以 `;` 连接）
-    pub fn to_filter_complex(&self) -> String {
-        self.nodes
-            .iter()
-            .map(|n| n.spec.clone())
-            .collect::<Vec<_>>()
-            .join(";")
-    }
 }
 
 /// 渲染命令容器
@@ -110,12 +66,7 @@ impl RenderCommand {
         args
     }
 
-    /// 将 FilterChain 序列化为完整 filter_complex 字符串
-    pub fn build_filter_graph(chain: &FilterChain) -> String {
-        chain.to_filter_complex()
-    }
-
-    /// 构建输出参数：`-c:v libx264 -crf 18 -r 30 -b:v 8M -s WxH -pix_fmt yuv420p`
+    /// 构建输出参数
     pub fn build_output_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         if let Some(label) = &self.map_label {

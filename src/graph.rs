@@ -2,7 +2,6 @@
 //! FilterGraphBuilder + build_render_command + 公共 API
 
 use crate::ffmpeg;
-use crate::keyframe::apply_easing;
 use crate::project::{Clip, Project, Track};
 use crate::types::*;
 use std::collections::HashMap;
@@ -28,7 +27,7 @@ pub fn build_speed_curve_expr(points: &[crate::project::SpeedPoint]) -> Option<S
         let rate = dp / dt; let offset = p0.play - rate * p0.src;
         let mut seg = format!("{}*PTS", fmt(rate));
         if offset.abs() > 1e-6 { seg.push_str(&format!("{:+}", offset)); }
-        expr = format!("if(lt(T,{}),{},{}))", fmt(p1.src), seg, expr);
+        expr = format!("if(lt(T,{}),{},{})", fmt(p1.src), seg, expr);
     }
     Some(expr)
 }
@@ -132,7 +131,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     };
     let mut vout_label = String::new();
     if !video_tracks.is_empty() {
-        nodes.push(format!("color=c=black:s={}x{}:d=1[base]", w, h));
+        nodes.push(format!("color=c=black:s={}x{}[base]", w, h));
         let mut acc = "base".to_string();
         let mut vci = 0usize;
         for (track_order, clips) in &video_tracks {

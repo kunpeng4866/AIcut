@@ -81,6 +81,26 @@ pub fn parse_srt(content: &str) -> SubtitleTrack {
     track
 }
 
+/// 将颜色名/hex 转换为 ASS &HAABBGGRR 格式
+fn color_to_ass_bgr(color: &str) -> String {
+    let rgb = match color.to_lowercase().as_str() {
+        "white" => (255, 255, 255),
+        "yellow" => (255, 255, 0),
+        "red" => (255, 0, 0),
+        "green" => (0, 255, 0),
+        "blue" => (0, 0, 255),
+        "black" => (0, 0, 0),
+        s if s.starts_with('#') && s.len() == 7 => {
+            let r = u8::from_str_radix(&s[1..3], 16).unwrap_or(255);
+            let g = u8::from_str_radix(&s[3..5], 16).unwrap_or(255);
+            let b = u8::from_str_radix(&s[5..7], 16).unwrap_or(255);
+            (r, g, b)
+        }
+        _ => (255, 255, 255),
+    };
+    format!("&H00{:02X}{:02X}{:02X}", rgb.2, rgb.1, rgb.0) // BGR order
+}
+
 fn parse_srt_time(s: &str) -> f64 {
     // "00:00:01,000" → seconds
     let s = s.replace(',', ".");
@@ -117,8 +137,10 @@ pub fn build_drawtext_filters(track: &SubtitleTrack, width: u32, height: u32) ->
 pub fn to_ass(track: &SubtitleTrack) -> String {
     let mut ass = String::from("[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n");
     ass.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, Bold, Outline, Alignment\n");
-    ass.push_str(&format!("Style: Default,{},24,&H00FFFFFF,{},{},{}\n\n",
-        track.style.font, if track.style.bold { 1 } else { 0 }, track.style.outline, track.style.alignment));
+    let ass_color = color_to_ass_bgr(&track.style.color);
+    ass.push_str(&format!("Style: Default,{},{},{},{},{}\n\n",
+        track.style.font, track.style.font_size, ass_color,
+        if track.style.bold { -1 } else { 0 }, track.style.outline));
     ass.push_str("[Events]\nFormat: Layer, Start, End, Style, Text\n");
     for item in &track.items {
         ass.push_str(&format!("Dialogue: 0,{:.2},{:.2},Default,{}\n",

@@ -253,6 +253,18 @@ fn clamp(v: f64, min: f64, max: f64) -> f64 {
     v.max(min).min(max)
 }
 
+/// HSV hue (0-360) → FFmpeg hex color (e.g. 0x00FF00 for green at 120)
+fn hue_to_ffmpeg_color(hue: f64) -> String {
+    let h = hue % 360.0;
+    let (r, g, b) = if h < 60.0 { (255, (h * 4.25) as u8, 0) }
+    else if h < 120.0 { (((120.0 - h) * 4.25) as u8, 255, 0) }
+    else if h < 180.0 { (0, 255, ((h - 120.0) * 4.25) as u8) }
+    else if h < 240.0 { (0, ((240.0 - h) * 4.25) as u8, 255) }
+    else if h < 300.0 { (((h - 240.0) * 4.25) as u8, 0, 255) }
+    else { (255, 0, ((360.0 - h) * 4.25) as u8) };
+    format!("0x{:02X}{:02X}{:02X}", r, g, b)
+}
+
 /// 将单个滤镜实例构建为 FFmpeg 滤镜串，应用降级逻辑。
 /// 返回 None 表示该滤镜缺失且应跳过（如 mask）；返回 Some 为最终滤镜串。
 pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<String> {
@@ -314,10 +326,12 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
             return Some(format!("equalizer=f={}:t=q:w={}:g={}", fmt(freq), fmt(width), fmt(gain)));
         }
         "chromakey" => {
-            let _hue = params.get("hue").copied().unwrap_or(120.0);
+            let hue = params.get("hue").copied().unwrap_or(120.0);
             let similarity = params.get("similarity").copied().unwrap_or(0.1);
             let blend = params.get("blend").copied().unwrap_or(0.0);
-            return Some(format!("chromakey=0x00FF00:similarity={}:blend={}", fmt(similarity), fmt(blend)));
+            // HSV hue → approximate RGB hex for chromakey
+            let color = hue_to_ffmpeg_color(hue);
+            return Some(format!("chromakey={}:similarity={}:blend={}", color, fmt(similarity), fmt(blend)));
         }
         _ => {}
     }
@@ -348,16 +362,17 @@ pub fn build_mask_spec(mask: &Mask) -> Option<String> {
     }
     match mask.shape.as_str() {
         "linear" => {
-            let _feather = mask.feather.max(0.0).min(1.0);
-            // 线性蒙版简化为调整透明度 + 羽化
+            let feather = mask.feather.max(0.0).min(1.0);
+            let base_alpha = mask.params.get("opacity").copied().unwrap_or(1.0);
+            let alpha = base_alpha * (1.0 - feather * 0.5); // 羽化降低整体透明度
             if mask.invert {
-                Some(format!("colorchannelmixer=aa={}", fmt(1.0 - mask.params.get("opacity").copied().unwrap_or(0.5))))
+                Some(format!("colorchannelmixer=aa={}", fmt((1.0 - alpha).max(0.0))))
             } else {
-                Some(format!("colorchannelmixer=aa={}", fmt(mask.params.get("opacity").copied().unwrap_or(1.0))))
+                Some(format!("colorchannelmixer=aa={}", fmt(alpha)))
             }
         }
         "circle" => {
-            let _feather = mask.feather.max(0.0);
+            let feather = mask.feather.max(0.0);
             let cx = mask.params.get("cx").copied().unwrap_or(0.5);
             let cy = mask.params.get("cy").copied().unwrap_or(0.5);
             let r = mask.params.get("radius").copied().unwrap_or(0.3);

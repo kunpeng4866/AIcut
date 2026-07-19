@@ -40,7 +40,12 @@ fn main() {
             if args.len() < 3 { eprintln!("用法: aicut-engine new <name> [WxH]"); process::exit(2); }
             let (w, h) = if args.len() >= 4 {
                 let parts: Vec<&str> = args[3].split('x').collect();
-                (parts[0].parse().unwrap_or(1920), parts[1].parse().unwrap_or(1080))
+                if parts.len() >= 2 {
+                    (parts[0].parse().unwrap_or(1920), parts[1].parse().unwrap_or(1080))
+                } else {
+                    eprintln!("警告: 分辨率格式应为 WxH (如 1920x1080)，使用默认 1920x1080");
+                    (1920, 1080)
+                }
             } else { (1920, 1080) };
             let project = aicut_engine::project::Project {
                 version: "1.0".into(),

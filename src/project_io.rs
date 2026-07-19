@@ -84,34 +84,38 @@ mod tests {
         }
     }
 
+    fn tmp_path(name: &str) -> String {
+        std::env::temp_dir().join(name).to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_save_load_roundtrip() {
         let p = test_project();
-        let tmp = "/tmp/aicut_test_project.json";
-        save(&p, tmp).expect("save");
-        let loaded = load(tmp).expect("load");
+        let tmp = tmp_path("aicut_test_project.json");
+        save(&p, &tmp).expect("save");
+        let loaded = load(&tmp).expect("load");
         assert_eq!(loaded.version, "1.0");
         assert_eq!(loaded.canvas.width, 1920);
-        let _ = fs::remove_file(tmp);
+        let _ = fs::remove_file(&tmp);
     }
 
     #[test]
     fn test_save_with_backup() {
         let p = test_project();
-        let tmp = "/tmp/aicut_test_bak.json";
-        save(&p, tmp).expect("save1");
-        save_with_backup(&p, tmp).expect("save2");
-        assert!(Path::new(&format!("{}.bak", tmp)).exists());
-        let _ = fs::remove_file(tmp);
-        let _ = fs::remove_file(format!("{}.bak", tmp));
+        let tmp = tmp_path("aicut_test_bak.json");
+        save(&p, &tmp).expect("save1");
+        save_with_backup(&p, &tmp).expect("save2");
+        assert!(Path::new(&format!("{}.bak", &tmp)).exists());
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(format!("{}.bak", &tmp));
     }
 
     #[test]
     fn test_autosave() {
         let p = test_project();
-        let tmp = "/tmp/aicut_autosave.json";
-        let backup = autosave(&p, tmp).expect("autosave");
+        let tmp = tmp_path("aicut_autosave.json");
+        let backup = autosave(&p, &tmp).expect("autosave");
         assert!(backup.contains(".aicut"));
-        let _ = fs::remove_dir_all(Path::new(tmp).parent().unwrap().join(".aicut"));
+        let _ = fs::remove_dir_all(Path::new(&tmp).parent().unwrap().join(".aicut"));
     }
 }

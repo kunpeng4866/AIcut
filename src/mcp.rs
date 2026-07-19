@@ -7,8 +7,8 @@
 //!   - validate_project: 验证工程合法性
 //!
 //! 使用方式：
-//!   aicut-engine mcp             启动 MCP Server (stdio)
-//!   aicut-engine mcp-tool <name> <json_args>  单次工具调用
+//!   aicut-engine mcp-tools              列出可用工具
+//!   aicut-engine mcp-tool <name> <args>  单次工具调用
 
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +50,8 @@ pub struct ToolDef {
 pub fn handle_tool_call(request: &ToolRequest) -> ToolResponse {
     match request.name.as_str() {
         "render_project" => {
-            let project = match serde_json::to_string(&request.arguments) {
+            let project_json = &request.arguments["project"];
+            let project = match serde_json::to_string(project_json) {
                 Ok(s) => s,
                 Err(e) => return ToolResponse { success: false, result: None, error: Some(e.to_string()) },
             };
@@ -79,7 +80,7 @@ pub fn handle_tool_call(request: &ToolRequest) -> ToolResponse {
             error: None,
         },
         "validate_project" => {
-            let project: crate::project::Project = match serde_json::from_value(request.arguments.clone()) {
+            let project: crate::project::Project = match serde_json::from_value(request.arguments["project"].clone()) {
                 Ok(p) => p,
                 Err(e) => return ToolResponse { success: false, result: None, error: Some(e.to_string()) },
             };

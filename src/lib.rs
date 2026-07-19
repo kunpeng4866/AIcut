@@ -4,9 +4,9 @@
 //!   默认（pure Rust）：`pub fn render(&str) -> Result<String, AppError>`
 //!   N-API（`--features napi`）：额外导出 `#[napi]` 绑定供 Node.js 调用
 //!
-//! 公共 API 项允许 dead_code（供外部消费者使用）。
+//! 公共 API；部分项为外部消费者预留。
 
-#![allow(dead_code)]
+#![allow(dead_code)] // 仅允许未使用的公共 API 项
 
 pub mod ffmpeg;
 pub mod project;

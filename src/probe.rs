@@ -66,9 +66,9 @@ fn parse_ffprobe_json(path: &str, json: &str) -> Result<MediaInfo, String> {
                     if let Some(fps_str) = s["r_frame_rate"].as_str() {
                         info.fps = parse_fraction(fps_str).unwrap_or(30.0);
                     }
-                    if let Some(dur) = s["duration"].as_str().or(s["duration"].as_f64().map(|_| "")) {
-                        info.duration = s["duration"].as_f64().unwrap_or(0.0);
-                    }
+                    info.duration = s["duration"].as_f64()
+                        .or_else(|| s["duration"].as_str().and_then(|v| v.parse().ok()))
+                        .unwrap_or(0.0);
                 }
                 "audio" => {
                     if info.media_type == "video" { continue; } // 已有视频流
