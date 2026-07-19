@@ -11,7 +11,10 @@
 pub mod ffmpeg;
 pub mod project;
 mod types;
+mod keyframe;
 mod filters;
+mod preset;
+mod graph;
 
 use thiserror::Error;
 
@@ -33,17 +36,17 @@ pub enum AppError {
 
 /// 主入口：解析工程 JSON → 返回 FFmpeg 命令行字符串
 pub fn render(project_json: &str) -> Result<String, AppError> {
-    filters::render_project_json(project_json).map_err(|e| AppError::Render(e.to_string()))
+    graph::render_project_json(project_json).map_err(|e| AppError::Render(e.to_string()))
 }
 
 /// 返回可用滤镜预置名列表
 pub fn get_preset_list() -> Vec<String> {
-    filters::get_preset_list()
+    graph::get_preset_list()
 }
 
 /// 版本查询
 pub fn get_version() -> String {
-    filters::engine_version()
+    graph::engine_version()
 }
 
 // ════════════════════ N-API 绑定（条件编译） ════════════════════
