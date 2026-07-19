@@ -1,0 +1,23 @@
+{
+  "name": "@aicut/engine",
+  "version": "0.1.0",
+  "description": "AIcut video editing engine TypeScript bridge (N-API preferred, CLI fallback)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist"
+  },
+  "optionalDependencies": {
+    "@aicut/engine-native": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  }
+}

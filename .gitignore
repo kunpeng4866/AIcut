@@ -1,0 +1,12 @@
+/target/
+/node_modules/
+/dist/
+*.node
+*.pdb
+.DS_Store
+Thumbs.db
+*.jpg
+*.png
+!docs/*.png
+.env
+.env.local
