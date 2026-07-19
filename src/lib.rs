@@ -10,6 +10,10 @@
 
 pub mod ffmpeg;
 pub mod project;
+pub mod probe;
+pub mod project_io;
+pub mod subtitle;
+pub mod mcp;
 mod types;
 mod keyframe;
 mod filters;
