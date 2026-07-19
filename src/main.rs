@@ -73,6 +73,9 @@ fn main() {
         "version" => {
             println!("{}", aicut_engine::get_version());
         }
+        "mcp" => {
+            aicut_engine::mcp::run_stdio_server();
+        }
         "mcp-tools" => {
             println!("{}", serde_json::to_string_pretty(&aicut_engine::mcp::list_tools()).unwrap());
         }
@@ -86,7 +89,7 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&resp).unwrap());
         }
         other => {
-            eprintln!("未知子命令: {} (可用: render, probe, new, validate, presets, version, mcp-tools, mcp-tool)", other);
+            eprintln!("未知子命令: {} (可用: render, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool)", other);
             process::exit(2);
         }
     }

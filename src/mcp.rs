@@ -95,6 +95,70 @@ pub fn handle_tool_call(request: &ToolRequest) -> ToolResponse {
     }
 }
 
+// ════════════════════ MCP JSON-RPC Server (stdio) ════════════════════
+
+use std::io::{BufRead, Write};
+
+/// 启动 MCP JSON-RPC stdio server，阻塞运行直到 stdin 关闭
+pub fn run_stdio_server() {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let reader = std::io::BufReader::new(stdin.lock());
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.trim().is_empty() { continue; }
+
+        let response = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(req) => handle_jsonrpc(&req),
+            Err(e) => serde_json::json!({
+                "jsonrpc": "2.0", "error": {"code": -32700, "message": format!("Parse error: {}", e)}, "id": null
+            }),
+        };
+
+        let _ = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap_or_default());
+        let _ = stdout.flush();
+    }
+}
+
+fn handle_jsonrpc(req: &serde_json::Value) -> serde_json::Value {
+    let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let method = req["method"].as_str().unwrap_or("");
+
+    match method {
+        "initialize" => serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "aicut-engine", "version": env!("CARGO_PKG_VERSION")},
+                "capabilities": {"tools": {}}
+            }
+        }),
+        "tools/list" => {
+            let tools: Vec<serde_json::Value> = list_tools().iter().map(|t| serde_json::json!({
+                "name": t.name, "description": t.description,
+                "inputSchema": serde_json::from_str::<serde_json::Value>(t.input_schema).unwrap_or_default()
+            })).collect();
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"tools": tools}})
+        }
+        "tools/call" => {
+            let tool_name = req["params"]["name"].as_str().unwrap_or("");
+            let args = req["params"]["arguments"].clone();
+            let resp = handle_tool_call(&ToolRequest { name: tool_name.to_string(), arguments: args });
+            let result = serde_json::json!({"content": [{"type": "text", "text": serde_json::to_string(&resp).unwrap_or_default()}]});
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+        }
+        "notifications/initialized" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+        _ => serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "error": {"code": -32601, "message": format!("Method not found: {}", method)}
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

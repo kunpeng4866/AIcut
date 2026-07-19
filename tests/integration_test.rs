@@ -665,3 +665,161 @@ fn test_render_all_filters_combined() {
     assert!(cmd.contains("chromakey="));
     assert!(cmd.contains("curves="));
 }
+
+// ════════════════════ 第二轮审计扩展测试 ════════════════════
+
+#[test]
+fn test_render_hflip_vflip_combo() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"flip","params":{"horizontal":1.0,"vertical":1.0},"enabled":true}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("双轴翻转不应 panic");
+    assert!(cmd.contains("hflip,vflip"), "双轴翻转应含 hflip,vflip，实际: {}", cmd);
+}
+
+#[test]
+fn test_render_crop_filter() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"crop","params":{"left":0.1,"top":0.1,"right":0.9,"bottom":0.9},"enabled":true}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("裁剪不应 panic");
+    assert!(cmd.contains("crop="), "应含 crop 滤镜");
+}
+
+#[test]
+fn test_render_equalizer_filter() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30,"sample_rate":48000},"assets":[{"id":"a1","type":"audio","path":"bgm.mp3","duration":5.0}],"tracks":[{"id":"at1","type":"audio","order":0,"clips":[{"id":"ac1","assetId":"a1","src_range":{"start":0.0,"end":5.0},"timelineIn":0.0,"timelineOut":5.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"equalizer","params":{"frequency":1000.0,"width":200.0,"gain":3.0},"enabled":true}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("均衡器不应 panic");
+    assert!(cmd.contains("equalizer="), "应含 equalizer 滤镜");
+}
+
+#[test]
+fn test_render_circular_mask() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[{"shape":"circle","params":{"cx":0.5,"cy":0.5,"radius":0.3},"invert":false,"feather":0.1}],"filters":[],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("圆形蒙版不应 panic");
+    assert!(cmd.contains("geq="), "圆形蒙版应含 geq 表达式");
+}
+
+#[test]
+fn test_render_negative_timeline_clip() {
+    // 负时间线应不 panic
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"v.mp4","duration":5.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"t1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":-1.0,"end":5.0},"timelineIn":-1.0,"timelineOut":5.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("负时间不应 panic");
+    assert!(!cmd.is_empty());
+}
+
+#[test]
+fn test_render_two_video_tracks_pip() {
+    // 两条独立视频轨道: 第1轨全屏 + 第2轨画中画
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"bg","type":"video","path":"bg.mp4","duration":10.0,"width":1920,"height":1080,"codec":"h264"},{"id":"pip","type":"video","path":"pip.mp4","duration":5.0,"width":640,"height":480,"codec":"h264"}],"tracks":[{"id":"t1","type":"video","order":0,"clips":[{"id":"c1","assetId":"bg","src_range":{"start":0.0,"end":10.0},"timelineIn":0.0,"timelineOut":10.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[],"keyframes":{}}]},{"id":"t2","type":"video","order":1,"clips":[{"id":"c2","assetId":"pip","src_range":{"start":0.0,"end":5.0},"timelineIn":2.0,"timelineOut":7.0,"transform":{"x":0.825,"y":0.175,"scale_x":0.25,"scale_y":0.25},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("双轨PIP不应 panic");
+    let overlays = cmd.matches("overlay=").count();
+    assert!(overlays >= 2, "双轨应有≥2 overlay，实际: {}", overlays);
+}
+
+#[test]
+fn test_mcp_tool_render_roundtrip() {
+    let req = aicut_engine::mcp::ToolRequest {
+        name: "render_project".into(),
+        arguments: serde_json::json!({"project": {"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[],"tracks":[]}}),
+    };
+    let resp = aicut_engine::mcp::handle_tool_call(&req);
+    assert!(resp.success, "MCP render 应成功，错误: {:?}", resp.error);
+    let cmd = resp.result.unwrap()["command"].as_str().unwrap().to_string();
+    assert!(cmd.contains("ffmpeg"), "MCP render 应返回 ffmpeg 命令");
+}
+
+#[test]
+fn test_mcp_tool_probe_missing_file() {
+    let req = aicut_engine::mcp::ToolRequest {
+        name: "probe_media".into(),
+        arguments: serde_json::json!({"path": "/nonexistent/file.mp4"}),
+    };
+    let resp = aicut_engine::mcp::handle_tool_call(&req);
+    // ffprobe 执行失败应返回 success=false
+    assert!(!resp.success || resp.error.is_some(), "不存在的文件应返回错误");
+}
+
+#[test]
+fn test_cli_new_default_resolution() {
+    // 验证 new 命令使用默认分辨率
+    let project = aicut_engine::project::Project {
+        version: "1.0".into(),
+        canvas: aicut_engine::project::CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+        assets: vec![], tracks: vec![],
+    };
+    let path = std::env::temp_dir().join("aicut_cli_new_test.json");
+    aicut_engine::project_io::save(&project, &path.to_string_lossy()).expect("save");
+    let loaded = aicut_engine::project_io::load(&path.to_string_lossy()).expect("load");
+    assert_eq!(loaded.canvas.width, 1920);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_subtitle_parse_and_render() {
+    let srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n\n";
+    let track = aicut_engine::subtitle::parse_srt(srt);
+    assert_eq!(track.items.len(), 1);
+    let filters = aicut_engine::subtitle::build_drawtext_filters(&track, 1920, 1080);
+    assert!(filters[0].contains("drawtext="));
+    assert!(filters[0].contains("Hello"));
+}
+
+#[test]
+fn test_validate_negative_duration() {
+    let mut p = aicut_engine::project::Project {
+        version: "1.0".into(),
+        canvas: aicut_engine::project::CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+        assets: vec![aicut_engine::project::Asset {
+            id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(),
+            duration: -5.0, width: 1920, height: 1080, codec: "h264".into(),
+        }],
+        tracks: vec![],
+    };
+    let errs = p.validate();
+    assert!(!errs.is_empty());
+    assert!(errs.iter().any(|e| e.contains("时长为负")));
+}
+
+#[test]
+fn test_probe_default_info() {
+    let info = aicut_engine::probe::MediaInfo::default();
+    assert_eq!(info.media_type, "video");
+    assert_eq!(info.width, 1920);
+}
+
+#[test]
+fn test_project_io_roundtrip_with_tracks() {
+    let p = aicut_engine::project::Project {
+        version: "1.0".into(),
+        canvas: aicut_engine::project::CanvasConfig { width: 1280, height: 720, fps: 24, sample_rate: 44100 },
+        assets: vec![aicut_engine::project::Asset {
+            id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(),
+            duration: 5.0, width: 1920, height: 1080, codec: "h264".into(),
+        }],
+        tracks: vec![aicut_engine::project::Track {
+            id: "t1".into(), track_type: "video".into(), order: 0,
+            clips: vec![aicut_engine::project::Clip {
+                id: "c1".into(), asset_id: "a1".into(),
+                src_range: aicut_engine::project::Range { start: 0.0, end: 5.0 },
+                timeline_in: 0.0, timeline_out: 5.0,
+                transform: aicut_engine::project::Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                volume: 1.0, speed: 1.0,
+                effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+            }],
+        }],
+    };
+    let tmp = std::env::temp_dir().join("aicut_roundtrip_tracks.json");
+    aicut_engine::project_io::save(&p, &tmp.to_string_lossy()).expect("save");
+    let loaded = aicut_engine::project_io::load(&tmp.to_string_lossy()).expect("load");
+    assert_eq!(loaded.tracks.len(), 1);
+    assert_eq!(loaded.tracks[0].clips.len(), 1);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn test_mcp_tools_list_has_four() {
+    let tools = aicut_engine::mcp::list_tools();
+    assert_eq!(tools.len(), 4, "MCP 应有 4 个工具");
+    let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+    assert!(names.contains(&"render_project"));
+    assert!(names.contains(&"probe_media"));
+    assert!(names.contains(&"list_presets"));
+    assert!(names.contains(&"validate_project"));
+}

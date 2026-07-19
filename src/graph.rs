@@ -225,6 +225,12 @@ pub fn render_project_json(json: &str) -> anyhow::Result<String> {
     Ok(cmd.to_command_string())
 }
 
+/// 解析工程 JSON → 构建 RenderCommand（含缓存）
+pub fn render_project(json: &str) -> anyhow::Result<ffmpeg::RenderCommand> {
+    let project: Project = serde_json::from_str(json).map_err(|e| anyhow::anyhow!("工程 JSON 解析失败: {}", e))?;
+    Ok(build_render_command(&project))
+}
+
 /// 可用滤镜预置名列表
 pub fn get_preset_list() -> Vec<String> { crate::preset::preset_names() }
 
