@@ -1,6 +1,6 @@
 // AIcut Desktop — Main App
-import React, { useState, useCallback, useEffect } from 'react';
-import type { ProjectConfig, AssetConfig, TrackConfig, ClipConfig, MediaInfo } from './types';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import type { ProjectConfig, AssetConfig, ClipConfig } from './types';
 
 const DEFAULT_PROJECT: ProjectConfig = {
   version: '1.0',
@@ -8,26 +8,64 @@ const DEFAULT_PROJECT: ProjectConfig = {
   assets: [], tracks: [],
 };
 
+let assetCounter = 0;
+
 export default function App() {
   const [project, setProject] = useState<ProjectConfig>(DEFAULT_PROJECT);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [renderCmd, setRenderCmd] = useState('');
   const [presets, setPresets] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { window.aicut.getPresets().then(setPresets).catch(() => {}); }, []);
 
-  const handleImport = useCallback(async () => {
-    const files = await window.aicut.openFiles();
-    if (!files.length) return;
+  const handleImport = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFilesSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList?.length) return;
+
+    // Try Electron dialog first
+    if (window.aicut.openFiles) {
+      const paths = await window.aicut.openFiles();
+      if (paths?.length) {
+        const newAssets: AssetConfig[] = [];
+        for (const f of paths) {
+          try {
+            const result = await window.aicut.probe(f);
+            newAssets.push({
+              id: `a${++assetCounter}`, type: 'video', path: f,
+              duration: result.info?.duration || 5,
+              width: result.info?.width || 1920, height: result.info?.height || 1080,
+              codec: result.info?.codec || 'h264',
+            });
+          } catch {
+            newAssets.push({
+              id: `a${++assetCounter}`, type: 'video', path: f,
+              duration: 5, width: 1920, height: 1080, codec: 'h264',
+            });
+          }
+        }
+        setProject(p => ({
+          ...p,
+          assets: [...p.assets, ...newAssets],
+          tracks: p.tracks.length ? p.tracks : [{ id: 'main', type: 'video', order: 0, clips: [] }],
+        }));
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+    }
+
+    // Browser mode: use File API
     const newAssets: AssetConfig[] = [];
-    for (const f of files) {
-      const result = await window.aicut.probe(f);
-      const name = f.replace(/^.*[\\/]/, '');
+    for (let i = 0; i < fileList.length; i++) {
+      const file = fileList[i];
+      const path = URL.createObjectURL(file);
       newAssets.push({
-        id: `a${Date.now()}_${newAssets.length}`, type: 'video', path: f,
-        duration: result.info?.duration || 5,
-        width: result.info?.width || 1920, height: result.info?.height || 1080,
-        codec: result.info?.codec || 'h264',
+        id: `a${++assetCounter}`, type: file.type.startsWith('audio') ? 'audio' : 'video',
+        path, duration: 5, width: 1920, height: 1080, codec: 'h264',
       });
     }
     setProject(p => ({
@@ -35,6 +73,7 @@ export default function App() {
       assets: [...p.assets, ...newAssets],
       tracks: p.tracks.length ? p.tracks : [{ id: 'main', type: 'video', order: 0, clips: [] }],
     }));
+    if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
   const handleAddToTimeline = useCallback((asset: AssetConfig) => {
@@ -68,6 +107,9 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui' }}>
+      <input type="file" ref={fileInputRef} onChange={handleFilesSelected}
+             multiple accept="video/*,audio/*,image/*" style={{ display: 'none' }} />
+
       {/* Sidebar */}
       <aside style={{ width: 280, background: '#1a1a2e', color: '#eee', padding: 12, overflowY: 'auto' }}>
         <h2 style={{ fontSize: 16, margin: '0 0 12px' }}>AIcut</h2>
@@ -77,7 +119,7 @@ export default function App() {
           {project.assets.map(a => (
             <div key={a.id} onClick={() => handleAddToTimeline(a)}
                  style={{ padding: 6, margin: '4px 0', background: '#16213e', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
-              {a.path.replace(/^.*[\\/]/, '')} ({a.width}x{a.height})
+              {a.path.length > 40 ? '📹 ' + a.path.substring(a.path.lastIndexOf('/') + 1 || a.path.lastIndexOf('\\') + 1 || 0) : a.path}
             </div>
           ))}
         </div>
@@ -94,7 +136,6 @@ export default function App() {
 
       {/* Main */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        {/* Preview */}
         <div style={{ flex: 1, background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
           <span style={{ color: '#555' }}>
             {renderCmd ? '✅ 命令已生成，在终端执行' : '预览区域 — 导入素材开始编辑'}
@@ -117,7 +158,7 @@ export default function App() {
                        display: 'flex', alignItems: 'center', justifyContent: 'center',
                        color: '#fff', flexShrink: 0,
                      }}>
-                  {asset?.path.replace(/^.*[\\/]/, '') || c.id}
+                  {asset?.path ? asset.path.substring(Math.max(asset.path.lastIndexOf('/'), asset.path.lastIndexOf('\\')) + 1).substring(0, 15) : c.id}
                 </div>
               );
             })}

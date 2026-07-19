@@ -99,7 +99,17 @@ function json(res, code, data) {
   res.end(JSON.stringify(data));
 }
 
-server.listen(PORT, () => {
-  console.log(`AIcut GUI: http://localhost:${PORT}`);
-  console.log(`Engine: ${ENGINE}`);
-});
+function start(port) {
+  server.listen(port, () => {
+    console.log(`AIcut GUI: http://localhost:${port}`);
+    console.log(`Engine: ${ENGINE}`);
+  });
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      console.log(`Port ${port} in use, trying ${port + 1}...`);
+      server.close();
+      start(port + 1);
+    }
+  });
+}
+start(PORT);
