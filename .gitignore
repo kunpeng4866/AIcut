@@ -1,6 +1,9 @@
 /target/
 /node_modules/
+**/node_modules/
 /dist/
+/gui/dist/
+/gui/dist-electron/
 *.node
 *.pdb
 .DS_Store
