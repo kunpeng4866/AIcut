@@ -22,14 +22,21 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "1"
 
-# ===== N-API 绑定（网络可用时取消注释并 cargo build --features napi）=====
-# [features]
-# napi = ["dep:napi", "dep:napi-derive"]
-# napi = { version = "2", default-features = false, features = ["napi4"], optional = true }
-# napi-derive = { version = "2", optional = true }
-# [build-dependencies]
-# napi-build = "2"
+[features]
+napi = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
 
+[dependencies.napi]
+version = "2"
+default-features = false
+features = ["napi4"]
+optional = true
+
+[dependencies.napi-derive]
+version = "2"
+optional = true
+
+[build-dependencies]
+napi-build = { version = "2", optional = true }
 
 [profile.release]
 lto = true
