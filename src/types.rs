@@ -1,0 +1,72 @@
+//! src/types.rs — 共享数据类型
+//!
+//! 从 project.rs 和 filters.rs 中提取，消除循环依赖。
+//! Effect / Mask / FilterInstance / KeyframeTrack 被两边引用，
+//! 提取到此处作为单一真相源。
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+fn default_enabled() -> bool { true }
+
+/// 片段级特效
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Effect {
+    pub kind: String,
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// 蒙版（片段透明度形状）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mask {
+    pub shape: String,
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+    #[serde(default)]
+    pub invert: bool,
+    #[serde(default)]
+    pub feather: f64,
+}
+
+/// 滤镜实例（来自 Clip.filters）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterInstance {
+    pub kind: String,
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// 单个关键帧
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Keyframe {
+    pub time: f64,
+    pub value: f64,
+    #[serde(default)]
+    pub easing: Easing,
+}
+
+/// 缓动函数
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum Easing {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Bezier(f64, f64, f64, f64),
+}
+
+impl Default for Easing {
+    fn default() -> Self { Easing::Linear }
+}
+
+/// 某属性的关键帧轨道
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeyframeTrack {
+    #[serde(default)]
+    pub keyframes: Vec<Keyframe>,
+}

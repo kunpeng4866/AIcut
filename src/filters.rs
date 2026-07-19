@@ -5,31 +5,15 @@
 
 use crate::ffmpeg;
 use crate::project::{Clip, Project, Track};
+use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ════════════════════ 关键帧系统 ════════════════════
 
-/// 缓动函数。命名变体内部映射到贝塞尔控制点。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum Easing {
-    Linear,
-    EaseIn,
-    EaseOut,
-    EaseInOut,
-    /// 自定义三次贝塞尔：控制点 (x1, y1, x2, y2)
-    Bezier(f64, f64, f64, f64),
-}
-
-impl Default for Easing {
-    fn default() -> Self {
-        Easing::Linear
-    }
-}
-
 impl Easing {
     /// 将命名缓动映射为贝塞尔控制点；Bezier 直接返回自身
-    fn as_bezier(&self) -> (f64, f64, f64, f64) {
+    pub fn as_bezier(&self) -> (f64, f64, f64, f64) {
         match self {
             Easing::Linear => (0.0, 0.0, 1.0, 1.0),
             Easing::EaseIn => (0.42, 0.0, 1.0, 1.0),
@@ -71,22 +55,6 @@ fn cubic_bezier(p1x: f64, p1y: f64, p2x: f64, p2y: f64, x: f64) -> f64 {
 fn apply_easing(e: Easing, p: f64) -> f64 {
     let (x1, y1, x2, y2) = e.as_bezier();
     cubic_bezier(x1, y1, x2, y2, p.clamp(0.0, 1.0))
-}
-
-/// 单个关键帧
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Keyframe {
-    pub time: f64, // 秒
-    pub value: f64,
-    #[serde(default)]
-    pub easing: Easing,
-}
-
-/// 某属性的关键帧轨道（按时间有序）
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct KeyframeTrack {
-    #[serde(default)]
-    pub keyframes: Vec<Keyframe>,
 }
 
 impl KeyframeTrack {
@@ -335,43 +303,7 @@ pub fn lookup(kind: &str) -> Option<&'static FilterDef> {
     registry().iter().find(|d| d.kind == kind)
 }
 
-// ════════════════════ 片段效果/蒙版/滤镜实例 ════════════════════
-
-fn default_enabled() -> bool {
-    true
-}
-
-/// 片段级特效（与滤镜类似，作用于 Effect Stack）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Effect {
-    pub kind: String,
-    #[serde(default)]
-    pub params: HashMap<String, f64>,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-/// 蒙版（片段透明度形状）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Mask {
-    pub shape: String,
-    #[serde(default)]
-    pub params: HashMap<String, f64>,
-    #[serde(default)]
-    pub invert: bool,
-    #[serde(default)]
-    pub feather: f64,
-}
-
-/// 滤镜实例（来自 Clip.filters）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FilterInstance {
-    pub kind: String,
-    #[serde(default)]
-    pub params: HashMap<String, f64>,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
+// ════════════════════ 浮点工具 ════════════════════
 
 /// 浮点格式化：去掉多余尾零，空结果回退 "0"
 fn fmt(v: f64) -> String {

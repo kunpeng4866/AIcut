@@ -123,13 +123,13 @@ pub struct Clip {
     #[serde(default)]
     pub speed_curve: Vec<SpeedPoint>,
     #[serde(default)]
-    pub effects: Vec<crate::filters::Effect>,
+    pub effects: Vec<crate::types::Effect>,
     #[serde(default)]
-    pub masks: Vec<crate::filters::Mask>,
+    pub masks: Vec<crate::types::Mask>,
     #[serde(default)]
-    pub filters: Vec<crate::filters::FilterInstance>,
+    pub filters: Vec<crate::types::FilterInstance>,
     #[serde(default)]
-    pub keyframes: HashMap<String, crate::filters::KeyframeTrack>,
+    pub keyframes: HashMap<String, crate::types::KeyframeTrack>,
 }
 
 // ---- 默认辅助函数 ----

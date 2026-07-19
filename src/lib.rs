@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod ffmpeg;
+mod types;
 mod filters;
 mod project;
 
