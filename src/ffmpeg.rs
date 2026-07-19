@@ -233,6 +233,46 @@ pub fn degrade_filter(name: &str) -> Option<String> {
     }
 }
 
+// ════════════════════ 4K 代理生成 ════════════════════
+
+/// 代理质量预设
+pub const PROXY_HEIGHT: u32 = 720;
+pub const PROXY_CRF: u32 = 23;
+
+/// 判断素材是否需要生成代理（分辨率 > 1080p 的高清素材）
+pub fn needs_proxy(width: u32, height: u32) -> bool {
+    height > 1080 || width > 1920
+}
+
+/// 生成 720p 代理文件的 ffmpeg 命令。
+/// 输入：原始素材路径 + 代理输出路径
+/// 返回：可直接执行的 `std::process::Command`
+pub fn build_proxy_command(input: &str, output: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.args([
+        "-y", "-i", input,
+        "-vf", &format!("scale=-2:{}", PROXY_HEIGHT),
+        "-c:v", "libx264",
+        "-crf", &PROXY_CRF.to_string(),
+        "-preset", "fast",
+        "-an",  // 代理文件不需音频
+        output,
+    ]);
+    cmd
+}
+
+/// 生成代理并返回输出。成功返回 Ok，失败返回 stderr
+pub fn generate_proxy(input: &str, output: &str) -> Result<(), String> {
+    let out = build_proxy_command(input, output)
+        .output()
+        .map_err(|e| format!("代理生成失败: {}", e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
 // ════════════════════ 单元测试 ════════════════════
 
 #[cfg(test)]
@@ -298,6 +338,22 @@ mod tests {
         let s = cmd.to_command_string();
         assert!(s.starts_with("ffmpeg"));
         assert!(s.contains("output.mp4"));
+    }
+
+    #[test]
+    fn test_needs_proxy() {
+        assert!(needs_proxy(3840, 2160));  // 4K → need proxy
+        assert!(!needs_proxy(1920, 1080)); // 1080p → no proxy
+        assert!(!needs_proxy(1280, 720));  // 720p → no proxy
+    }
+
+    #[test]
+    fn test_build_proxy_command() {
+        let cmd = build_proxy_command("input.mp4", "proxy.mp4");
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(args.contains(&"-vf".to_string()));
+        assert!(args.iter().any(|a| a.contains("720")));
+        assert!(args.contains(&"proxy.mp4".to_string()));
     }
 }
 
