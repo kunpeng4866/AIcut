@@ -9,9 +9,9 @@
 #![allow(dead_code)]
 
 pub mod ffmpeg;
+pub mod project;
 mod types;
 mod filters;
-mod project;
 
 use thiserror::Error;
 

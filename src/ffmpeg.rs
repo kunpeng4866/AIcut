@@ -273,6 +273,33 @@ pub fn generate_proxy(input: &str, output: &str) -> Result<(), String> {
     }
 }
 
+/// 批量为工程中所有高分辨率素材生成代理。
+/// 返回 (成功数, 失败列表)
+pub fn generate_proxies_batch(project: &crate::project::Project, proxy_dir: &str) -> (usize, Vec<String>) {
+    let mut ok = 0usize;
+    let mut fails = Vec::new();
+    for asset in &project.assets {
+        if !needs_proxy(asset.width, asset.height) || asset.asset_type != "video" {
+            continue;
+        }
+        // 代理文件名：原文件名_stem + _proxy + 原扩展名
+        let stem = std::path::Path::new(&asset.path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| asset.id.clone());
+        let ext = std::path::Path::new(&asset.path)
+            .extension()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mp4".to_string());
+        let proxy_path = format!("{}/{}_proxy.{}", proxy_dir, stem, ext);
+        match generate_proxy(&asset.path, &proxy_path) {
+            Ok(()) => ok += 1,
+            Err(e) => fails.push(format!("{}: {}", asset.id, e)),
+        }
+    }
+    (ok, fails)
+}
+
 // ════════════════════ 单元测试 ════════════════════
 
 #[cfg(test)]

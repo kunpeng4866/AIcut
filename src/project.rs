@@ -162,6 +162,59 @@ impl Project {
     pub fn asset_by_id(&self, id: &str) -> Option<&Asset> {
         self.assets.iter().find(|a| a.id == id)
     }
+
+    /// 验证工程合法性，返回错误列表
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // 画布分辨率
+        if self.canvas.width == 0 || self.canvas.height == 0 {
+            errors.push(format!("画布分辨率无效: {}x{}", self.canvas.width, self.canvas.height));
+        }
+        if self.canvas.width > 7680 || self.canvas.height > 4320 {
+            errors.push(format!("画布分辨率超限 (max 8K): {}x{}", self.canvas.width, self.canvas.height));
+        }
+        if self.canvas.fps == 0 || self.canvas.fps > 240 {
+            errors.push(format!("帧率无效: {}", self.canvas.fps));
+        }
+
+        // 素材验证
+        let mut asset_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for a in &self.assets {
+            if a.id.is_empty() {
+                errors.push("素材 id 为空".into());
+            }
+            if !asset_ids.insert(&a.id) {
+                errors.push(format!("重复的素材 id: {}", a.id));
+            }
+            if a.duration < 0.0 {
+                errors.push(format!("素材 {} 时长为负: {}", a.id, a.duration));
+            }
+        }
+
+        // 轨道 + 片段验证
+        let mut track_orders: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for t in &self.tracks {
+            if !track_orders.insert(t.order) {
+                errors.push(format!("重复的轨道 order: {}", t.order));
+            }
+            for c in &t.clips {
+                if c.timeline_in < 0.0 {
+                    errors.push(format!("片段 {} timelineIn 为负: {}", c.id, c.timeline_in));
+                }
+                if c.timeline_out < c.timeline_in {
+                    errors.push(format!("片段 {} timelineOut < timelineIn", c.id));
+                }
+                if !c.asset_id.is_empty() && !asset_ids.contains(c.asset_id.as_str()) {
+                    errors.push(format!("片段 {} 引用了不存在的素材: {}", c.id, c.asset_id));
+                }
+                if c.transform.scale_x < 0.001 || c.transform.scale_y < 0.001 {
+                    errors.push(format!("片段 {} 缩放比例过小", c.id));
+                }
+            }
+        }
+        errors
+    }
 }
 
 /// 根据宽高比名 + 基准高度，查 ASPECT_PRESETS 计算画布尺寸
@@ -253,6 +306,52 @@ mod tests {
         assert!(project.asset_by_id("a1").is_some());
         assert!(project.asset_by_id("a2").is_some());
         assert!(project.asset_by_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_validate_ok() {
+        let p = Project {
+            version: "1.0".into(),
+            canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+            assets: vec![Asset { id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(), duration: 5.0, width: 1920, height: 1080, codec: "h264".into() }],
+            tracks: vec![],
+        };
+        assert!(p.validate().is_empty());
+    }
+
+    #[test]
+    fn test_validate_bad_resolution() {
+        let mut p = Project {
+            version: "1.0".into(),
+            canvas: CanvasConfig { width: 0, height: 0, fps: 30, sample_rate: 48000 },
+            assets: vec![], tracks: vec![],
+        };
+        assert!(!p.validate().is_empty());
+        p.canvas.width = 10000;
+        assert!(!p.validate().is_empty());
+    }
+
+    #[test]
+    fn test_validate_missing_asset() {
+        let p = Project {
+            version: "1.0".into(),
+            canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+            assets: vec![],
+            tracks: vec![Track {
+                id: "t1".into(), track_type: "video".into(), order: 0,
+                clips: vec![Clip {
+                    id: "c1".into(), asset_id: "missing".into(),
+                    src_range: Range { start: 0.0, end: 5.0 },
+                    timeline_in: 0.0, timeline_out: 5.0,
+                    transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                    volume: 1.0, speed: 1.0,
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+                }],
+            }],
+        };
+        let errs = p.validate();
+        assert!(!errs.is_empty());
+        assert!(errs.iter().any(|e| e.contains("missing")), "应报告缺失素材");
     }
 
     #[test]

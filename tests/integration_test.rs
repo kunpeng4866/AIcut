@@ -534,3 +534,134 @@ fn test_render_large_project() {
     let filter_nodes = cmd.matches(';').count();
     assert!(filter_nodes >= 30, "80 clips 应有 ≥30 个滤镜节点，实际: {}", filter_nodes);
 }
+
+#[test]
+fn test_render_curves() {
+    let json = r#"{
+        "version": "1.0",
+        "canvas": { "width": 1920, "height": 1080, "fps": 30 },
+        "assets": [ { "id": "a1", "type": "video", "path": "in.mp4", "duration": 3.0, "width": 1920, "height": 1080, "codec": "h264" } ],
+        "tracks": [ { "id": "v1", "type": "video", "order": 0, "clips": [
+            { "id": "c1", "assetId": "a1", "src_range": { "start": 0.0, "end": 3.0 }, "timelineIn": 0.0, "timelineOut": 3.0,
+              "transform": { "x": 0.5, "y": 0.5, "scale_x": 1.0, "scale_y": 1.0 }, "volume": 1.0, "speed": 1.0,
+              "effects": [], "masks": [], "filters": [ { "kind": "curves", "params": { "master_contrast": 1.2 }, "enabled": true } ], "keyframes": {} }
+        ] } ]
+    }"#;
+    let cmd = render(&json.to_string()).expect("曲线工程不应 panic");
+    assert!(cmd.contains("curves="), "应含 curves 滤镜，实际: {}", cmd);
+}
+
+#[test]
+fn test_render_denoise() {
+    let json = r#"{
+        "version": "1.0",
+        "canvas": { "width": 1920, "height": 1080, "fps": 30, "sample_rate": 48000 },
+        "assets": [ { "id": "a1", "type": "audio", "path": "noisy.mp3", "duration": 5.0 } ],
+        "tracks": [ { "id": "at1", "type": "audio", "order": 0, "clips": [
+            { "id": "ac1", "assetId": "a1", "src_range": { "start": 0.0, "end": 5.0 }, "timelineIn": 0.0, "timelineOut": 5.0,
+              "transform": { "x": 0.5, "y": 0.5, "scale_x": 1.0, "scale_y": 1.0 }, "volume": 1.0, "speed": 1.0,
+              "effects": [], "masks": [], "filters": [ { "kind": "denoise", "params": { "noise_reduction": 15.0 }, "enabled": true } ], "keyframes": {} }
+        ] } ]
+    }"#;
+    let cmd = render(&json.to_string()).expect("降噪工程不应 panic");
+    assert!(cmd.contains("afftdn="), "应含 afftdn 降噪，实际: {}", cmd);
+}
+
+// ════════════════════ 扩展测试（100+） ════════════════════
+
+#[test]
+fn test_render_empty_tracks() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"v.mp4","duration":5.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[]}"#;
+    let cmd = render(&json.to_string()).expect("空轨道不应 panic");
+    assert!(!cmd.is_empty());
+}
+
+#[test]
+fn test_render_duplicate_asset_ids() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"v.mp4","duration":5.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"t1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":5.0},"timelineIn":0.0,"timelineOut":5.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[],"keyframes":{}},{"id":"c2","assetId":"a1","src_range":{"start":0.0,"end":5.0},"timelineIn":5.0,"timelineOut":10.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("重复素材引用不应 panic");
+    assert!(cmd.contains("ffmpeg"));
+}
+
+#[test]
+fn test_render_curves_all_channels() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"curves","params":{"master_contrast":1.0,"red_contrast":0.8,"green_contrast":1.0,"blue_contrast":1.2},"enabled":true}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("全通道曲线不应 panic");
+    assert!(cmd.contains("curves="));
+    assert!(cmd.contains("master="));
+    assert!(cmd.contains("red="));
+    assert!(cmd.contains("blue="));
+}
+
+#[test]
+fn test_render_unknown_filter_kind() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"nonexistent_xyz_123","params":{},"enabled":true}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("未知滤镜不应 panic");
+    assert!(cmd.contains("ffmpeg"));
+}
+
+#[test]
+fn test_render_disabled_filter() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"flip","params":{"horizontal":1.0},"enabled":false}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("禁用滤镜不应 panic");
+    assert!(!cmd.contains("hflip"), "禁用的 flip 不应出现在命令中");
+}
+
+#[test]
+fn test_render_zero_opacity_clip() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0,"rotation":0.0,"opacity":0.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("零透明度不应 panic");
+    assert!(cmd.contains("colorchannelmixer=aa=0"), "零透明度应有 alpha=0");
+}
+
+#[test]
+fn test_render_speed_curve_two_points() {
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":5.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":5.0},"timelineIn":0.0,"timelineOut":5.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"speed_curve":[{"src":0.0,"play":0.0},{"src":5.0,"play":2.5}],"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("曲线变速不应 panic");
+    assert!(cmd.contains("setpts="), "曲线变速应含 setpts");
+    // 2 点 = 单段线性（无嵌套 if），3+ 点 = if(lt(T,... 条件链
+    assert!(cmd.contains("*PTS"), "曲线变速应含 PTS 表达式");
+}
+
+#[test]
+fn test_validate_method() {
+    let project = aicut_engine::project::Project {
+        version: "1.0".into(),
+        canvas: aicut_engine::project::CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+        assets: vec![],
+        tracks: vec![],
+    };
+    assert!(project.validate().is_empty(), "合法工程不应有错误");
+}
+
+#[test]
+fn test_validate_bad_fps() {
+    let project = aicut_engine::project::Project {
+        version: "1.0".into(),
+        canvas: aicut_engine::project::CanvasConfig { width: 1920, height: 1080, fps: 0, sample_rate: 48000 },
+        assets: vec![],
+        tracks: vec![],
+    };
+    let errs = project.validate();
+    assert!(!errs.is_empty());
+    assert!(errs.iter().any(|e| e.contains("帧率")));
+}
+
+#[test]
+fn test_needs_proxy_export() {
+    assert!(aicut_engine::ffmpeg::needs_proxy(3840, 2160));
+    assert!(aicut_engine::ffmpeg::needs_proxy(4096, 2160));
+    assert!(!aicut_engine::ffmpeg::needs_proxy(1920, 1080));
+    assert!(!aicut_engine::ffmpeg::needs_proxy(1280, 720));
+}
+
+#[test]
+fn test_render_all_filters_combined() {
+    // 同一片段：调色+翻转+裁剪+色度抠图 全部启用
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":3.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":3.0},"timelineIn":0.0,"timelineOut":3.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"effects":[],"masks":[],"filters":[{"kind":"coloradjust","params":{"brightness":0.05},"enabled":true},{"kind":"flip","params":{"horizontal":1.0},"enabled":true},{"kind":"chromakey","params":{"similarity":0.1},"enabled":true},{"kind":"curves","params":{"master_contrast":1.1},"enabled":true}],"keyframes":{}}]}]}"#;
+    let cmd = render(&json.to_string()).expect("多滤镜组合不应 panic");
+    assert!(cmd.contains("eq=") || cmd.contains("brightness="));
+    assert!(cmd.contains("hflip"));
+    assert!(cmd.contains("chromakey="));
+    assert!(cmd.contains("curves="));
+}

@@ -138,6 +138,8 @@ pub enum FilterType {
     Lut3d,
     Equalizer,
     ChromaKey,
+    Denoise,
+    Curves,
 }
 
 /// 单个滤镜的静态定义
@@ -290,6 +292,28 @@ fn build_registry() -> Vec<FilterDef> {
                 sp("blend", 0.0, 1.0, 0.0, 0.01, "blend"),
             ],
         },
+        FilterDef {
+            filter_type: Denoise,
+            kind: "denoise",
+            ffmpeg_filter: "afftdn",
+            display: "音频降噪",
+            schema: vec![
+                sp("noise_reduction", 0.0, 100.0, 12.0, 0.1, "nr"),
+                sp("noise_floor", -80.0, 0.0, -50.0, 0.1, "nf"),
+            ],
+        },
+        FilterDef {
+            filter_type: Curves,
+            kind: "curves",
+            ffmpeg_filter: "curves",
+            display: "曲线调色",
+            schema: vec![
+                sp("master_contrast", 0.0, 2.0, 1.0, 0.01, "master"),
+                sp("red_contrast", 0.0, 2.0, 1.0, 0.01, "red"),
+                sp("green_contrast", 0.0, 2.0, 1.0, 0.01, "green"),
+                sp("blue_contrast", 0.0, 2.0, 1.0, 0.01, "blue"),
+            ],
+        },
     ]
 }
 
@@ -338,9 +362,29 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
             };
         }
         "lut3d" => {
-            let _intensity = params.get("intensity").copied().unwrap_or(1.0);
-            // 注：LUT 文件路径需由前端传入，此处使用占位符
-            return Some("lut3d=file=LUT_PATH:interp=tetrahedral".to_string());
+            // LUT 文件路径：优先从 params["file"] (浮点→路径需前端处理)，
+            // 或从环境变量 AICUT_LUT_PATH 读取默认路径
+            let lut_path = std::env::var("AICUT_LUT_PATH")
+                .unwrap_or_else(|_| "lut.cube".to_string());
+            let intensity = params.get("intensity").copied().unwrap_or(1.0);
+            return Some(format!("lut3d=file={}:interp=tetrahedral", lut_path));
+        }
+        "curves" => {
+            // FFmpeg curves 格式: curves=master='0/0 0.5/0.5 1/1':red='...'
+            let master = params.get("master_contrast").copied().unwrap_or(1.0);
+            let red = params.get("red_contrast").copied().unwrap_or(1.0);
+            let green = params.get("green_contrast").copied().unwrap_or(1.0);
+            let blue = params.get("blue_contrast").copied().unwrap_or(1.0);
+            let mid = 0.5 / master.max(0.01);
+            return Some(format!(
+                "curves=master='0/0 {}/{} 1/1':red='0/0 {}/{} 1/1':green='0/0 {}/{} 1/1':blue='0/0 {}/{} 1/1'",
+                fmt(mid), fmt(mid), fmt(mid), fmt(mid), fmt(mid), fmt(mid), fmt(mid), fmt(mid)
+            ));
+        }
+        "denoise" => {
+            let nr = params.get("noise_reduction").copied().unwrap_or(12.0);
+            let nf = params.get("noise_floor").copied().unwrap_or(-50.0);
+            return Some(format!("afftdn=nr={}:nf={}", fmt(nr), fmt(nf)));
         }
         "crop" => {
             // 归一化坐标 → 像素坐标在 build_video_chain 中处理
@@ -826,6 +870,15 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             if (c.speed - 1.0).abs() > 0.001 {
                 let tempo = c.speed.clamp(0.5, 2.0);
                 achain.push_str(&format!(",atempo={}", fmt(tempo)));
+            }
+            // 音频专用滤镜（降噪/均衡器）
+            for f in &c.filters {
+                if !f.enabled { continue; }
+                if let Some(s) = build_filter_spec(&f.kind, &f.params) {
+                    if f.kind == "denoise" || f.kind == "equalizer" {
+                        achain.push_str(&format!(",{}", s));
+                    }
+                }
             }
             achain.push_str(&format!("[{}]", alabel));
             audio_parts.push(achain);
