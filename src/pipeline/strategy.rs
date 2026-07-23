@@ -239,6 +239,8 @@ mod tests {
             filters: Vec::new(),
             keyframes: HashMap::new(),
             speed_curve: Vec::new(),
+            text: None,
+            subtitle: None,
         }
     }
 

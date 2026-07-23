@@ -157,6 +157,12 @@ pub struct Clip {
     pub filters: Vec<crate::types::FilterInstance>,
     #[serde(default)]
     pub keyframes: HashMap<String, crate::types::KeyframeTrack>,
+    /// 前端 TextContent 映射（文字叠加层）
+    #[serde(default)]
+    pub text: Option<crate::subtitle::TextOverlay>,
+    /// 前端 SubtitleContent 映射（字幕叠加层）
+    #[serde(default)]
+    pub subtitle: Option<crate::subtitle::SubtitleOverlay>,
 }
 
 // ---- 默认辅助函数 ----
@@ -303,7 +309,7 @@ mod tests {
                             timeline_in: 0.0, timeline_out: 5.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None,
                         },
                         Clip {
                             id: "c2".into(), asset_id: "a2".into(),
@@ -311,7 +317,7 @@ mod tests {
                             timeline_in: 5.0, timeline_out: 15.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None,
                         },
                     ],
                     ..Default::default()
@@ -374,7 +380,7 @@ mod tests {
                     timeline_in: 0.0, timeline_out: 5.0,
                     transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                     volume: 1.0, speed: 1.0,
-                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None,
                 }],
                 ..Default::default()
             }],

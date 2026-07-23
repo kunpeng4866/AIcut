@@ -3,6 +3,42 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 前端 TextContent 的 Rust 映射（字段用 camelCase 对齐）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextOverlay {
+    pub content: String,
+    #[serde(default)] pub font_family: Option<String>,
+    #[serde(default)] pub font_size: Option<u32>,
+    #[serde(default)] pub font_weight: Option<String>,
+    #[serde(default)] pub color: Option<String>,
+    #[serde(default)] pub stroke_color: Option<String>,
+    #[serde(default)] pub stroke_width: Option<u32>,
+    #[serde(default)] pub text_align: Option<String>,
+    #[serde(default)] pub x: Option<f64>,
+    #[serde(default)] pub y: Option<f64>,
+    #[serde(default)] pub rotation: Option<f64>,
+    #[serde(default)] pub opacity: Option<f64>,
+}
+
+/// 前端 SubtitleContent 的 Rust 映射
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleOverlay {
+    pub items: Vec<SubtitleItemOverride>,
+    #[serde(default)] pub font_family: Option<String>,
+    #[serde(default)] pub font_size: Option<u32>,
+    #[serde(default)] pub color: Option<String>,
+    #[serde(default)] pub position: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleItemOverride {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
 /// 单条字幕
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtitleItem {
@@ -149,6 +185,64 @@ pub fn to_ass(track: &SubtitleTrack) -> String {
     ass
 }
 
+/// 生成单条文字 drawtext 滤镜串（text clip 整段可见）
+pub fn build_text_overlay_filter(
+    text: &TextOverlay,
+    timeline_in: f64,
+    timeline_out: f64,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    if text.content.trim().is_empty() { return None; }
+    let escaped = text.content.replace(':', "\\:").replace('\'', "'\\''");
+    let fontsize = text.font_size.unwrap_or(48);
+    let fontcolor = text.color.clone().unwrap_or_else(|| "white".to_string());
+    // x 定位
+    let x_expr = match text.text_align.as_deref() {
+        Some("left") => "20".to_string(),
+        Some("right") => "(w-text_w-20)".to_string(),
+        _ => "(w-text_w)/2".to_string(), // center 默认
+    };
+    // y 定位：优先用 text.y（归一化 0-1，原点左下角 → 像素），否则垂直居中偏上
+    let y_expr = if let Some(y) = text.y {
+        format!("((1-{})*h - text_h/2)", y)
+    } else {
+        format!("(h - {})/2", fontsize)
+    };
+    let _ = (width, height);
+    Some(format!(
+        "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:enable='between(t,{},{})'",
+        escaped, fontsize, fontcolor, x_expr, y_expr,
+        timeline_in, timeline_out
+    ))
+}
+
+/// 生成字幕 drawtext 滤镜串数组（每条 item 按相对偏移 + clip 起点定位）
+pub fn build_subtitle_overlay_filters(
+    sub: &SubtitleOverlay,
+    timeline_in: f64,
+    width: u32,
+    height: u32,
+) -> Vec<String> {
+    let fontsize = sub.font_size.unwrap_or(48);
+    let fontcolor = sub.color.clone().unwrap_or_else(|| "white".to_string());
+    let y_pos = match sub.position.as_deref() {
+        Some("top") => 40i64,
+        Some("bottom") => (height as i64) - fontsize as i64 - 40,
+        _ => ((height as i64) / 2) - (fontsize as i64) / 2, // center 默认
+    };
+    let _ = width;
+    sub.items.iter().filter(|i| !i.text.trim().is_empty()).map(|item| {
+        let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
+        let abs_start = timeline_in + item.start;
+        let abs_end = timeline_in + item.end;
+        format!(
+            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2:y={}:enable='between(t,{},{})'",
+            escaped, fontsize, fontcolor, y_pos, abs_start, abs_end
+        )
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +272,27 @@ mod tests {
         assert_eq!(filters.len(), 1);
         assert!(filters[0].contains("drawtext="));
         assert!(filters[0].contains("Test"));
+    }
+
+    #[test]
+    fn test_build_text_overlay_filter() {
+        let t = TextOverlay { content: "标题".into(), font_size: Some(60), color: Some("yellow".into()), text_align: Some("center".into()), x: None, y: None, ..Default::default() };
+        let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080).unwrap();
+        assert!(f.contains("drawtext="));
+        assert!(f.contains("标题"));
+        assert!(f.contains("enable='between(t,0,5)'"));
+    }
+
+    #[test]
+    fn test_build_subtitle_overlay_filters() {
+        let s = SubtitleOverlay {
+            items: vec![SubtitleItemOverride { start: 1.0, end: 3.0, text: "你好".into() }],
+            font_size: Some(48), color: Some("white".into()), position: Some("bottom".into()),
+            ..Default::default()
+        };
+        let fs = build_subtitle_overlay_filters(&s, 10.0, 1920, 1080);
+        assert_eq!(fs.len(), 1);
+        assert!(fs[0].contains("你好"));
+        assert!(fs[0].contains("between(t,11,13)"));  // 10 + 1 .. 10 + 3
     }
 }

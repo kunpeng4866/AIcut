@@ -381,6 +381,8 @@ mod tests {
             masks: vec![],
             filters: vec![],
             keyframes: Default::default(),
+            text: None,
+            subtitle: None,
         }
     }
 

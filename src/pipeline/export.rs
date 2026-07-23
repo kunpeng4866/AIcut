@@ -9,6 +9,7 @@ use crate::decoder::{DecoderPool, PrefetchRequest};
 use crate::ffmpeg;
 use crate::pipeline::strategy::*;
 use crate::project::{CanvasConfig, Clip, Project};
+use crate::subtitle;
 use crate::timeline::Timeline;
 use crate::AppError;
 use std::io::Write;
@@ -218,6 +219,34 @@ impl<'a> ExportPipeline<'a> {
             self.config.crf,
             self.config.bitrate_mbps,
         );
+
+        // 收集文字/字幕 drawtext 滤镜
+        let mut text_filters: Vec<String> = Vec::new();
+        let w = self.config.width;
+        let h = self.config.height;
+        for track in &self.project.tracks {
+            if track.visible == false { continue; }  // 隐藏轨不渲染
+            for clip in &track.clips {
+                if let Some(t) = &clip.text {
+                    if let Some(f) = subtitle::build_text_overlay_filter(t, clip.timeline_in, clip.timeline_out, w, h) {
+                        text_filters.push(f);
+                    }
+                }
+                if let Some(s) = &clip.subtitle {
+                    text_filters.extend(subtitle::build_subtitle_overlay_filters(s, clip.timeline_in, w, h));
+                }
+            }
+        }
+
+        // 在输出文件参数之前插入 -vf（FFmpeg 中 -vf 需位于 -i 之后、输出之前）
+        let mut encoder_cmd = encoder_cmd;
+        if !text_filters.is_empty() {
+            let vf = text_filters.join(",");
+            let output = encoder_cmd.pop().expect("encoder_cmd 不应为空");
+            encoder_cmd.push("-vf".to_string());
+            encoder_cmd.push(vf);
+            encoder_cmd.push(output);
+        }
 
         let mut child = Command::new(&encoder_cmd[0])
             .args(&encoder_cmd[1..])
@@ -495,6 +524,8 @@ mod tests {
             filters: Vec::new(),
             keyframes: HashMap::new(),
             speed_curve: Vec::new(),
+            text: None,
+            subtitle: None,
         }
     }
 

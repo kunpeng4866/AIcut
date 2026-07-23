@@ -116,6 +116,15 @@ pub fn is_simple_project(project: &Project) -> bool {
         }
     }
 
+    // 任何轨道（含 text/subtitle 轨道）含文字/字幕叠加层 → 走完整路径渲染 drawtext
+    for track in &project.tracks {
+        for clip in &track.clips {
+            if clip.text.is_some() || clip.subtitle.is_some() {
+                return false;
+            }
+        }
+    }
+
     true
 }
 
@@ -206,6 +215,8 @@ mod tests {
             filters: Vec::new(),
             keyframes: std::collections::HashMap::new(),
             speed_curve: Vec::new(),
+            text: None,
+            subtitle: None,
         }
     }
 
@@ -353,5 +364,23 @@ mod tests {
         let mut project = make_simple_project();
         project.tracks[0].clips.push(make_simple_clip("c2", "a1", 5.0, 10.0));
         assert!(is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_with_text_track() {
+        // 主视频轨 + 文字轨道含文字 → 非简单工程（走完整路径渲染 drawtext）
+        let mut project = make_simple_project();
+        project.tracks.push(Track {
+            id: "text1".to_string(),
+            track_type: "text".to_string(),
+            order: 0,
+            clips: vec![make_simple_clip("tc1", "a1", 0.0, 5.0)],
+            ..Default::default()
+        });
+        project.tracks.last_mut().unwrap().clips[0].text = Some(crate::subtitle::TextOverlay {
+            content: "标题".into(),
+            ..Default::default()
+        });
+        assert!(!is_simple_project(&project));
     }
 }
