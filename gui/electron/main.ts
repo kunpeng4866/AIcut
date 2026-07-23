@@ -242,6 +242,23 @@ ipcMain.handle('ai:generateSubtitles', async (_e, transcript: string, lang: stri
   }
 });
 
+// ── ASR 本地语音转写 ──
+// 由 aicut-engine 调 whisper.cpp（ffmpeg 抽轨 → whisper-cli -oj）完成本地转写。
+ipcMain.handle('asr:transcribe', async (_e, audioPath: string, lang: string) => {
+  try {
+    const configContent = await readFile(getConfigPath(), 'utf8');
+    const config = JSON.parse(configContent);
+    const asr = config.asr || {};
+    const enginePath = asr.enginePath || 'E:\\codex\\codex-tools\\whisper\\whisper-cli.exe';
+    const modelPath = asr.modelPath || 'E:\\codex\\codex-tools\\whisper\\ggml-base.bin';
+    const stdout = await callEngine('asr', 'transcribe', audioPath, lang || 'zh', enginePath, modelPath);
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
 // ── 插件 ──
 ipcMain.handle('plugin:list', async () => {
   try {
@@ -425,7 +442,7 @@ function getDefaultConfig() {
   return {
     version: '1.0',
     ai: { provider: 'none', apiKey: '', endpoint: '', model: '' },
-    asr: { provider: 'none', modelPath: '', apiKey: '', endpoint: '' },
+    asr: { provider: 'whisper-cpp', enginePath: 'E:\\codex\\codex-tools\\whisper\\whisper-cli.exe', modelPath: 'E:\\codex\\codex-tools\\whisper\\ggml-base.bin', ffmpegPath: 'E:\\codex\\codex-tools\\bin\\ffmpeg.exe', apiKey: '', endpoint: '' },
     tts: { provider: 'none', appId: '', accessToken: '', endpoint: '', defaultVoice: '' },
     render: { ffmpegPath: '', defaultResolution: '1080p', defaultFps: 30, defaultBitrate: 8 },
     plugins: { vfxDirectory: '', enabledPlugins: [] },

@@ -88,6 +88,16 @@ export interface AiAPI {
   generateSubtitles: (transcript: string, lang: string) => Promise<{ success: boolean; data?: SubtitleGenResult; error?: string }>;
 }
 
+// ── ASR 本地语音转写（whisper.cpp） ──
+export interface AsrAPI {
+  // 本地 whisper.cpp 转写，返回 { text, segments }
+  transcribe: (audioPath: string, lang: string) => Promise<{
+    success: boolean;
+    data?: { text: string; segments: { start: number; end: number; text: string }[] };
+    error?: string;
+  }>;
+}
+
 declare global { interface Window { aicut: AicutAPI } }
 export interface AicutAPI {
   // 引擎
@@ -109,6 +119,8 @@ export interface AicutAPI {
   ttsVoices(): Promise<string>;
   // AI 自动字幕
   ai: AiAPI;
+  // ASR 本地语音转写
+  asr: AsrAPI;
   // 插件
   listPlugins(): Promise<string>;
   scanPlugins(): Promise<number>;

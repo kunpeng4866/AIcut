@@ -12,7 +12,12 @@
 
 import React from 'react';
 import { useAiStore } from '../store/aiStore';
+import { useProjectStore } from '../store/projectStore';
+import { useUIStore } from '../store/uiStore';
 import type { SubtitleGenResult } from '../aiTypes';
+
+// 从素材路径取文件名作展示（AssetConfig 无 name 字段，统一用 basename）
+const nameOf = (p: string): string => p.split(/[\\/]/).pop() || p;
 
 interface AIPanelProps {
   // 由父组件（或主布局）传入：把生成结果写入「当前选中 clip」的 subtitle 字段。
@@ -25,13 +30,58 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
     transcript,
     lang,
     isGenerating,
+    isTranscribing,
     result,
     error,
     setTranscript,
     setLang,
     generateSubtitles,
+    transcribe,
     clearResult,
   } = useAiStore();
+
+  // 素材列表（音频/视频有音轨，图片/文字无，不列出）
+  const assets = useProjectStore((s) => s.project.assets);
+  const selectedClipId = useUIStore((s) => s.selectedClipId);
+
+  const mediaAssets = assets.filter((a) => a.type === 'audio' || a.type === 'video');
+
+  // 反查「当前选中片段」所用素材，若不在列表里（如视频）也补上，方便直接转写选中片段
+  const selectedAsset = (() => {
+    if (!selectedClipId) return null;
+    const clip = useProjectStore
+      .getState()
+      .project.tracks.flatMap((t) => t.clips)
+      .find((c) => c.id === selectedClipId);
+    const sa = clip ? assets.find((a) => a.id === clip.assetId) : null;
+    return sa && (sa.type === 'audio' || sa.type === 'video') ? sa : null;
+  })();
+
+  // 合并去重（按 asset.id）
+  const asrOptions = (() => {
+    const map = new Map<string, (typeof assets)[number]>();
+    mediaAssets.forEach((a) => map.set(a.id, a));
+    if (selectedAsset) map.set(selectedAsset.id, selectedAsset);
+    return Array.from(map.values());
+  })();
+
+  const [asrPath, setAsrPath] = React.useState('');
+  const [asrDone, setAsrDone] = React.useState(false);
+
+  // 默认选中：选中片段素材 > 第一个可转写素材
+  React.useEffect(() => {
+    if (asrPath) return;
+    const init = selectedAsset ? selectedAsset.path : (asrOptions[0]?.path ?? '');
+    if (init) setAsrPath(init);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAsset, asrOptions, asrPath]);
+
+  const handleTranscribe = async () => {
+    setAsrDone(false);
+    await transcribe(asrPath, lang);
+    const st = useAiStore.getState();
+    if (st.transcript && !st.error) setAsrDone(true);
+  };
 
   const [appliedInfo, setAppliedInfo] = React.useState<string | null>(null);
 
@@ -67,10 +117,41 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
         <option value="auto">自动检测</option>
       </select>
 
+      {/* ── 语音转写(ASR) ── */}
+      <div style={{ border: '1px solid #2a2a2a', borderRadius: 6, padding: 8, marginBottom: 10, background: '#161616' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>语音转写 (ASR)</div>
+        <label style={{ display: 'block', marginBottom: 4, opacity: 0.8 }}>选择素材（音频/视频）</label>
+        <select
+          value={asrPath}
+          onChange={(e) => setAsrPath(e.target.value)}
+          style={{ width: '100%', marginBottom: 8, padding: 4, background: '#1a1a1a', color: '#eee', border: '1px solid #333' }}
+        >
+          <option value="">请选择素材</option>
+          {asrOptions.map((a) => (
+            <option key={a.id} value={a.path}>{nameOf(a.path)}</option>
+          ))}
+        </select>
+        <button
+          onClick={handleTranscribe}
+          disabled={isTranscribing || !asrPath}
+          style={{ width: '100%', padding: '6px 10px', background: (isTranscribing || !asrPath) ? '#555' : '#8e44ad', color: '#fff', border: 'none', borderRadius: 4, cursor: (isTranscribing || !asrPath) ? 'default' : 'pointer' }}
+        >
+          {isTranscribing ? '转写中…' : '开始转写'}
+        </button>
+        {isTranscribing && (
+          <div style={{ marginTop: 6, opacity: 0.8 }}>正在本地 whisper.cpp 转写音轨…</div>
+        )}
+        {asrDone && !isTranscribing && (
+          <div style={{ color: '#7bed9f', marginTop: 6 }}>
+            ✅ 已转写并填入文本，点下方「生成字幕」即可生成时间轴字幕
+          </div>
+        )}
+      </div>
+
       <label style={{ display: 'block', marginBottom: 4, opacity: 0.8 }}>ASR 转写文本</label>
       <textarea
         value={transcript}
-        onChange={(e) => setTranscript(e.target.value)}
+        onChange={(e) => { setTranscript(e.target.value); setAsrDone(false); }}
         placeholder="粘贴语音识别(ASR)的纯文本，点击生成后由 DeepSeek 切分为时间轴字幕…"
         rows={6}
         style={{ width: '100%', boxSizing: 'border-box', padding: 6, background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, resize: 'vertical' }}

@@ -8,6 +8,7 @@
 //!   aicut-engine presets                          预置列表
 //!   aicut-engine version                          版本号
 //!   aicut-engine ai subtitles <file> <lang>       DeepSeek 生成字幕 JSON
+//!   aicut-engine asr transcribe <audio_file> <lang> [engine_path] [model_path]  whisper.cpp 本地语音转写
 
 use std::env;
 use std::fs;
@@ -192,8 +193,34 @@ fn main() {
                 }
             }
         }
+        "asr" => {
+            // aicut-engine asr transcribe <audio_path> <lang> [engine_path] [model_path]
+            if args.len() < 4 {
+                eprintln!("用法: aicut-engine asr transcribe <audio_file> <lang> [engine_path] [model_path]");
+                process::exit(2);
+            }
+            match args[2].as_str() {
+                "transcribe" => {
+                    let audio = &args[3];
+                    let lang = args.get(4).map(|s| s.as_str()).unwrap_or("zh").to_string();
+                    let engine = args.get(5).cloned()
+                        .unwrap_or_else(|| aicut_engine::provider::DEFAULT_WHISPER_ENGINE.to_string());
+                    let model = args.get(6).cloned()
+                        .unwrap_or_else(|| aicut_engine::provider::DEFAULT_WHISPER_MODEL.to_string());
+                    let provider = aicut_engine::provider::WhisperProvider::with_paths(engine, model);
+                    match aicut_engine::provider::AsrProvider::transcribe(&provider, audio, &lang) {
+                        Ok(r) => println!("{}", serde_json::to_string(&r).unwrap()),
+                        Err(e) => { eprintln!("ASR 转写失败: {}", e); process::exit(1); }
+                    }
+                }
+                other => {
+                    eprintln!("未知 asr 子命令: {} (可用: transcribe)", other);
+                    process::exit(2);
+                }
+            }
+        }
         other => {
-            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai)", other);
+            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr)", other);
             process::exit(2);
         }
     }

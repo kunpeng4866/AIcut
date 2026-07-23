@@ -9,14 +9,17 @@ import type { AiState, SubtitleGenResult } from '../aiTypes';
 // 已接入后端：window.aicut.ai.generateSubtitles（electron main → aicut-engine ai subtitles → DeepSeek）
 
 interface AiStore extends AiState {
+  isTranscribing: boolean;
   setTranscript: (t: string) => void;
   setLang: (l: string) => void;
   generateSubtitles: (transcript: string, lang: string) => Promise<void>;
+  transcribe: (audioPath: string, lang: string) => Promise<void>;
   clearResult: () => void;
 }
 
 export const useAiStore = create<AiStore>((set) => ({
   isGenerating: false,
+  isTranscribing: false,
   result: null,
   error: null,
   transcript: '',
@@ -43,6 +46,23 @@ export const useAiStore = create<AiStore>((set) => ({
       set({ result: data, isGenerating: false });
     } catch (e: any) {
       set({ error: e?.message ?? String(e), isGenerating: false });
+    }
+  },
+
+  // ASR 本地语音转写：把音视频素材的音轨转写成纯文本，回填到 transcript，
+  // 复用下方「生成字幕」链路（由 DeepSeek 切分为时间轴字幕）。只改 transcript，不碰 result。
+  transcribe: async (audioPath, lang) => {
+    if (!audioPath || !audioPath.trim()) {
+      set({ error: '请先选择要转写的音频/视频素材', isTranscribing: false });
+      return;
+    }
+    set({ isTranscribing: true, error: null });
+    try {
+      const resp = await window.aicut.asr.transcribe(audioPath, lang);
+      if (!resp.success || !resp.data) throw new Error(resp.error || 'ASR 转写失败');
+      set({ transcript: resp.data.text, isTranscribing: false });
+    } catch (e: any) {
+      set({ error: e?.message ?? String(e), isTranscribing: false });
     }
   },
 

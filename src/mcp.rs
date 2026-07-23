@@ -98,7 +98,7 @@ pub fn handle_tool_call(request: &ToolRequest) -> ToolResponse {
             let path = request.arguments["audio_path"].as_str().unwrap_or("");
             let lang = request.arguments["language"].as_str().unwrap_or("zh");
             if path.is_empty() { return ToolResponse { success: false, result: None, error: Some("缺少 audio_path".into()) }; }
-            let provider = crate::provider::WhisperProvider { model_path: "ggml-base.bin".into() };
+            let provider = crate::provider::WhisperProvider::new();
             match crate::provider::AsrProvider::transcribe(&provider, path, lang) {
                 Ok(r) => ToolResponse {
                     success: true,

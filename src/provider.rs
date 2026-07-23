@@ -7,6 +7,13 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+/// whisper.cpp CLI 默认路径（Windows 原生二进制，使用反斜杠路径）
+pub const DEFAULT_WHISPER_ENGINE: &str = r"E:\codex\codex-tools\whisper\whisper-cli.exe";
+/// whisper.cpp 默认多语种模型（base，支持 zh/en）
+pub const DEFAULT_WHISPER_MODEL: &str = r"E:\codex\codex-tools\whisper\ggml-base.bin";
+/// ffmpeg 默认路径（用于把任意音视频抽成 16k 单声道 wav）
+pub const DEFAULT_FFMPEG: &str = r"E:\codex\codex-tools\bin\ffmpeg.exe";
+
 // ════════════════════ ASR Provider ════════════════════
 
 /// ASR 转写结果
@@ -28,41 +35,154 @@ pub trait AsrProvider {
     fn transcribe(&self, audio_path: &str, language: &str) -> Result<TranscriptResult, String>;
 }
 
-/// Whisper CLI 实现（需 whisper.cpp 在 PATH 中）
+/// whisper.cpp 实现（本地 whisper-cli + ffmpeg 抽轨）
 pub struct WhisperProvider {
-    pub model_path: String,
+    pub engine_path: String,  // whisper-cli.exe 路径
+    pub model_path: String,   // ggml-*.bin 模型路径
+    pub ffmpeg_path: String,  // ffmpeg.exe 路径（抽音频用）
+}
+
+impl WhisperProvider {
+    /// 使用默认引擎/模型/ffmpeg 路径构造
+    pub fn new() -> Self {
+        Self {
+            engine_path: DEFAULT_WHISPER_ENGINE.into(),
+            model_path: DEFAULT_WHISPER_MODEL.into(),
+            ffmpeg_path: DEFAULT_FFMPEG.into(),
+        }
+    }
+
+    /// 显式指定引擎与模型路径（ffmpeg 仍用默认路径）
+    pub fn with_paths(engine_path: String, model_path: String) -> Self {
+        Self {
+            engine_path,
+            model_path,
+            ffmpeg_path: DEFAULT_FFMPEG.into(),
+        }
+    }
+}
+
+impl Default for WhisperProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AsrProvider for WhisperProvider {
     fn transcribe(&self, audio_path: &str, language: &str) -> Result<TranscriptResult, String> {
-        let out = Command::new("whisper")
-            .args(["-m", &self.model_path, "-f", audio_path, "-l", language, "-oj"])
-            .output()
-            .map_err(|e| format!("Whisper 执行失败: {}", e))?;
+        let lang = if language.is_empty() { "zh" } else { language };
 
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        // 1) 用 ffmpeg 把任意音视频抽成 16k 单声道 wav（whisper.cpp 自带解码器有限）
+        let wav_base = std::env::temp_dir().join(format!("aicut_asr_{}", unique_id()));
+        let wav_path = wav_base.to_string_lossy().to_string();
+        let ff = Command::new(&self.ffmpeg_path)
+            .args(["-y", "-i", audio_path, "-ar", "16000", "-ac", "1", "-f", "wav", &wav_path])
+            .output()
+            .map_err(|e| format!("ffmpeg 执行失败 ({}): {}", self.ffmpeg_path, e))?;
+        if !ff.status.success() {
+            let _ = std::fs::remove_file(&wav_path);
+            return Err(format!("ffmpeg 抽取音频失败: {}", String::from_utf8_lossy(&ff.stderr)));
         }
 
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        parse_whisper_json(&stdout)
+        // 2) 用 whisper.cpp 转写，JSON 输出到 <base>.json（-np 抑制控制台多余输出）
+        let json_base = std::env::temp_dir().join(format!("aicut_asr_{}", unique_id()));
+        let json_base_s = json_base.to_string_lossy().to_string();
+        let json_path = format!("{}.json", json_base_s);
+
+        let wcmd = Command::new(&self.engine_path)
+            .args([
+                "-m", &self.model_path,
+                "-f", &wav_path,
+                "-l", lang,
+                "-oj", "-of", &json_base_s,
+                "-np",
+            ])
+            .output()
+            .map_err(|e| format!("whisper-cli 执行失败 ({}): {}", self.engine_path, e))?;
+
+        // 无论成功与否都清理临时 wav
+        let _ = std::fs::remove_file(&wav_path);
+
+        // 优先读取 whisper.cpp 写出的 JSON 文件；文件缺失时回退到 stdout
+        let json_text = if std::path::Path::new(&json_path).exists() {
+            std::fs::read_to_string(&json_path).unwrap_or_default()
+        } else {
+            String::from_utf8_lossy(&wcmd.stdout).to_string()
+        };
+        let _ = std::fs::remove_file(&json_path);
+
+        if !wcmd.status.success() && json_text.trim().is_empty() {
+            return Err(format!("whisper-cli 转写失败: {}", String::from_utf8_lossy(&wcmd.stderr)));
+        }
+
+        parse_whisper_json(&json_text)
     }
+}
+
+/// 生成进程内唯一的临时文件名片段
+fn unique_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}_{}", std::process::id(), nanos)
+}
+
+/// 把 JSON Value 读成 f64（兼容整数/浮点）
+fn as_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|i| i as f64))
+        .or_else(|| v.as_u64().map(|i| i as f64))
+}
+
+/// 读取 transcription[i].offsets.{from,to}（毫秒）并转为秒
+fn offset_ms(seg: &serde_json::Value, key: &str) -> f64 {
+    seg.get("offsets")
+        .and_then(|o| o.get(key))
+        .and_then(as_f64)
+        .unwrap_or(0.0)
+        / 1000.0
 }
 
 fn parse_whisper_json(json: &str) -> Result<TranscriptResult, String> {
     let root: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| format!("Whisper JSON 解析失败: {}", e))?;
 
-    let text = root["text"].as_str().unwrap_or("").to_string();
-    let segments: Vec<TranscriptSegment> = root["segments"].as_array()
-        .map(|arr| arr.iter().filter_map(|s| Some(TranscriptSegment {
-            start: s["start"].as_f64()?,
-            end: s["end"].as_f64()?,
-            text: s["text"].as_str()?.to_string(),
-        })).collect())
+    // whisper.cpp `-oj` 实测结构：root["transcription"] = [{ offsets:{from,to}(ms), text, timestamps }]
+    if let Some(arr) = root.get("transcription").and_then(|v| v.as_array()) {
+        let mut text = String::new();
+        let mut segments = Vec::with_capacity(arr.len());
+        for seg in arr {
+            let start = offset_ms(seg, "from");
+            let end = offset_ms(seg, "to");
+            let seg_text = seg.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&seg_text);
+            segments.push(TranscriptSegment { start, end, text: seg_text });
+        }
+        return Ok(TranscriptResult { text, segments });
+    }
+
+    // 兼容：根对象直接含 text / segments（start/end 为秒）的变体
+    let root_text = root.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let root_segments: Vec<TranscriptSegment> = root.get("segments").and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|s| {
+                Some(TranscriptSegment {
+                    start: s.get("start").and_then(as_f64)?,
+                    end: s.get("end").and_then(as_f64)?,
+                    text: s.get("text").and_then(|v| v.as_str())?.to_string(),
+                })
+            }).collect()
+        })
         .unwrap_or_default();
 
-    Ok(TranscriptResult { text, segments })
+    if root_text.is_empty() && root_segments.is_empty() {
+        return Err("Whisper 返回 JSON 缺少 transcription / text / segments 字段".into());
+    }
+    Ok(TranscriptResult { text: root_text, segments: root_segments })
 }
 
 /// 将转写结果转换为 SRT 字幕字符串
