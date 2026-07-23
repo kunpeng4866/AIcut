@@ -51,6 +51,12 @@ contextBridge.exposeInMainWorld('aicut', {
     ipcRenderer.invoke('tts:synthesize', text, voice, outputPath),
   ttsVoices: () => ipcRenderer.invoke('tts:voices'),
 
+  // ── AI 自动字幕 ──
+  ai: {
+    generateSubtitles: (transcript: string, lang: string) =>
+      ipcRenderer.invoke('ai:generateSubtitles', transcript, lang),
+  },
+
   // ── 草稿 ──
   saveDraft: (name: string, content: string) => ipcRenderer.invoke('draft:save', name, content),
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),

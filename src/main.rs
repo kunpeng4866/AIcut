@@ -7,6 +7,7 @@
 //!   aicut-engine validate <project.json>          验证工程合法性
 //!   aicut-engine presets                          预置列表
 //!   aicut-engine version                          版本号
+//!   aicut-engine ai subtitles <file> <lang>       DeepSeek 生成字幕 JSON
 
 use std::env;
 use std::fs;
@@ -166,8 +167,33 @@ fn main() {
                 Err(e) => { eprintln!("❌ TTS 合成失败: {:#}", e); process::exit(1); }
             }
         }
+        "ai" => {
+            // aicut-engine ai subtitles <transcript_file> <lang>
+            // transcript 经临时文件传入，避免长文本/中文在命令行参数中的转义与编码问题。
+            if args.len() < 4 {
+                eprintln!("用法: aicut-engine ai subtitles <transcript_file> <lang>");
+                process::exit(2);
+            }
+            match args[2].as_str() {
+                "subtitles" => {
+                    let transcript = fs::read_to_string(&args[3]).unwrap_or_else(|e| {
+                        eprintln!("无法读取转写文件 {}: {}", args[3], e);
+                        process::exit(1);
+                    });
+                    let lang = args.get(4).map(|s| s.as_str()).unwrap_or("zh");
+                    match aicut_engine::ai::generate_subtitles_sync(&transcript, lang) {
+                        Ok(overlay) => println!("{}", serde_json::to_string(&overlay).unwrap()),
+                        Err(e) => { eprintln!("AI 字幕生成失败: {}", e); process::exit(1); }
+                    }
+                }
+                other => {
+                    eprintln!("未知 ai 子命令: {} (可用: subtitles)", other);
+                    process::exit(2);
+                }
+            }
+        }
         other => {
-            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts)", other);
+            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai)", other);
             process::exit(2);
         }
     }

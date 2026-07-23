@@ -6,11 +6,7 @@
 import { create } from 'zustand';
 import type { AiState, SubtitleGenResult } from '../aiTypes';
 
-// TODO: 后端 N-API 已暴露 aiGenerateSubtitles，待 electron main 在 window.aicut 上挂载后，
-// 将下方 generateSubtitles 内的 fetch 替换为：
-//   await window.aicut.aiGenerateSubtitles(transcript, lang)  // 返回 SubtitleOverlay JSON 字符串
-// 当前先用占位端点，保证 UI 状态机可独立运行与联调。
-const AI_ENDPOINT = '/api/ai/generate-subtitles';
+// 已接入后端：window.aicut.ai.generateSubtitles（electron main → aicut-engine ai subtitles → DeepSeek）
 
 interface AiStore extends AiState {
   setTranscript: (t: string) => void;
@@ -36,16 +32,11 @@ export const useAiStore = create<AiStore>((set) => ({
     }
     set({ isGenerating: true, error: null });
     try {
-      // TODO: 替换为 window.aicut.aiGenerateSubtitles(transcript, lang)
-      const resp = await fetch(AI_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript, lang }),
-      });
-      if (!resp.ok) {
-        throw new Error(`AI 生成请求失败: HTTP ${resp.status}`);
+      const resp = await window.aicut.ai.generateSubtitles(transcript, lang);
+      if (!resp.success || !resp.data) {
+        throw new Error(resp.error || 'AI 生成失败');
       }
-      const data = (await resp.json()) as SubtitleGenResult;
+      const data = resp.data as SubtitleGenResult;
       if (!data || !Array.isArray(data.items)) {
         throw new Error('返回数据缺少合法的 items 数组');
       }

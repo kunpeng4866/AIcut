@@ -16,10 +16,8 @@ import type { SubtitleGenResult } from '../aiTypes';
 
 interface AIPanelProps {
   // 由父组件（或主布局）传入：把生成结果写入「当前选中 clip」的 subtitle 字段。
-  // TODO: 接入 projectStore 时，在上层实现该回调，例如：
-  //   onApply={(result) => useProjectStore.getState().applySubtitleToSelectedClip(result)}
-  // 若未提供，组件仅负责生成与预览，并给出明确的 TODO 提示（不擅自改动其他文件）。
-  onApply?: (result: SubtitleGenResult) => void;
+  // 返回展示给用户的提示文案（成功或警告）；若返回空串则使用默认文案。
+  onApply?: (result: SubtitleGenResult) => string;
 }
 
 export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
@@ -45,15 +43,12 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
   const handleApply = () => {
     if (!result) return;
     if (onApply) {
-      onApply(result);
-      setAppliedInfo(`已应用 ${result.items.length} 条字幕到选中片段`);
+      const msg = onApply(result);
+      setAppliedInfo(msg || `已应用 ${result.items.length} 条字幕到选中片段`);
     } else {
-      // TODO: 未挂载 onApply 时，可通过事件总线把结果交给 projectStore：
-      //   window.dispatchEvent(new CustomEvent('ai:apply-subtitles', { detail: result }));
-      // 当前不修改任何文件，仅给出提示。
       // eslint-disable-next-line no-console
-      console.warn('[AIPanel] 未提供 onApply 回调，字幕未写入片段（TODO：接入 projectStore）');
-      setAppliedInfo('未接入 onApply：结果已生成但未写入片段（见 TODO）');
+      console.warn('[AIPanel] 未提供 onApply 回调，字幕未写入片段');
+      setAppliedInfo('未接入 onApply：结果已生成但未写入片段');
     }
   };
 
@@ -130,7 +125,8 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
 
       <p style={{ fontSize: 11, opacity: 0.5, marginTop: 10, lineHeight: 1.5 }}>
         后端：DeepSeek LLM（curl 调用 api.deepseek.com，key 取自 DEEPSEEK_API_KEY）。
-        当前前端走占位通道，接入 window.aicut.aiGenerateSubtitles 后即可联调。
+        已接入 window.aicut.ai.generateSubtitles（electron → aicut-engine ai subtitles）。
+        选中时间轴上的片段后点「应用到选中片段」即可写入 subtitle。
       </p>
     </div>
   );

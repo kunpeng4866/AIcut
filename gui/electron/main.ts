@@ -220,6 +220,28 @@ ipcMain.handle('tts:voices', async () => {
   ]);
 });
 
+// ── AI 自动字幕 ──
+// 前端把 ASR 转写文本交给后端，由 aicut-engine 调 DeepSeek 切分为时间轴字幕。
+ipcMain.handle('ai:generateSubtitles', async (_e, transcript: string, lang: string) => {
+  if (!transcript || !transcript.trim()) {
+    return { success: false, error: '转写文本为空' };
+  }
+  const tmp = join(app.getPath('temp'), `aicut-ai-${Date.now()}.txt`);
+  try {
+    await writeFile(tmp, transcript, 'utf8');
+    const stdout = await callEngine('ai', 'subtitles', tmp, lang || 'zh');
+    const data = JSON.parse(stdout);
+    if (!data || !Array.isArray(data.items)) {
+      return { success: false, error: 'AI 返回数据缺少合法的 items 数组' };
+    }
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  } finally {
+    unlink(tmp).catch(() => {});
+  }
+});
+
 // ── 插件 ──
 ipcMain.handle('plugin:list', async () => {
   try {

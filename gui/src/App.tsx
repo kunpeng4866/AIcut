@@ -2,6 +2,7 @@
 import React, { useEffect } from 'react';
 import { useConfigStore } from './store/configStore';
 import { useUIStore } from './store/uiStore';
+import { useProjectStore } from './store/projectStore';
 import { isAIConfigured } from './config/ai_config';
 import ConfigWizard from './config/ConfigWizard';
 import Header from './components/Header';
@@ -9,8 +10,11 @@ import MediaPanel from './components/MediaPanel';
 import PreviewCanvas from './components/PreviewCanvas';
 import PropertiesPanel from './components/PropertiesPanel';
 import MixerPanel from './components/MixerPanel';
+import { AIPanel } from './components/AIPanel';
 import Timeline from './components/Timeline';
 import Splitter from './components/Splitter';
+import type { SubtitleGenResult } from './aiTypes';
+import type { SubtitleContent } from './types';
 
 // 深色主题色板
 const C = {
@@ -43,7 +47,24 @@ export default function App() {
     setRightPanelWidth,
     setTimelineHeight,
   } = useUIStore();
-  const [rightView, setRightView] = React.useState<'props' | 'mixer'>('props');
+  const [rightView, setRightView] = React.useState<'props' | 'mixer' | 'ai'>('props');
+
+  // AI 字幕生成结果 → 写入当前选中片段的 subtitle 字段
+  const handleApplySubtitles = (result: SubtitleGenResult): string => {
+    const { selectedTrackId, selectedClipId } = useUIStore.getState();
+    if (!selectedTrackId || !selectedClipId) {
+      return '请先在时间轴上选中一个片段，再应用字幕';
+    }
+    const subtitle: SubtitleContent = {
+      items: result.items.map((it) => ({ start: it.start, end: it.end, text: it.text })),
+      fontFamily: result.fontFamily,
+      fontSize: result.fontSize,
+      color: result.color,
+      position: result.position,
+    };
+    useProjectStore.getState().updateClip(selectedTrackId, selectedClipId, { subtitle });
+    return `已应用 ${result.items.length} 条字幕到选中片段`;
+  };
 
   // 首次启动：加载配置；若AI未配置则弹出向导
   useEffect(() => {
@@ -111,7 +132,7 @@ export default function App() {
         {/* 右面板：属性 / 混音器 切换 */}
         <aside style={{ width: rightPanelWidth, background: C.panel, borderLeft: `1px solid ${C.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
-            {([['props', '属性'], ['mixer', '混音器']] as const).map(([key, label]) => (
+            {([['props', '属性'], ['mixer', '混音器'], ['ai', 'AI']] as const).map(([key, label]) => (
               <button key={key} onClick={() => setRightView(key)} style={{
                 flex: 1, padding: '8px 0', background: 'transparent',
                 color: rightView === key ? C.textMain : C.textSub,
@@ -123,7 +144,7 @@ export default function App() {
             ))}
           </div>
           <div style={{ flex: 1, minHeight: 0 }}>
-            {rightView === 'props' ? <PropertiesPanel /> : <MixerPanel />}
+            {rightView === 'props' ? <PropertiesPanel /> : rightView === 'mixer' ? <MixerPanel /> : <AIPanel onApply={handleApplySubtitles} />}
           </div>
         </aside>
       </div>

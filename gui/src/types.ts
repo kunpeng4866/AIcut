@@ -1,4 +1,6 @@
 // AIcut GUI type definitions
+import type { SubtitleGenResult } from './aiTypes';
+
 export interface CanvasConfig { width: number; height: number; fps?: number; sample_rate?: number }
 export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number }
@@ -80,6 +82,12 @@ export interface ExportAPI {
   openFolder: (filePath: string) => Promise<void>;
 }
 
+// ── AI 自动字幕 ──
+export interface AiAPI {
+  // 由 DeepSeek 将 ASR 转写文本切分为时间轴字幕，返回 SubtitleGenResult JSON
+  generateSubtitles: (transcript: string, lang: string) => Promise<{ success: boolean; data?: SubtitleGenResult; error?: string }>;
+}
+
 declare global { interface Window { aicut: AicutAPI } }
 export interface AicutAPI {
   // 引擎
@@ -99,6 +107,8 @@ export interface AicutAPI {
   // TTS 语音合成
   ttsSynthesize(text: string, voice: string, outputPath: string): Promise<{ success: boolean; audioPath?: string; error?: string }>;
   ttsVoices(): Promise<string>;
+  // AI 自动字幕
+  ai: AiAPI;
   // 插件
   listPlugins(): Promise<string>;
   scanPlugins(): Promise<number>;
