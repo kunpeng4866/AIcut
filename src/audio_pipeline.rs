@@ -377,6 +377,7 @@ mod tests {
             volume: 1.0,
             speed: 1.0,
             speed_curve: vec![],
+            time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             effects: vec![],
             masks: vec![],
             filters: vec![],

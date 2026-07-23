@@ -207,8 +207,107 @@ pub trait RenderStrategy {
 /// - clip: 片段引用
 /// - 返回: 源素材中的时间（秒）
 pub fn timeline_to_source_time(t: f64, clip: &crate::project::Clip) -> f64 {
-    let offset = t - clip.timeline_in;
-    clip.src_range.start + offset * clip.speed
+    // 统一走 clip_source_time，保证预览（前端）与导出共用同一映射
+    clip_source_time(t, clip).0
+}
+
+/// 从时间线时间计算片段源时间 + 是否处于冻结帧
+///
+/// 统一映射（预览与导出共用）：
+/// ```text
+/// dur   = clip.timeline_out - clip.timeline_in
+/// off   = t - clip.timeline_in                         // 片段内时间线偏移，预期 [0, dur]
+/// remap = clip.time_remap
+/// if remap.curve 非空:
+///     src_t = piecewise_linear(curve, off)            // 按 play 升序；边界取端点 src；否则相邻点线性插值
+///     frozen = false
+/// else:
+///     frozen = false
+///     if remap.freeze 存在 且 off ∈ [freeze.start, freeze.start+freeze.duration):
+///         src_t = freeze.source_time
+///         frozen = true
+///     if not frozen:
+///         if remap.reverse:
+///             src_t = clip.src_range.start + (dur - off) * clip.speed   // 从 [start+span] 倒走到 start
+///         else:
+///             src_t = clip.src_range.start + off * clip.speed
+/// clamp src_t 到 [clip.src_range.start, clip.src_range.end]
+/// return (src_t, frozen)
+/// ```
+///
+/// - t: 时间线时间（秒）
+/// - clip: 片段引用
+/// - 返回: (源素材时间, 是否冻结帧)
+pub fn clip_source_time(t: f64, clip: &crate::project::Clip) -> (f64, bool) {
+    let dur = clip.timeline_out - clip.timeline_in;
+    let off = t - clip.timeline_in;
+    let remap = &clip.time_remap;
+
+    let (src_t, frozen) = if !remap.curve.is_empty() {
+        // curve 权威映射：按 play 升序分段线性插值出 src
+        (piecewise_linear(&remap.curve, off), false)
+    } else {
+        let mut frozen = false;
+        let src_t = if let Some(freeze) = &remap.freeze {
+            if off >= freeze.start && off < freeze.start + freeze.duration {
+                frozen = true;
+                freeze.source_time
+            } else {
+                base_source_time(clip, dur, off, remap.reverse)
+            }
+        } else {
+            base_source_time(clip, dur, off, remap.reverse)
+        };
+        (src_t, frozen)
+    };
+
+    // clamp 到源区间
+    let src_t = src_t.clamp(clip.src_range.start, clip.src_range.end);
+    (src_t, frozen)
+}
+
+/// 线性（正/倒放）基础源时间计算
+fn base_source_time(clip: &crate::project::Clip, dur: f64, off: f64, reverse: bool) -> f64 {
+    if reverse {
+        clip.src_range.start + (dur - off) * clip.speed
+    } else {
+        clip.src_range.start + off * clip.speed
+    }
+}
+
+/// 按 play 升序分段线性插值出 src
+///
+/// - off <= 首点 play ⇒ 首点 src；
+/// - off >= 末点 play ⇒ 末点 src；
+/// - 否则在相邻点之间线性插值：`src = a.src + (off - a.play)/(b.play - a.play) * (b.src - a.src)`。
+fn piecewise_linear(curve: &[crate::project::SpeedPoint], off: f64) -> f64 {
+    if curve.is_empty() {
+        return 0.0;
+    }
+    // 防御性：按 play 升序排序（契约要求 curve 已按 play 升序）
+    let mut pts: Vec<&crate::project::SpeedPoint> = curve.iter().collect();
+    pts.sort_by(|a, b| a.play.partial_cmp(&b.play).unwrap_or(std::cmp::Ordering::Equal));
+
+    if off <= pts[0].play {
+        return pts[0].src;
+    }
+    let last = pts.len() - 1;
+    if off >= pts[last].play {
+        return pts[last].src;
+    }
+    for i in 0..last {
+        let a = pts[i];
+        let b = pts[i + 1];
+        if off >= a.play && off <= b.play {
+            let span = b.play - a.play;
+            if span.abs() < 1e-12 {
+                return b.src;
+            }
+            let frac = (off - a.play) / span;
+            return a.src + (b.src - a.src) * frac;
+        }
+    }
+    pts[last].src
 }
 
 /// 计算片段在时间线上的活跃时间范围
@@ -221,7 +320,7 @@ pub fn clip_active_range(clip: &crate::project::Clip) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Clip, Range, Transform};
+    use crate::project::{Clip, FreezeConfig, Range, SpeedPoint, TimeRemap, Transform};
     use std::collections::HashMap;
 
     fn make_clip(id: &str, src_start: f64, src_end: f64, tl_in: f64, tl_out: f64, speed: f64) -> Clip {
@@ -239,6 +338,32 @@ mod tests {
             filters: Vec::new(),
             keyframes: HashMap::new(),
             speed_curve: Vec::new(),
+            time_remap: TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
+            text: None,
+            subtitle: None, transition: None,
+        }
+    }
+
+    /// 构造带 time_remap 的片段（供 clip_source_time 测试）
+    fn make_clip_with_remap(
+        id: &str, src_start: f64, src_end: f64, tl_in: f64, tl_out: f64, speed: f64,
+        remap: TimeRemap,
+    ) -> Clip {
+        Clip {
+            id: id.to_string(),
+            asset_id: "a1".to_string(),
+            src_range: Range { start: src_start, end: src_end },
+            timeline_in: tl_in,
+            timeline_out: tl_out,
+            transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+            volume: 1.0,
+            speed,
+            effects: Vec::new(),
+            masks: Vec::new(),
+            filters: Vec::new(),
+            keyframes: HashMap::new(),
+            speed_curve: Vec::new(),
+            time_remap: remap,
             text: None,
             subtitle: None, transition: None,
         }
@@ -367,5 +492,97 @@ mod tests {
         assert!((s.progress() - 0.5).abs() < 1e-6);
         s.frame = 100;
         assert!((s.progress() - 1.0).abs() < 1e-6);
+    }
+
+    // ── clip_source_time 统一映射测试 ──
+
+    #[test]
+    fn test_clip_source_time_forward_linear() {
+        // src [10,20), timeline [0,4), dur=4, speed=2, off=1 → 10 + 1*2 = 12
+        let remap = TimeRemap { reverse: false, freeze: None, curve: Vec::new() };
+        let clip = make_clip_with_remap("c1", 10.0, 20.0, 0.0, 4.0, 2.0, remap);
+        let (src_t, frozen) = clip_source_time(1.0, &clip);
+        assert!((src_t - 12.0).abs() < 1e-9);
+        assert!(!frozen);
+    }
+
+    #[test]
+    fn test_clip_source_time_reverse() {
+        // reverse, speed=1, dur=4, off=1 → src_start + (4-1)*1 = src_start+3 = 13
+        let remap = TimeRemap { reverse: true, freeze: None, curve: Vec::new() };
+        let clip = make_clip_with_remap("c1", 10.0, 20.0, 0.0, 4.0, 1.0, remap);
+        let (src_t, frozen) = clip_source_time(1.0, &clip);
+        assert!((src_t - 13.0).abs() < 1e-9);
+        assert!(!frozen);
+    }
+
+    #[test]
+    fn test_clip_source_time_freeze() {
+        let remap = TimeRemap {
+            reverse: false,
+            freeze: Some(FreezeConfig { start: 0.0, source_time: 5.0, duration: 2.0 }),
+            curve: Vec::new(),
+        };
+        // src_range [0,20) 包含 source_time=5.0，避免被 clamp
+        let clip = make_clip_with_remap("c1", 0.0, 20.0, 0.0, 4.0, 1.0, remap);
+        // off=1 ∈ [0,2) → src_t = 5.0, frozen
+        let (src_t, frozen) = clip_source_time(1.0, &clip);
+        assert!((src_t - 5.0).abs() < 1e-9);
+        assert!(frozen);
+        // off=3 ∉ [0,2) → 正常正向 0 + 3*1 = 3, not frozen
+        let (src_t2, frozen2) = clip_source_time(3.0, &clip);
+        assert!((src_t2 - 3.0).abs() < 1e-9);
+        assert!(!frozen2);
+    }
+
+    #[test]
+    fn test_clip_source_time_curve_interp() {
+        let remap = TimeRemap {
+            reverse: false,
+            freeze: None,
+            curve: vec![
+                SpeedPoint { play: 0.0, src: 0.0 },
+                SpeedPoint { play: 2.0, src: 4.0 },
+            ],
+        };
+        let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
+        // off=1 → 0 + (1-0)/(2-0)*(4-0) = 2.0
+        let (src_t, frozen) = clip_source_time(1.0, &clip);
+        assert!((src_t - 2.0).abs() < 1e-9);
+        assert!(!frozen);
+        // off=0 → 首点 src 0
+        let (s0, _) = clip_source_time(0.0, &clip);
+        assert!((s0 - 0.0).abs() < 1e-9);
+        // off=3 → 末点 src 4
+        let (s3, _) = clip_source_time(3.0, &clip);
+        assert!((s3 - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_clip_source_time_curve_overrides_reverse_freeze() {
+        // curve 非空时应忽略 reverse/freeze
+        let remap = TimeRemap {
+            reverse: true,
+            freeze: Some(FreezeConfig { start: 0.0, source_time: 99.0, duration: 100.0 }),
+            curve: vec![
+                SpeedPoint { play: 0.0, src: 1.0 },
+                SpeedPoint { play: 4.0, src: 3.0 },
+            ],
+        };
+        let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
+        let (src_t, frozen) = clip_source_time(2.0, &clip);
+        // 插值：1 + (2-0)/(4-0)*(3-1) = 2.0，frozen=false（忽略 freeze）
+        assert!((src_t - 2.0).abs() < 1e-9);
+        assert!(!frozen);
+    }
+
+    #[test]
+    fn test_clip_source_time_clamp() {
+        // 倒放 off=4 (末尾) → 10 + 0 = 10；但令 src_range.end 较小也无妨；这里测越界 clamp
+        let remap = TimeRemap { reverse: false, freeze: None, curve: Vec::new() };
+        // off 远超出 dur：src = 10 + 100*1 = 110，但 clamp 到 end=20
+        let clip = make_clip_with_remap("c1", 10.0, 20.0, 0.0, 4.0, 1.0, remap);
+        let (src_t, _) = clip_source_time(100.0, &clip);
+        assert!((src_t - 20.0).abs() < 1e-9);
     }
 }

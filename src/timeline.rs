@@ -209,6 +209,7 @@ mod tests {
             filters: Vec::new(),
             keyframes: HashMap::new(),
             speed_curve: Vec::new(),
+            time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None,
             transition: None,

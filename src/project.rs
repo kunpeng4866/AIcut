@@ -82,12 +82,58 @@ pub struct Range {
 }
 
 /// 曲线变速控制点：(源时间位置, 播放时间位置)，用于构建分段线性 setpts 表达式
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct SpeedPoint {
     /// 源素材时间位置（秒）
     pub src: f64,
     /// 对应的播放时间线位置（秒）
     pub play: f64,
+}
+
+/// 冻结帧配置：在片段内播放区间 [start, start+duration) 内冻结到 source_time
+///
+/// 序列化为 JSON camelCase：`{ "start", "sourceTime", "duration" }`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FreezeConfig {
+    /// 冻结起始（片段内时间线偏移，秒）
+    pub start: f64,
+    /// 冻结时对应的源素材时间（秒）
+    #[serde(rename = "sourceTime")]
+    pub source_time: f64,
+    /// 冻结持续时长（秒）
+    pub duration: f64,
+}
+
+impl Default for FreezeConfig {
+    fn default() -> Self {
+        Self { start: 0.0, source_time: 0.0, duration: 0.0 }
+    }
+}
+
+/// 统一时间重映射配置（预览与导出共用同一套逻辑）
+///
+/// 序列化字段：`reverse` / `freeze` / `curve`，与前端 TS 逐字节一致。
+/// 规则：
+/// - `curve` 非空 ⇒ 作为权威映射（按 play 升序分段线性插值），忽略 `reverse` / `freeze`；
+/// - 否则若存在 `freeze` 且 off ∈ [freeze.start, freeze.start+duration) ⇒ 冻结；
+/// - 否则正放：`src = src_range.start + off·speed`；倒放：`src = src_range.start + (dur-off)·speed`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimeRemap {
+    /// 倒放
+    #[serde(default)]
+    pub reverse: bool,
+    /// 冻结帧配置（None = 不冻结）
+    #[serde(default)]
+    pub freeze: Option<FreezeConfig>,
+    /// 变速曲线控制点（按 play 升序）；非空则作为权威映射，忽略 reverse/freeze
+    #[serde(default)]
+    pub curve: Vec<SpeedPoint>,
+}
+
+impl Default for TimeRemap {
+    fn default() -> Self {
+        Self { reverse: false, freeze: None, curve: Vec::new() }
+    }
 }
 
 /// 轨道：按 order 排序的多片段容器
@@ -157,6 +203,9 @@ pub struct Clip {
     /// 曲线变速控制点：[(源时间位置, 播放时间位置)]，空/None 则用线性 speed
     #[serde(default)]
     pub speed_curve: Vec<SpeedPoint>,
+    /// 统一时间重映射（倒放 / 冻结帧 / 时间重映射）：预览与导出共用同一套逻辑
+    #[serde(default)]
+    pub time_remap: TimeRemap,
     #[serde(default)]
     pub effects: Vec<crate::types::Effect>,
     #[serde(default)]
@@ -335,7 +384,7 @@ mod tests {
                             timeline_in: 0.0, timeline_out: 5.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None, transition: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None,
                         },
                         Clip {
                             id: "c2".into(), asset_id: "a2".into(),
@@ -343,7 +392,7 @@ mod tests {
                             timeline_in: 5.0, timeline_out: 15.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None, transition: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None,
                         },
                     ],
                     ..Default::default()
@@ -406,7 +455,7 @@ mod tests {
                     timeline_in: 0.0, timeline_out: 5.0,
                     transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                     volume: 1.0, speed: 1.0,
-                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None, transition: None,
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None,
                 }],
                 ..Default::default()
             }],

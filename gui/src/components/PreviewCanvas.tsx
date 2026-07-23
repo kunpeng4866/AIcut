@@ -6,7 +6,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
-import type { ClipConfig, TrackConfig, AssetConfig } from '../types';
+import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -23,6 +23,42 @@ const formatTC = (sec: number): string => {
   const cs = Math.floor((sec % 1) * 100);
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 };
+
+// 统一时间重映射：与后端 Rust clip_source_time 逐字节一致的纯函数
+// 给定全局时间线时间 t 与 clip，返回素材源时间 srcT 及是否处于冻结帧
+function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: boolean } {
+  const dur = clip.timelineOut - clip.timelineIn;
+  const off = t - clip.timelineIn;
+  const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
+  const clamp = (x: number) => Math.max(clip.src_range.start, Math.min(clip.src_range.end, x));
+  if (remap.curve && remap.curve.length > 0) {
+    const pts = [...remap.curve].sort((a, b) => a.play - b.play);
+    let srcT: number;
+    if (off <= pts[0].play) srcT = pts[0].src;
+    else if (off >= pts[pts.length - 1].play) srcT = pts[pts.length - 1].src;
+    else {
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (off >= pts[i].play && off < pts[i + 1].play) {
+          const r = (off - pts[i].play) / (pts[i + 1].play - pts[i].play || 1);
+          srcT = pts[i].src + r * (pts[i + 1].src - pts[i].src);
+          break;
+        }
+      }
+      srcT = pts[pts.length - 1].src; // 兜底（不应到达）
+    }
+    return { srcT: clamp(srcT), frozen: false };
+  }
+  let frozen = false; let srcT: number;
+  if (remap.freeze && off >= remap.freeze.start && off < remap.freeze.start + remap.freeze.duration) {
+    srcT = remap.freeze.sourceTime; frozen = true;
+  } else {
+    const speed = clip.speed ?? 1;
+    srcT = remap.reverse
+      ? clip.src_range.start + (dur - off) * speed
+      : clip.src_range.start + off * speed;
+  }
+  return { srcT: clamp(srcT), frozen };
+}
 
 // 活跃音频片段（音频轨道上的 clip）
 interface ActiveAudioClip { clip: ClipConfig; asset: AssetConfig; trackId: string }
@@ -129,10 +165,8 @@ export default function PreviewCanvas() {
         }
         if (clip.subtitle) {
           const s = clip.subtitle;
-          // 字幕时间戳与音视频源时间一致：需换算到源时间（含 src_range 偏移与变速）
-          const srcStart = clip.src_range?.start ?? 0;
-          const speed = clip.speed ?? 1;
-          const offset = srcStart + (currentTime - clip.timelineIn) * speed;
+          // 字幕时间戳与音视频源时间一致：使用同一份 clipSourceTime 映射（含倒放/冻结/曲线）
+          const { srcT: offset } = clipSourceTime(currentTime, clip);
           const item = s.items.find(i => offset >= i.start && offset < i.end);
           if (item) {
             const isCenter = s.position === 'center';
@@ -226,8 +260,7 @@ export default function PreviewCanvas() {
     activeVideoClips.forEach(({ clip }) => {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
-      const speed = clip.speed ?? 1.0;
-      const targetTime = clip.src_range.start + (currentTime - clip.timelineIn) * speed;
+      const { srcT: targetTime } = clipSourceTime(currentTime, clip);
       if (v.readyState >= 1 && Math.abs(v.currentTime - targetTime) > 0.3) {
         v.currentTime = Math.max(0, targetTime);
       }
@@ -235,8 +268,7 @@ export default function PreviewCanvas() {
     activeAudioClips.forEach(({ clip }) => {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
-      const speed = clip.speed ?? 1.0;
-      const targetTime = clip.src_range.start + (currentTime - clip.timelineIn) * speed;
+      const { srcT: targetTime } = clipSourceTime(currentTime, clip);
       if (a.readyState >= 1 && Math.abs(a.currentTime - targetTime) > 0.3) {
         a.currentTime = Math.max(0, targetTime);
       }
@@ -252,7 +284,8 @@ export default function PreviewCanvas() {
       const track = project.tracks.find(t => t.clips.some(c => c.id === clip.id));
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
-      v.volume = shouldHaveAudio ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
+      const { frozen } = clipSourceTime(currentTime, clip);
+      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
     });
     activeAudioClips.forEach(({ clip, trackId }) => {
       const a = audioRefs.current.get(clip.id);
@@ -260,16 +293,16 @@ export default function PreviewCanvas() {
       const track = project.tracks.find(t => t.id === trackId);
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
-      a.volume = shouldHaveAudio ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
+      const { frozen } = clipSourceTime(currentTime, clip);
+      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
     });
-  }, [volume, activeVideoClips, activeAudioClips, project.tracks, hasSolo]);
+  }, [volume, activeVideoClips, activeAudioClips, project.tracks, hasSolo, currentTime]);
 
   // 视频元数据加载完成：seek 到正确位置 + 恢复播放
   const onLoadedMetadataFor = (clip: ClipConfig) => () => {
     const v = videoRefs.current.get(clip.id);
     if (!v) return;
-    const speed = clip.speed ?? 1.0;
-    const targetTime = clip.src_range.start + (currentTime - clip.timelineIn) * speed;
+    const { srcT: targetTime } = clipSourceTime(currentTime, clip);
     v.currentTime = Math.max(0, Math.min(v.duration || targetTime, targetTime));
     if (useUIStore.getState().isPlaying) v.play().catch(() => {});
   };
@@ -278,8 +311,7 @@ export default function PreviewCanvas() {
   const onLoadedMetadataForAudio = (clip: ClipConfig) => () => {
     const a = audioRefs.current.get(clip.id);
     if (!a) return;
-    const speed = clip.speed ?? 1.0;
-    const targetTime = clip.src_range.start + (currentTime - clip.timelineIn) * speed;
+    const { srcT: targetTime } = clipSourceTime(currentTime, clip);
     a.currentTime = Math.max(0, Math.min(a.duration || targetTime, targetTime));
     if (useUIStore.getState().isPlaying) a.play().catch(() => {});
   };

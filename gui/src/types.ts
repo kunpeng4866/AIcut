@@ -35,9 +35,15 @@ export interface SubtitleContent {
   position?: 'bottom' | 'top' | 'center';
 }
 
+// ── 时间重映射（与后端 clip_source_time 一致） ──
+export interface FreezeConfig { start: number; sourceTime: number; duration: number; }
+export interface SpeedPointConfig { play: number; src: number; }
+export interface TimeRemapConfig { reverse?: boolean; freeze?: FreezeConfig | null; curve?: SpeedPointConfig[]; }
+
 export interface ClipConfig {
   id: string; assetId: string; src_range: RangeConfig; timelineIn: number; timelineOut: number;
   transform?: TransformConfig; volume?: number; speed?: number;
+  time_remap?: TimeRemapConfig;
   effects?: any[]; masks?: any[]; filters?: any[]; keyframes?: Record<string, any>;
   text?: TextContent;
   subtitle?: SubtitleContent;

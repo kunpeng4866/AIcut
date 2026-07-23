@@ -630,7 +630,8 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         // 1. 构建并行预取请求（active clips 用 timeline 时间；转场后 clip 用转场进度对应源时间）
         let mut prefetch_reqs: Vec<PrefetchRequest> = video_clips.iter().map(|cr| {
             let clip = cr.clip;
-            let src_t = timeline_to_source_time(t, clip);
+            // 统一映射：预览与导出共用同一套 clip_source_time（frozen 不影响取哪帧）
+            let src_t = clip_source_time(t, clip).0;
             let (w, h) = self.clip_decode_size(clip);
             let asset = self.project.asset_by_id(&clip.asset_id);
             let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
@@ -719,7 +720,11 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
                 Some(b) if !b.is_empty() => b,
                 _ => continue, // 无缓存（静音/无音频/抽取失败）→ 该片段无贡献
             };
-            let src_t = timeline_to_source_time(t, clip);
+            let (src_t, frozen) = clip_source_time(t, clip);
+            // 冻结帧：若仍按 src_t 索引音频缓存会重复同一采样产生直流音，故该 clip 贡献静音
+            if frozen {
+                continue;
+            }
             let base_idx = ((src_t - clip.src_range.start) * sr).round() as isize;
             let ch = channels.max(1);
             for i in 0..samples {
@@ -780,7 +785,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Asset, CanvasConfig, Clip, Range, Track, Transform};
+    use crate::project::{Asset, CanvasConfig, Clip, Range, TimeRemap, Track, Transform};
     use std::collections::HashMap;
 
     fn make_clip(id: &str, asset_id: &str, src_start: f64, src_end: f64, tl_in: f64, tl_out: f64) -> Clip {
@@ -798,6 +803,7 @@ mod tests {
             filters: Vec::new(),
             keyframes: HashMap::new(),
             speed_curve: Vec::new(),
+            time_remap: TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None,
             transition: None,

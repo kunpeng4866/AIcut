@@ -2,7 +2,7 @@
 import { useState, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
-import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType } from '../types';
+import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 
 type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition';
 
@@ -355,16 +355,94 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
   );
 }
 
-// 变速标签页
+// 变速标签页（含倒放 / 冻结帧 / 时间重映射曲线）
 function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
   const speed = clip.speed ?? 1;
-  const set = (v: number) => updateClip(trackId, clip.id, { speed: v });
+  const setSpeed = (v: number) => updateClip(trackId, clip.id, { speed: v });
+
+  const remap: TimeRemapConfig = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
+  const reverse = remap.reverse ?? false;
+  const freeze: FreezeConfig | null = remap.freeze ?? null;
+  const curve: SpeedPointConfig[] = remap.curve ?? [];
+  const hasCurve = curve.length > 0;
+
+  const toggleReverse = () => updateClip(trackId, clip.id, { time_remap: { ...remap, reverse: !reverse } });
+  const setFreezeEnabled = (on: boolean) =>
+    updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: on ? { start: 0, sourceTime: 0, duration: 1 } : null } });
+  const setFreezeField = (k: keyof FreezeConfig, v: number) =>
+    updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: { ...freeze!, [k]: v } } });
+  const setCurve = (next: SpeedPointConfig[]) => updateClip(trackId, clip.id, { time_remap: { ...remap, curve: next } });
+  const addKey = () => setCurve([...curve, { play: 0, src: 0 }]);
+  const removeKey = (i: number) => setCurve(curve.filter((_, idx) => idx !== i));
+  const setKey = (i: number, k: keyof SpeedPointConfig, v: number) =>
+    setCurve(curve.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
+
   return (
     <div>
-      <ParamSlider label="播放速度" value={speed} min={0.25} max={4} step={0.05} unit="x" editable onChange={set} />
+      <ParamSlider label="播放速度" value={speed} min={0.25} max={4} step={0.05} unit="x" editable onChange={setSpeed} />
       <div style={{ color: '#aaa', fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
         速度作用于时间线→素材映射：&gt;1 快放，&lt;1 慢放。当前片段时长 {(clip.timelineOut - clip.timelineIn).toFixed(2)}s。
+      </div>
+
+      <div style={S.divider} />
+
+      {/* 倒放 */}
+      <div style={S.row}>
+        <span style={S.label}>倒放</span>
+        <ToggleBtn active={reverse} onClick={toggleReverse}>{reverse ? '已倒放' : '正放'}</ToggleBtn>
+      </div>
+
+      {/* 冻结帧 */}
+      <div style={S.row}>
+        <span style={S.label}>冻结帧</span>
+        <ToggleBtn active={!!freeze} onClick={() => setFreezeEnabled(!freeze)}>{freeze ? '启用' : '关闭'}</ToggleBtn>
+      </div>
+      {freeze && (
+        <div style={{ paddingLeft: 8, borderLeft: '2px solid #0f3460' }}>
+          <div style={S.row}>
+            <span style={S.label}>起始</span>
+            <input type="number" style={S.input} value={freeze.start} step={0.1} min={0}
+              onChange={(e) => setFreezeField('start', parseFloat(e.target.value) || 0)} />
+            <span style={{ color: '#aaa', fontSize: 11 }}>s</span>
+          </div>
+          <div style={S.row}>
+            <span style={S.label}>源时间</span>
+            <input type="number" style={S.input} value={freeze.sourceTime} step={0.1} min={0}
+              onChange={(e) => setFreezeField('sourceTime', parseFloat(e.target.value) || 0)} />
+            <span style={{ color: '#aaa', fontSize: 11 }}>s</span>
+          </div>
+          <div style={S.row}>
+            <span style={S.label}>时长</span>
+            <input type="number" style={S.input} value={freeze.duration} step={0.1} min={0}
+              onChange={(e) => setFreezeField('duration', parseFloat(e.target.value) || 0)} />
+            <span style={{ color: '#aaa', fontSize: 11 }}>s</span>
+          </div>
+        </div>
+      )}
+
+      <div style={S.divider} />
+
+      {/* 时间重映射曲线 */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ color: '#eee', fontSize: 11 }}>时间重映射曲线</span>
+        <button style={S.btn} onClick={addKey}>+ 添加关键帧</button>
+      </div>
+      {curve.length === 0 && <div style={{ color: '#aaa', fontSize: 11, marginBottom: 6 }}>暂无关键帧（使用线性 speed 映射）</div>}
+      {curve.map((pt, i) => (
+        <div key={i} style={{ ...S.item, display: 'flex', gap: 4, alignItems: 'center', padding: 4, marginBottom: 4 }}>
+          <span style={{ color: '#aaa', fontSize: 10, width: 28 }}>play</span>
+          <input type="number" style={{ ...S.input, flex: 1 }} value={pt.play} step={0.1}
+            onChange={(e) => setKey(i, 'play', parseFloat(e.target.value) || 0)} />
+          <span style={{ color: '#aaa', fontSize: 10, width: 24 }}>src</span>
+          <input type="number" style={{ ...S.input, flex: 1 }} value={pt.src} step={0.1}
+            onChange={(e) => setKey(i, 'src', parseFloat(e.target.value) || 0)} />
+          <button style={S.btn} onClick={() => removeKey(i)}>×</button>
+        </div>
+      ))}
+
+      <div style={{ color: '#888', fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
+        曲线非空时，倒放 / 冻结将被忽略，曲线为权威映射。
       </div>
     </div>
   );
