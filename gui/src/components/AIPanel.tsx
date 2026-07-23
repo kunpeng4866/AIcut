@@ -33,6 +33,7 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
     isTranscribing,
     result,
     error,
+    asrResult,
     setTranscript,
     setLang,
     generateSubtitles,
@@ -81,6 +82,26 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
     await transcribe(asrPath, lang);
     const st = useAiStore.getState();
     if (st.transcript && !st.error) setAsrDone(true);
+  };
+
+  // 用 ASR 真实语音时间戳直接生成字幕（与音频精准对齐，无需 DeepSeek 重猜时间轴）
+  const handleBuildFromAsr = () => {
+    if (!asrResult) return;
+    const sub: SubtitleGenResult = {
+      items: asrResult.segments.map((s) => ({ start: s.start, end: s.end, text: s.text })),
+      fontFamily: undefined,
+      fontSize: undefined,
+      color: undefined,
+      position: 'bottom',
+    };
+    if (onApply) {
+      const msg = onApply(sub);
+      setAppliedInfo(msg || '✅ 已用语音时间戳生成字幕（与音频对齐），可在画布预览');
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn('[AIPanel] 未提供 onApply 回调，字幕未写入片段');
+      setAppliedInfo('未接入 onApply：字幕已生成但未写入片段');
+    }
   };
 
   const [appliedInfo, setAppliedInfo] = React.useState<string | null>(null);
@@ -145,6 +166,14 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
           <div style={{ color: '#7bed9f', marginTop: 6 }}>
             ✅ 已转写并填入文本，点下方「生成字幕」即可生成时间轴字幕
           </div>
+        )}
+        {asrResult && !isTranscribing && (
+          <button
+            onClick={handleBuildFromAsr}
+            style={{ width: '100%', marginTop: 6, padding: '6px 10px', background: '#27ae60', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+          >
+            用语音时间戳直接生成字幕
+          </button>
         )}
       </div>
 

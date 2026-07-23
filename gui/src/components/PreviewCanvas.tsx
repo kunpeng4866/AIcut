@@ -129,7 +129,10 @@ export default function PreviewCanvas() {
         }
         if (clip.subtitle) {
           const s = clip.subtitle;
-          const offset = currentTime - clip.timelineIn;
+          // 字幕时间戳与音视频源时间一致：需换算到源时间（含 src_range 偏移与变速）
+          const srcStart = clip.src_range?.start ?? 0;
+          const speed = clip.speed ?? 1;
+          const offset = srcStart + (currentTime - clip.timelineIn) * speed;
           const item = s.items.find(i => offset >= i.start && offset < i.end);
           if (item) {
             const isCenter = s.position === 'center';

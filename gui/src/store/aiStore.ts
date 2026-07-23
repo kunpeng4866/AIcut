@@ -10,6 +10,8 @@ import type { AiState, SubtitleGenResult } from '../aiTypes';
 
 interface AiStore extends AiState {
   isTranscribing: boolean;
+  // 存储 ASR 完整结果（含每句精确时间戳），用于"用语音时间戳直接生成字幕"
+  asrResult: { text: string; segments: { start: number; end: number; text: string }[] } | null;
   setTranscript: (t: string) => void;
   setLang: (l: string) => void;
   generateSubtitles: (transcript: string, lang: string) => Promise<void>;
@@ -24,6 +26,7 @@ export const useAiStore = create<AiStore>((set) => ({
   error: null,
   transcript: '',
   lang: 'zh',
+  asrResult: null,
 
   setTranscript: (t) => set({ transcript: t }),
   setLang: (l) => set({ lang: l }),
@@ -60,7 +63,8 @@ export const useAiStore = create<AiStore>((set) => ({
     try {
       const resp = await window.aicut.asr.transcribe(audioPath, lang);
       if (!resp.success || !resp.data) throw new Error(resp.error || 'ASR 转写失败');
-      set({ transcript: resp.data.text, isTranscribing: false });
+      // 同时保存完整 ASR 结果（含 segments 时间戳），供"用语音时间戳直接生成字幕"使用
+      set({ transcript: resp.data.text, asrResult: resp.data, isTranscribing: false });
     } catch (e: any) {
       set({ error: e?.message ?? String(e), isTranscribing: false });
     }
