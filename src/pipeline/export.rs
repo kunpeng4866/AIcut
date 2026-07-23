@@ -12,6 +12,7 @@ use crate::project::{CanvasConfig, Clip, Project};
 use crate::subtitle;
 use crate::timeline::Timeline;
 use crate::AppError;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -96,6 +97,10 @@ pub struct ExportPipeline<'a> {
     decoder_pool: DecoderPool,
     /// 多轨道合成器
     compositor: Compositor,
+    /// 音频源整段预抽缓存：clip_id -> 完整源音频（f32le，按 config.sample_rate / audio_channels 交错）
+    /// 导出前一次性抽取每个音源片段的完整段，逐帧混音时直接按时间索引，
+    /// 把 FFmpeg 进程数从 O(帧数 × 音源数) 降到 O(音源数)。
+    audio_cache: HashMap<String, Vec<f32>>,
 }
 
 impl<'a> ExportPipeline<'a> {
@@ -106,7 +111,7 @@ impl<'a> ExportPipeline<'a> {
         let clock = SteppedClock::new(config.fps, duration);
         let decoder_pool = DecoderPool::new(32).with_accurate_seek(config.accurate_seek);
         let compositor = Compositor::new(config.width, config.height);
-        Self { project, timeline, clock, config, decoder_pool, compositor }
+        Self { project, timeline, clock, config, decoder_pool, compositor, audio_cache: HashMap::new() }
     }
 
     /// 从 Project 的画布配置自动创建
@@ -237,6 +242,83 @@ impl<'a> ExportPipeline<'a> {
         })
     }
 
+    /// 导出前，一次性预抽取所有音频源片段的完整源音频到内存缓存。
+    ///
+    /// 传统逐帧混音对每个「视频帧 × 音源」都起一次 FFmpeg 进程，长片 = 帧数 × 音轨数 次
+    /// 进程创建，极慢。改为：导出开始前对每个音频源片段抽取其完整源音频段
+    /// （从 `src_range.start` 起，持续 `(timeline_out - timeline_in) × speed` 秒），
+    /// 逐帧混音时直接按时间索引缓存，把进程数从 O(帧数 × 音源数) 降到 O(音源数)。
+    ///
+    /// 时间索引语义与 `render_audio_chunk` 原逐帧抽取完全一致（含 speed 抽稀），不改变既有混音行为。
+    /// 内存代价：每个音源片段完整音频驻留内存（f32le），对典型短片可接受；与逐帧抽相比是一次性的。
+    fn build_audio_cache(&mut self) {
+        let sample_rate = self.config.sample_rate;
+        let channels = self.config.audio_channels;
+
+        // solo 轨判定（决定哪些轨参与混音），与 render_audio_chunk 保持一致
+        let any_solo = self.project.tracks.iter().any(|t| {
+            (t.track_type == "audio" || t.track_type == "video" || t.track_type == "effect")
+                && !t.clips.is_empty()
+                && t.solo
+        });
+
+        for track in &self.project.tracks {
+            if track.track_type != "audio"
+                && track.track_type != "video"
+                && track.track_type != "effect"
+            {
+                continue;
+            }
+            if track.muted {
+                continue;
+            }
+            if any_solo && !track.solo {
+                continue;
+            }
+
+            for clip in &track.clips {
+                // 仅对可能含音频的素材类型预抽（video/audio），跳过 image/text/subtitle 等
+                let asset = match self.project.asset_by_id(&clip.asset_id) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                if asset.asset_type != "video" && asset.asset_type != "audio" {
+                    continue;
+                }
+                if clip.speed <= 0.0 {
+                    continue;
+                }
+                let total_src = (clip.timeline_out - clip.timeline_in) * clip.speed;
+                if total_src <= 0.0 {
+                    continue;
+                }
+
+                let cmd = ffmpeg::build_extract_audio_cmd(
+                    &asset.path,
+                    clip.src_range.start,
+                    total_src,
+                    sample_rate,
+                    channels,
+                );
+                let buf = match Command::new(&cmd[0])
+                    .args(&cmd[1..])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                {
+                    Ok(o) if o.status.success() => o
+                        .stdout
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                    // 抽取失败（静音素材 / 无音频流 / 路径不存在）→ 该片段无音频贡献
+                    _ => Vec::new(),
+                };
+                self.audio_cache.insert(clip.id.clone(), buf);
+            }
+        }
+    }
+
     // ── 完整导出 ──
 
     /// 执行完整导出
@@ -254,9 +336,15 @@ impl<'a> ExportPipeline<'a> {
         let total = self.clock.total_frames();
         let has_audio = self.any_audio_sources();
 
+        // 有音频：导出前一次性预抽所有音源片段的完整段，避免逐帧起 FFmpeg 进程
+        if has_audio {
+            self.build_audio_cache();
+        }
+
         // 视频输出目标：有音频时先渲染到临时文件，最后与音频 mux；否则直接输出
         let video_out = if has_audio {
-            format!("{}.aicut_video", output_path)
+            // 必须以 .mp4 结尾，否则 FFmpeg 无法从扩展名推断容器格式而立即退出
+            format!("{}.aicut_video.mp4", output_path)
         } else {
             output_path.to_string()
         };
@@ -618,6 +706,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         let sample_rate = self.config.sample_rate;
         let mut mixed: Vec<f32> = vec![0.0; samples * channels.max(1)];
 
+        let sr = sample_rate as f64;
         for (clip, tid) in &sources {
             let track = self.track_by_id(tid);
             let track_vol = track.map(|tr| tr.volume).unwrap_or(1.0) as f32;
@@ -625,33 +714,33 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let gain = clip.volume as f32 * track_vol;
             let (l_gain, r_gain) = Self::pan_gains(track_pan);
 
+            // 从整段预抽缓存按时间索引（替代逐帧起 FFmpeg 进程）
+            let cached = match self.audio_cache.get(&clip.id) {
+                Some(b) if !b.is_empty() => b,
+                _ => continue, // 无缓存（静音/无音频/抽取失败）→ 该片段无贡献
+            };
             let src_t = timeline_to_source_time(t, clip);
-            let duration = samples as f64 / sample_rate as f64;
-            let asset = self.project.asset_by_id(&clip.asset_id);
-            let input_path = asset.map(|a| a.path.as_str()).unwrap_or("");
-            let cmd = ffmpeg::build_extract_audio_cmd(
-                input_path, src_t, duration,
-                sample_rate, self.config.audio_channels,
-            );
-            let output = Command::new(&cmd[0])
-                .args(&cmd[1..])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .map_err(|e| AppError::Render(format!("FFmpeg 音频抽取失败: {}", e)))?;
-            if !output.status.success() { continue; }
-
-            let f32_samples: Vec<f32> = output.stdout.chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
+            let base_idx = ((src_t - clip.src_range.start) * sr).round() as isize;
             let ch = channels.max(1);
-            let n = f32_samples.len() / ch;
-            for i in 0..n.min(samples) {
+            for i in 0..samples {
+                let s_idx = base_idx + i as isize;
+                if s_idx < 0 {
+                    continue;
+                }
+                let s_idx = s_idx as usize;
                 for c in 0..ch {
-                    let src_val = f32_samples.get(i * ch + c).copied().unwrap_or(0.0);
-                    let out_gain = if ch == 1 { gain } else if c == 0 { gain * l_gain } else { gain * r_gain };
+                    let out_gain = if ch == 1 {
+                        gain
+                    } else if c == 0 {
+                        gain * l_gain
+                    } else {
+                        gain * r_gain
+                    };
+                    let src_val = cached.get(s_idx * ch + c).copied().unwrap_or(0.0);
                     let idx = i * ch + c;
-                    if idx < mixed.len() { mixed[idx] += src_val * out_gain; }
+                    if idx < mixed.len() {
+                        mixed[idx] += src_val * out_gain;
+                    }
                 }
             }
         }
