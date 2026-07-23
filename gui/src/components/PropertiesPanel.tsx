@@ -3,6 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
+import { SpeedCurveEditor } from './SpeedCurveEditor';
 
 type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition';
 
@@ -428,6 +429,7 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
         <span style={{ color: '#eee', fontSize: 11 }}>时间重映射曲线</span>
         <button style={S.btn} onClick={addKey}>+ 添加关键帧</button>
       </div>
+      <SpeedCurveEditor clip={clip} curve={curve} freeze={freeze} reverse={reverse} onChange={setCurve} />
       {curve.length === 0 && <div style={{ color: '#aaa', fontSize: 11, marginBottom: 6 }}>暂无关键帧（使用线性 speed 映射）</div>}
       {curve.map((pt, i) => (
         <div key={i} style={{ ...S.item, display: 'flex', gap: 4, alignItems: 'center', padding: 4, marginBottom: 4 }}>

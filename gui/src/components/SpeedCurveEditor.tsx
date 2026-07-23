@@ -1,0 +1,272 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { useUIStore } from '../store/uiStore';
+import { ClipConfig, SpeedPointConfig, FreezeConfig } from '../types';
+
+// 曲线编辑器可视化：横轴 = 播放时间(play, timeline 相对偏移 0~dur)
+// 纵轴 = 源时间(src, 相对 src_range.start 偏移 0~srcDur)
+// 与后端 src/pipeline/strategy.rs 的 clip_source_time / piecewise_linear 一一对应。
+//   - 曲线非空：分段直线连接关键帧 (play,src)，两端按首/末点 src 延伸；reverse/freeze 被忽略
+//   - 曲线为空 + freeze：冻结区间矩形高亮 + 源时间水平平台
+//   - 曲线为空 + reverse：下降对角线 (0,srcDur)→(dur,0)
+// 交互：拖拽关键帧(限制不越过相邻点)、双击空白新增、Shift+点击删除、蓝色播放头随 currentTime 移动
+
+const H = 190;            // canvas CSS 高度
+const PAD = 30;           // 坐标轴内边距
+const HIT = 9;            // 关键帧命中半径(px)
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+interface Props {
+  clip: ClipConfig;
+  curve: SpeedPointConfig[];
+  freeze: FreezeConfig | null;
+  reverse: boolean;
+  onChange: (next: SpeedPointConfig[]) => void;
+}
+
+export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(360);
+  const [dragOrig, setDragOrig] = useState<number | null>(null);
+  const currentTime = useUIStore((s) => s.currentTime);
+
+  const dur = Math.max(0.001, clip.timelineOut - clip.timelineIn);
+  const srcDur = Math.max(0.001, clip.src_range.end - clip.src_range.start);
+  const hasCurve = curve.length > 0;
+
+  // 始终保留最新 curve 快照，供鼠标事件构造新数组
+  const curveRef = useRef(curve);
+  curveRef.current = curve;
+
+  // 按 play 升序并保留原始索引
+  const points = curve.map((p, idx) => ({ ...p, idx })).sort((a, b) => a.play - b.play);
+
+  // 响应式宽度
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setWidth(Math.max(220, e.contentRect.width));
+    });
+    ro.observe(el);
+    setWidth(Math.max(220, el.clientWidth));
+    return () => ro.disconnect();
+  }, []);
+
+  const plotW = width - PAD * 2;
+  const plotH = H - PAD * 2;
+  const playToX = (play: number) => PAD + (play / dur) * plotW;
+  const xToPlay = (x: number) => clamp(((x - PAD) / plotW) * dur, 0, dur);
+  const srcToY = (src: number) => PAD + plotH - (src / srcDur) * plotH;
+  const yToSrc = (y: number) => clamp(((plotH - (y - PAD)) / plotH) * srcDur, 0, srcDur);
+
+  // 绘制
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(H * dpr);
+    canvas.style.width = width + 'px';
+    canvas.style.height = H + 'px';
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, H);
+
+    // 画布底色
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(PAD, PAD, plotW, plotH);
+
+    // 网格
+    ctx.strokeStyle = '#1c2530';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const gx = PAD + (i / 4) * plotW;
+      ctx.beginPath(); ctx.moveTo(gx, PAD); ctx.lineTo(gx, PAD + plotH); ctx.stroke();
+      const gy = PAD + (i / 4) * plotH;
+      ctx.beginPath(); ctx.moveTo(PAD, gy); ctx.lineTo(PAD + plotW, gy); ctx.stroke();
+    }
+
+    // 轴标签
+    ctx.fillStyle = '#6b7785';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('播放时间 (s)', PAD + plotW / 2, H - 6);
+    ctx.save();
+    ctx.translate(10, PAD + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('源时间 (s)', 0, 0);
+    ctx.restore();
+    // 端点数值
+    ctx.textAlign = 'left';
+    ctx.fillText(dur.toFixed(1), PAD + plotW - 22, PAD + plotH + 12);
+    ctx.textAlign = 'right';
+    ctx.fillText(srcDur.toFixed(1), PAD - 4, PAD + 10);
+
+    // 1x 参考对角线 (play == src)
+    ctx.strokeStyle = '#26323f';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(playToX(0), srcToY(0));
+    ctx.lineTo(playToX(dur), srcToY(srcDur));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 无曲线：冻结 / 倒放 可视化
+    if (!hasCurve) {
+      if (freeze) {
+        const fx0 = playToX(freeze.start);
+        const fx1 = playToX(freeze.start + freeze.duration);
+        ctx.fillStyle = 'rgba(76,201,240,0.18)';
+        ctx.fillRect(fx0, PAD, Math.max(1, fx1 - fx0), plotH);
+        ctx.strokeStyle = '#4cc9f0';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(fx0, PAD, Math.max(1, fx1 - fx0), plotH);
+        // 源时间平台水平线
+        const fy = srcToY(freeze.sourceTime);
+        ctx.strokeStyle = '#ffd166';
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath(); ctx.moveTo(PAD, fy); ctx.lineTo(PAD + plotW, fy); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#4cc9f0';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('冻结', fx0 + 3, PAD + 11);
+      } else if (reverse) {
+        ctx.strokeStyle = '#e94560';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(playToX(0), srcToY(srcDur));
+        ctx.lineTo(playToX(dur), srcToY(0));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#e94560';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText('REV 倒放', PAD + plotW - 4, PAD + 13);
+      }
+    }
+
+    // 曲线（权威映射）
+    if (hasCurve) {
+      ctx.strokeStyle = '#e94560';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(playToX(0), srcToY(points[0].src));
+      for (const p of points) ctx.lineTo(playToX(p.play), srcToY(p.src));
+      ctx.lineTo(playToX(dur), srcToY(points[points.length - 1].src));
+      ctx.stroke();
+    }
+
+    // 关键帧圆点
+    for (const p of points) {
+      const x = playToX(p.play), y = srcToY(p.src);
+      ctx.fillStyle = dragOrig === p.idx ? '#ff8c42' : '#ffd166';
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+    }
+
+    // 播放头
+    const off = currentTime - clip.timelineIn;
+    if (off >= 0 && off <= dur) {
+      const px = playToX(off);
+      ctx.strokeStyle = '#4cc9f0';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px, PAD); ctx.lineTo(px, PAD + plotH); ctx.stroke();
+      // 当前映射点
+      let curSrc = 0;
+      if (hasCurve) {
+        if (off <= points[0].play) curSrc = points[0].src;
+        else if (off >= points[points.length - 1].play) curSrc = points[points.length - 1].src;
+        else {
+          for (let i = 0; i < points.length - 1; i++) {
+            const a = points[i], b = points[i + 1];
+            if (off >= a.play && off <= b.play) {
+              const r = (off - a.play) / (b.play - a.play || 1);
+              curSrc = a.src + r * (b.src - a.src);
+              break;
+            }
+          }
+        }
+      } else if (freeze && off >= freeze.start && off < freeze.start + freeze.duration) {
+        curSrc = freeze.sourceTime;
+      } else {
+        curSrc = reverse ? srcDur - off : off; // 简化：speed=1 示意
+      }
+      const py = srcToY(curSrc ?? 0);
+      ctx.fillStyle = '#4cc9f0';
+      ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }, [width, curve, freeze, reverse, currentTime, dur, srcDur, clip.timelineIn, points, hasCurve, dragOrig]);
+
+  // ── 鼠标交互 ──
+  const getPos = (e: React.MouseEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { mx: e.clientX - rect.left, my: e.clientY - rect.top };
+  };
+  const hitTest = (mx: number, my: number): number => {
+    let best = -1, bd = HIT * HIT;
+    for (const p of points) {
+      const dx = mx - playToX(p.play), dy = my - srcToY(p.src);
+      const d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = p.idx; }
+    }
+    return best;
+  };
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    const { mx, my } = getPos(e);
+    const hit = hitTest(mx, my);
+    if (hit >= 0) {
+      if (e.shiftKey) {
+        // 删除
+        onChange(curveRef.current.filter((_, i) => i !== hit));
+      } else {
+        setDragOrig(hit);
+      }
+    }
+  };
+
+  const onMouseMove = (e: React.MouseEvent) => {
+    if (dragOrig === null) return;
+    const { mx, my } = getPos(e);
+    let newPlay = xToPlay(mx);
+    const newSrc = yToSrc(my);
+    // 限制不越过相邻关键帧的 play（保持分段单调）
+    const k = points.findIndex((p) => p.idx === dragOrig);
+    const left = k > 0 ? points[k - 1].play : 0;
+    const right = k < points.length - 1 ? points[k + 1].play : dur;
+    newPlay = clamp(newPlay, left, right);
+    onChange(curveRef.current.map((p, i) => i === dragOrig ? { play: newPlay, src: newSrc } : p));
+  };
+
+  const onMouseUp = () => setDragOrig(null);
+
+  const onDoubleClick = (e: React.MouseEvent) => {
+    const { mx, my } = getPos(e);
+    if (hitTest(mx, my) >= 0) return; // 落在点上不新增
+    const newPlay = xToPlay(mx);
+    const newSrc = yToSrc(my);
+    onChange([...curveRef.current, { play: newPlay, src: newSrc }]);
+  };
+
+  return (
+    <div ref={wrapRef} style={{ width: '100%', marginBottom: 8 }}>
+      <canvas
+        ref={canvasRef}
+        style={{ width: '100%', borderRadius: 6, cursor: dragOrig !== null ? 'grabbing' : 'crosshair', touchAction: 'none' }}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
+        onDoubleClick={onDoubleClick}
+      />
+      <div style={{ color: '#888', fontSize: 10, marginTop: 3, lineHeight: 1.5 }}>
+        拖拽关键帧调整 · 双击空白处添加 · Shift+点击删除 · 蓝线为播放头
+      </div>
+    </div>
+  );
+}
