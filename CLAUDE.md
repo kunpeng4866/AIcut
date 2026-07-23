@@ -11,8 +11,8 @@
 | 技术栈 | **Rust**（引擎）+ **Electron 31**（桌面壳）+ **React 18 + TypeScript + Zustand**（前端）+ **WebGPU**（GPU 预览） |
 | 架构 | Rust 引擎 (`src/`) + Electron 主进程 (`gui/electron/`) + React 渲染进程 (`gui/src/`) |
 | Phase | **Phase 5 已完成** — 轨道管理 + 导出管线 + 多视频合成 |
-| 代码规模 | Rust 7,499 行（24 文件）+ GUI 3,384 行（20 文件）= 10,883 行 |
-| 测试 | 220 全绿（176 lib + 44 integration） |
+| 代码规模 | Rust ~7,900 行（25 文件）+ GUI ~3,700 行（23 文件） |
+| 测试 | 231 全绿（187 lib + 44 integration） |
 | Rust 工具链 | cargo, napi-rs (条件编译 `--features napi`), target: x86_64-pc-windows-msvc |
 | 项目路径 | E:\AIcut |
 
@@ -44,11 +44,12 @@ AIcut/
 │   ├── types.rs            # 共享类型 (66L)
 │   ├── plugin.rs           # 插件系统: PluginManifest + PluginManager (295L)
 │   ├── tts.rs              # 火山引擎TTS: VolcanoTtsClient + synthesize_to_file (297L)
+│   ├── ai.rs               # ★AI: DeepSeek LLM 封装 (自动字幕/脚本润色) (309L)
 │   └── pipeline/           # ★渲染管线
 │       ├── mod.rs          # 模块导出 (21L)
 │       ├── strategy.rs     # 策略选择(快速/完整) (339L)
 │       ├── preview.rs      # 预览管线 (644L)
-│       └── export.rs       # ★导出管线: DecoderPool+Compositor集成 (661L)
+│       └── export.rs       # ★导出管线: DecoderPool+Compositor+混音音频mux (770L)
 ├── plugins/                # 插件目录
 │   └── example_brightness/ # 示例: 亮度调节滤镜
 │       └── manifest.json   # 插件清单 (id/name/parameters/filter_spec)
@@ -64,7 +65,8 @@ AIcut/
 │   └── src/
 │       ├── App.tsx         # 主布局 (Splitter可拖拽: 左面板+预览+右面板+时间轴) (130L)
 │       ├── main.tsx        # React 入口 (4L)
-│       ├── types.ts        # 前端类型 (TrackConfig含muted/solo/isMain, ExportOptions) (71L)
+│       ├── types.ts        # 前端类型 (TrackConfig含muted/solo/isMain/volume/pan, ClipConfig含speed/transition, ExportOptions) (71L)
+│       ├── aiTypes.ts      # AI 类型 (字幕/脚本请求响应) (NEW)
 │       ├── config/         # AI配置系统
 │       │   ├── ai_config.ts     # 配置类型+验证+默认值 (128L)
 │       │   ├── useConfig.ts     # 配置读写Hook (105L)
@@ -75,6 +77,7 @@ AIcut/
 │       │   ├── uiStore.ts       # 选中/播放/缩放/双吸附开关/面板尺寸 (77L)
 │       │   ├── configStore.ts   # 配置状态 (52L)
 │       │   └── historyStore.ts  # 撤销/重做 (56L)
+│       │   └── aiStore.ts        # AI 状态 (自动字幕/脚本任务) (NEW)
 │       ├── hooks/
 │       │   └── useWaveform.ts   # ★Web Audio API 音频波形解码 (80L)
 │       └── components/
@@ -83,7 +86,9 @@ AIcut/
 │           ├── PreviewCanvas.tsx  # ★预览画布 (WebGPU多pass + HTML5回退 + RAF时钟 + 音频轨) (354L)
 │           ├── WebGPUPreview.tsx  # ★WebGPU预览: 多pass Over合成, MAX_CLIPS=4 (278L)
 │           ├── Timeline.tsx       # ★时间轴 (双吸附/跨轨拖拽/轨道控制/波形) (622L)
-│           ├── PropertiesPanel.tsx # 属性面板 (变换/滤镜/特效/音频/关键帧) (323L)
+│           ├── PropertiesPanel.tsx # 属性面板 (变换/滤镜/特效/音频/变速/转场/关键帧) (398L)
+│           ├── MixerPanel.tsx     # ★混音器面板 (轨道音量/声相/静音/独奏) (NEW)
+│           ├── AIPanel.tsx        # AI 面板 (自动字幕/脚本) (NEW)
 │           ├── ExportDialog.tsx   # ★导出对话框 (分辨率/格式/质量/进度) (295L)
 │           └── Splitter.tsx       # ★可拖拽分隔条 (horizontal/vertical) (51L)
 ├── tests/integration_test.rs  # 44 场景全过
@@ -115,16 +120,20 @@ export_project(json, output_path)
   → 执行 ffmpeg 单命令导出
 ```
 
-### 3. 完整导出路径（多轨道合成）
+### 3. 完整导出路径（多轨道合成 + 混音音频）
 ```
 export_project(json, output_path)
   → is_simple_project() → false
-  → ExportPipeline:
-    → DecoderPool (并行预取所有轨道帧)
-    → Compositor (逐层解码 → Porter-Duff Over合成)
-    → FFmpeg 管道编码 (stdin写入帧数据)
-  → 输出视频文件
+  → ExportPipeline::run():
+    → 视频: DecoderPool (并行预取) → Compositor (Porter-Duff Over) → FFmpeg管道编码到临时视频文件(无音频)
+    → 音频: 逐帧 render_audio_chunk() 多源混音 (clip.volume * track.volume, track.pan声相, muted/solo过滤, 限幅)
+            → 累加为 f32le 原始音频临时文件
+    → 若工程含音频源: ffmpeg 将临时视频 + 混音音频 mux (视频 -c:v copy, 音频 aac) → 最终文件
+    → 否则: 临时视频文件直接作为最终输出
+  → 输出视频文件 (含混音音频)
 ```
+> 注: 转场在 render_video_frame 中检测 clip.transition，叠加同轨下一片段做 Over 交叉淡化/滑动
+> 注: 快速路径 (is_simple_project) 仍由 graph.rs 生成单条 FFmpeg 命令，保留原素材音轨
 
 ## 关键数据结构
 
@@ -142,6 +151,8 @@ struct Track {
     muted: bool,                 // ★静音: 画面正常声音静默
     solo: bool,                  // ★独奏: 仅独奏轨有声音
     is_main: bool,               // ★主视频轨标记
+    volume: f64,                 // ★混音器: 轨道音量 0.0–2.0 (1.0=原始)
+    pan: f64,                    // ★混音器: 声相 -1.0(全左) – 1.0(全右) (0.0=居中)
 }
 // 实现了 Default trait, 构造时用 ..Default::default()
 ```
@@ -178,7 +189,8 @@ struct Asset { id, type, path, duration, width, height, codec }
 struct Clip { asset_id, src_range: Range<f64>, timeline_in/out: f64,
              transform: Transform, volume: f64, speed: f64,
              effects: Vec<Effect>, masks: Vec<Mask>, filters: Vec<FilterInstance>,
-             keyframes: HashMap<String, KeyframeTrack> }
+             keyframes: HashMap<String, KeyframeTrack>,
+             transition: Option<Transition> }  // ★转场: 结尾与同轨下一片段过渡
 struct Transform { x, y, scale_x, scale_y, rotation, opacity } // 归一化 0-1
 struct RenderCommand { inputs, filter_graph: String, output_codec, crf, resolution, fps, bitrate }
 ```
@@ -197,7 +209,9 @@ aicut-asset:// 协议 — 绕过系统代理直接读本地文件
 
 | 前端文件 | Rust 文件 | 关键映射 |
 |---------|----------|---------|
-| `types.ts` TrackConfig | `src/project.rs` Track | 字段对齐, TS多isMain/muted/solo |
+| `types.ts` TrackConfig | `src/project.rs` Track | 字段对齐, TS多isMain/muted/solo/volume/pan |
+| `MixerPanel.tsx` | `src/project.rs` Track | 轨道音量/声相/静音/独奏 ↔ Track.volume/pan/muted/solo + 导出混音 |
+| `PropertiesPanel.tsx`(变速/转场) | `src/project.rs` Clip | clip.speed ↔ 变速, clip.transition ↔ 转场导出合成 |
 | `projectStore.ts` | `src/project.rs` | sortTracks ↔ 轨道排序, realign ↔ 主轨排列 |
 | `PreviewCanvas.tsx` | `src/pipeline/preview.rs` | WebGPU预览 ↔ 预览管线 |
 | `ExportDialog.tsx` | `src/pipeline/export.rs` + `src/main.rs` | 导出UI ↔ export_project() |
@@ -220,6 +234,8 @@ aicut-asset:// 协议 — 绕过系统代理直接读本地文件
   - 可拖拽窗口：Splitter 组件 + 3 个分隔条
   - 音频波形：useWaveform hook（Web Audio API 解码 → WaveformCanvas）
 - **Electron 桌面应用**：Vite 构建成功，窗口正常，IPC 全通道
+- **Phase 7-1 混音器 + 变速/转场 UI**：Track.volume/pan 数据模型 + MixerPanel 面板 + PropertiesPanel 变速/转场标签页；导出管线两阶段（视频临时文件 + 混音音频 f32le → FFmpeg mux）已接通
+- **Phase 7-1 AI 集成（后端）**：`src/ai.rs` (DeepSeek LLM 封装：自动字幕/脚本润色) + 前端 `AIPanel/aiStore/aiTypes` 已建并通过类型检查
 
 ### 启动方式
 
@@ -250,10 +266,10 @@ aicut-engine new <name> [WxH]               # 创建新工程
 | P0 | 滤镜与特效 UI | Rust端filters.rs已有，缺前端面板 |
 | P0 | 关键帧动画 UI | Rust端keyframe.rs已有，缺前端录制/曲线编辑 |
 | P0 | 撤销/重做完善 | historyStore有框架，需全面接入 |
-| P1 | 字幕系统 | subtitle.rs已有解析，缺UI+语音转字幕 |
-| P1 | AI 功能集成 | TTS/ASR/LLM 接口已有，缺前端调用 |
-| P1 | 多轨混音器 | audio_pipeline.rs已有混音，缺混音器面板 |
-| P1 | 高级时间轴 | 转场/变速/倒放/冻结帧/时间重映射 |
+| P1 | 字幕系统 | 🟡 部分完成：字幕UI+导出已完成，语音转字幕(ASR)接入待做 |
+| P1 | AI 功能集成 | 🟡 部分完成：后端 ai.rs + 前端 AIPanel/aiStore/aiTypes 已建并编译，面板接入主布局待做 |
+| P1 | 多轨混音器 | ✅ 已完成：MixerPanel + Track.volume/pan + 导出多源混音mux |
+| P1 | 高级时间轴 | 🟡 部分完成：变速+转场UI已完成，倒放/冻结帧/时间重映射待做 |
 | P2 | 插件系统/性能优化/导出增强/工程管理 | 见开发进展报告.md |
 
 ## 开发规范

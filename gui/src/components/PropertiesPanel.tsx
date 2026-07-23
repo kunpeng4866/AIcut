@@ -2,15 +2,17 @@
 import { useState, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
-import type { ClipConfig, TransformConfig } from '../types';
+import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType } from '../types';
 
-type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle';
+type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition';
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'transform', label: '变换' },
   { key: 'filters', label: '滤镜' },
   { key: 'effects', label: '特效' },
   { key: 'audio', label: '音频' },
+  { key: 'speed', label: '变速' },
+  { key: 'transition', label: '转场' },
   { key: 'text', label: '文字' },
   { key: 'subtitle', label: '字幕' },
   { key: 'keyframes', label: '关键帧' },
@@ -196,11 +198,12 @@ function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; 
 // 音频标签页
 function AudioTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
-  const audio: any = (clip as any).audio || { volume: 1, pan: 0, fadein: 0, fadeout: 0, denoise: false, voice: '无' };
+  const audio: any = (clip as any).audio || { fadein: 0, fadeout: 0, denoise: false, voice: '无' };
   const set = (k: string, v: any) => updateClip(trackId, clip.id, { audio: { ...audio, [k]: v } } as Partial<ClipConfig>);
   return (
     <div>
-      <ParamSlider label="音量" value={audio.volume ?? 1} min={0} max={2} step={0.01} unit="%" onChange={(v) => set('volume', v)} />
+      {/* 片段音量：直接映射到后端 clip.volume（导出混音使用） */}
+      <ParamSlider label="音量" value={clip.volume ?? 1} min={0} max={2} step={0.01} unit="%" onChange={(v) => updateClip(trackId, clip.id, { volume: v })} />
       <ParamSlider label="声相" value={audio.pan ?? 0} min={-1} max={1} step={0.01} onChange={(v) => set('pan', v)} />
       <div style={S.row}>
         <span style={S.label}>淡入</span>
@@ -352,6 +355,49 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
   );
 }
 
+// 变速标签页
+function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
+  const updateClip = useProjectStore((s) => s.updateClip);
+  const speed = clip.speed ?? 1;
+  const set = (v: number) => updateClip(trackId, clip.id, { speed: v });
+  return (
+    <div>
+      <ParamSlider label="播放速度" value={speed} min={0.25} max={4} step={0.05} unit="x" editable onChange={set} />
+      <div style={{ color: '#aaa', fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
+        速度作用于时间线→素材映射：&gt;1 快放，&lt;1 慢放。当前片段时长 {(clip.timelineOut - clip.timelineIn).toFixed(2)}s。
+      </div>
+    </div>
+  );
+}
+
+// 转场标签页
+const TRANSITION_TYPES: { value: TransitionType; label: string }[] = [
+  { value: 'none', label: '无' },
+  { value: 'fade', label: '淡入淡出' },
+  { value: 'dissolve', label: '交叉溶解' },
+  { value: 'slide', label: '滑动' },
+];
+function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
+  const updateClip = useProjectStore((s) => s.updateClip);
+  const tr: TransitionConfig = clip.transition || { transitionType: 'none', duration: 0.5 };
+  const setType = (t: TransitionType) => updateClip(trackId, clip.id, { transition: { ...tr, transitionType: t } });
+  const setDur = (d: number) => updateClip(trackId, clip.id, { transition: { ...tr, duration: d } });
+  return (
+    <div>
+      <div style={S.row}>
+        <span style={S.label}>类型</span>
+        <select style={S.input} value={tr.transitionType ?? 'none'} onChange={(e) => setType(e.target.value as TransitionType)}>
+          {TRANSITION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </select>
+      </div>
+      <ParamSlider label="时长" value={tr.duration ?? 0.5} min={0.1} max={3} step={0.1} unit="s" editable onChange={setDur} />
+      <div style={{ color: '#aaa', fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
+        转场作用于本片段结尾与同轨下一片段之间（导出时合成交叉淡化 / 滑动）。
+      </div>
+    </div>
+  );
+}
+
 // 工程信息（未选中片段时显示）
 function ProjectInfo() {
   const project = useProjectStore((s) => s.project);
@@ -387,6 +433,8 @@ export default function PropertiesPanel() {
           activeTab === 'filters' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="filters" /> :
           activeTab === 'effects' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="effects" /> :
           activeTab === 'audio' ? <AudioTab clip={sel.clip} trackId={sel.trackId} /> :
+          activeTab === 'speed' ? <SpeedTab clip={sel.clip} trackId={sel.trackId} /> :
+          activeTab === 'transition' ? <TransitionTab clip={sel.clip} trackId={sel.trackId} /> :
           activeTab === 'text' ? <TextTab clip={sel.clip} trackId={sel.trackId} /> :
           activeTab === 'subtitle' ? <SubtitleTab clip={sel.clip} trackId={sel.trackId} /> :
           <KeyframesTab clip={sel.clip} trackId={sel.trackId} />

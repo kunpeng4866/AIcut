@@ -13,6 +13,7 @@ pub mod project;
 pub mod probe;
 pub mod project_io;
 pub mod subtitle;
+pub mod ai;
 pub mod mcp;
 pub mod provider;
 pub mod plugin;
@@ -191,6 +192,13 @@ mod napi_bindings {
     pub fn get_version() -> String {
         crate::get_version()
     }
+
+    #[napi]
+    pub fn ai_generate_subtitles(transcript: String, lang: String) -> napi::Result<String> {
+        let overlay = crate::ai::generate_subtitles_sync(&transcript, &lang)
+            .map_err(|e| napi::Error::from_reason(e))?;
+        serde_json::to_string(&overlay).map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
 }
 
 // ════════════════════ 单元测试 ════════════════════
@@ -216,7 +224,7 @@ mod tests {
             keyframes: std::collections::HashMap::new(),
             speed_curve: Vec::new(),
             text: None,
-            subtitle: None,
+            subtitle: None, transition: None,
         }
     }
 

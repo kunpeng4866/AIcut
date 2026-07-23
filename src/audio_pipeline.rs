@@ -382,7 +382,7 @@ mod tests {
             filters: vec![],
             keyframes: Default::default(),
             text: None,
-            subtitle: None,
+            subtitle: None, transition: None,
         }
     }
 

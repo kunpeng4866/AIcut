@@ -211,6 +211,7 @@ mod tests {
             speed_curve: Vec::new(),
             text: None,
             subtitle: None,
+            transition: None,
         }
     }
 

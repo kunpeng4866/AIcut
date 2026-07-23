@@ -240,7 +240,7 @@ mod tests {
             keyframes: HashMap::new(),
             speed_curve: Vec::new(),
             text: None,
-            subtitle: None,
+            subtitle: None, transition: None,
         }
     }
 

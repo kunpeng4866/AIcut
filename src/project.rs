@@ -111,6 +111,12 @@ pub struct Track {
     pub solo: bool,
     #[serde(default)]
     pub is_main: bool,
+    /// 混音器：轨道音量 0.0–2.0（1.0 = 原始音量）
+    #[serde(default = "one_f")]
+    pub volume: f64,
+    /// 混音器：声相 -1.0(全左) – 1.0(全右)（0.0 = 居中）
+    #[serde(default)]
+    pub pan: f64,
 }
 
 impl Default for Track {
@@ -125,6 +131,8 @@ impl Default for Track {
             muted: false,
             solo: false,
             is_main: false,
+            volume: 1.0,
+            pan: 0.0,
         }
     }
 }
@@ -163,7 +171,25 @@ pub struct Clip {
     /// 前端 SubtitleContent 映射（字幕叠加层）
     #[serde(default)]
     pub subtitle: Option<crate::subtitle::SubtitleOverlay>,
+    /// 转场：本片段结尾与同轨下一片段之间的过渡（None = 无）
+    #[serde(default)]
+    pub transition: Option<Transition>,
 }
+
+/// 转场定义：片段结尾与同轨下一片段之间的过渡效果
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transition {
+    /// 类型：none | fade | dissolve | slide
+    #[serde(default = "default_transition_type")]
+    pub transition_type: String,
+    /// 持续时间（秒）
+    #[serde(default = "default_transition_duration")]
+    pub duration: f64,
+}
+
+fn default_transition_type() -> String { "none".into() }
+fn default_transition_duration() -> f64 { 0.5 }
 
 // ---- 默认辅助函数 ----
 fn default_version() -> String { "1.0".into() }
@@ -309,7 +335,7 @@ mod tests {
                             timeline_in: 0.0, timeline_out: 5.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None, transition: None,
                         },
                         Clip {
                             id: "c2".into(), asset_id: "a2".into(),
@@ -317,7 +343,7 @@ mod tests {
                             timeline_in: 5.0, timeline_out: 15.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None, transition: None,
                         },
                     ],
                     ..Default::default()
@@ -380,7 +406,7 @@ mod tests {
                     timeline_in: 0.0, timeline_out: 5.0,
                     transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                     volume: 1.0, speed: 1.0,
-                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None,
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], text: None, subtitle: None, transition: None,
                 }],
                 ..Default::default()
             }],

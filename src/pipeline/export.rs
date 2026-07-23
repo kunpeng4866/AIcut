@@ -12,6 +12,7 @@ use crate::project::{CanvasConfig, Clip, Project};
 use crate::subtitle;
 use crate::timeline::Timeline;
 use crate::AppError;
+use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -203,15 +204,66 @@ impl<'a> ExportPipeline<'a> {
             .unwrap_or((self.config.width, self.config.height))
     }
 
+    /// 查找同轨中 timeline_in == t 的下一片段（用于转场叠加）
+    fn find_next_clip(&self, track_id: &str, t: f64) -> Option<&'a Clip> {
+        for track in &self.project.tracks {
+            if track.id == track_id {
+                for c in &track.clips {
+                    if (c.timeline_in - t).abs() < 1e-6 { return Some(c); }
+                }
+            }
+        }
+        None
+    }
+
+    /// 按 id 查找轨道
+    fn track_by_id(&self, id: &str) -> Option<&'a crate::project::Track> {
+        self.project.tracks.iter().find(|t| t.id == id)
+    }
+
+    /// 计算声相增益（左, 右）：pan ∈ [-1(全左), 1(全右)]
+    fn pan_gains(pan: f32) -> (f32, f32) {
+        let p = pan.clamp(-1.0, 1.0);
+        if p <= 0.0 { (1.0, 1.0 + p) } else { (1.0 - p, 1.0) }
+    }
+
+    /// 是否存在任何可产生音频的轨道（audio / video / effect 且含片段）
+    ///
+    /// 用于决定是否需要走「视频 + 混音音频 mux」两阶段导出。
+    fn any_audio_sources(&self) -> bool {
+        self.project.tracks.iter().any(|t| {
+            (t.track_type == "audio" || t.track_type == "video" || t.track_type == "effect")
+                && !t.clips.is_empty()
+        })
+    }
+
     // ── 完整导出 ──
 
     /// 执行完整导出
     ///
     /// 启动 FFmpeg 管道编码器，逐帧渲染并写入 stdin。
     /// 这是一次性同步调用，会阻塞直到导出完成。
+    /// 执行完整导出
+    ///
+    /// 两阶段导出：
+    /// 1. 视频帧逐帧渲染，写入临时视频文件（`-an`，无音频流）
+    /// 2. 同步逐帧混音（`render_audio_chunk`），累加为 f32le 原始音频
+    /// 3. 若工程含音频源，用 FFmpeg 将临时视频与混音音频 mux 为最终文件；
+    ///    否则直接将临时视频文件作为最终输出（无音频）。
     pub fn run(&mut self, output_path: &str) -> Result<ExportStats, AppError> {
+        let total = self.clock.total_frames();
+        let has_audio = self.any_audio_sources();
+
+        // 视频输出目标：有音频时先渲染到临时文件，最后与音频 mux；否则直接输出
+        let video_out = if has_audio {
+            format!("{}.aicut_video", output_path)
+        } else {
+            output_path.to_string()
+        };
+        let audio_tmp = format!("{}.aicut_audio", output_path);
+
         let encoder_cmd = ffmpeg::build_pipe_encoder_cmd(
-            output_path,
+            &video_out,
             self.config.width,
             self.config.height,
             self.config.fps,
@@ -259,9 +311,11 @@ impl<'a> ExportPipeline<'a> {
         let stdin = child.stdin.as_mut()
             .ok_or_else(|| AppError::Render("无法获取编码器 stdin".into()))?;
 
-        let total = self.clock.total_frames();
         let mut rendered = 0u64;
         let mut errors = 0u64;
+        let mut audio_data: Vec<f32> = Vec::new();
+        let sample_rate = self.config.sample_rate;
+        let fps = self.config.fps;
 
         while !self.is_done() {
             let t = self.current_time();
@@ -304,21 +358,69 @@ impl<'a> ExportPipeline<'a> {
                 }
             }
 
+            // 同步渲染该帧对应的混音音频块并累加
+            if has_audio {
+                let i = self.current_frame();
+                let chunk_samples = audio_chunk_samples(i, sample_rate, fps);
+                match self.render_audio_chunk(t, chunk_samples) {
+                    Ok(chunk) => audio_data.extend_from_slice(&chunk.samples),
+                    Err(e) => eprintln!("[export] 音频块 {} 渲染失败: {}", self.current_frame(), e),
+                }
+            }
+
             self.advance()?;
         }
 
-        // 关闭 stdin，等待编码器完成
+        // 关闭 stdin，等待视频编码完成
         drop(child.stdin.take());
-        let output = child.wait_with_output()
+        let vout = child.wait_with_output()
             .map_err(|e| AppError::Render(format!("编码器等待失败: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !vout.status.success() {
+            let stderr = String::from_utf8_lossy(&vout.stderr);
             return Err(AppError::Render(format!(
-                "编码器退出码 {:?}: {}",
-                output.status.code(),
+                "视频编码器退出码 {:?}: {}",
+                vout.status.code(),
                 stderr.chars().take(500).collect::<String>()
             )));
+        }
+
+        // 有音频：mux 临时视频 + 混音音频 → 最终输出
+        if has_audio {
+            // 写出混音后的 f32le 原始音频
+            let mut audio_bytes: Vec<u8> = Vec::with_capacity(audio_data.len() * 4);
+            for s in &audio_data {
+                audio_bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            fs::write(&audio_tmp, &audio_bytes)
+                .map_err(|e| AppError::Render(format!("写入临时音频失败: {}", e)))?;
+
+            let mux_cmd = build_mux_cmd(
+                &video_out,
+                &audio_tmp,
+                sample_rate,
+                self.config.audio_channels,
+                output_path,
+            );
+            let mout = Command::new(&mux_cmd[0])
+                .args(&mux_cmd[1..])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| AppError::Render(format!("mux 失败: {}", e)))?;
+
+            if !mout.status.success() {
+                let stderr = String::from_utf8_lossy(&mout.stderr);
+                return Err(AppError::Render(format!(
+                    "mux 退出码 {:?}: {}",
+                    mout.status.code(),
+                    stderr.chars().take(500).collect::<String>()
+                )));
+            }
+
+            // 清理临时文件
+            let _ = fs::remove_file(&video_out);
+            let _ = fs::remove_file(&audio_tmp);
         }
 
         Ok(ExportStats {
@@ -328,6 +430,46 @@ impl<'a> ExportPipeline<'a> {
             duration_secs: self.timeline.duration(),
         })
     }
+}
+
+// ── 音频导出辅助（模块级自由函数） ──
+
+/// 计算第 `frame_index` 帧对应的音频样本数（每声道，无累积漂移）
+///
+/// 用整数样本边界避免逐帧取整误差：第 i 帧覆盖样本
+/// `[round(i·sr/fps), round((i+1)·sr/fps))`，长度即为返回值。
+fn audio_chunk_samples(frame_index: u64, sample_rate: u32, fps: u32) -> usize {
+    if fps == 0 { return 0; }
+    let sr = sample_rate as f64;
+    let f = fps as f64;
+    let start = (frame_index as f64 * sr / f).round() as usize;
+    let end = ((frame_index + 1) as f64 * sr / f).round() as usize;
+    end.saturating_sub(start)
+}
+
+/// 构建 mux 命令：将无音频的临时视频与 f32le 原始音频合成为最终文件
+///
+/// 顺序要求：`-f f32le -ar -ac` 等输入选项必须位于对应 `-i` 之前。
+fn build_mux_cmd(
+    video_in: &str,
+    audio_in: &str,
+    sample_rate: u32,
+    channels: u16,
+    output: &str,
+) -> Vec<String> {
+    vec![
+        "ffmpeg".to_string(),
+        "-y".to_string(),
+        "-i".to_string(), video_in.to_string(),
+        "-f".to_string(), "f32le".to_string(),
+        "-ar".to_string(), sample_rate.to_string(),
+        "-ac".to_string(), channels.to_string(),
+        "-i".to_string(), audio_in.to_string(),
+        "-c:v".to_string(), "copy".to_string(),
+        "-c:a".to_string(), "aac".to_string(),
+        "-b:a".to_string(), "192k".to_string(),
+        output.to_string(),
+    ]
 }
 
 // ════════════════════ ExportStats ════════════════════
@@ -378,38 +520,68 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         // 按 track_order 排序（从底到顶），track_order 小的在下层
         video_clips.sort_by_key(|c| c.track_order);
 
-        // 1. 构建并行预取请求（用素材原始分辨率解码，缩放交给 compositor）
-        let prefetch_reqs: Vec<PrefetchRequest> = video_clips.iter()
-            .map(|cr| {
-                let clip = cr.clip;
-                let src_t = timeline_to_source_time(t, clip);
-                let (w, h) = self.clip_decode_size(clip);
-                let asset = self.project.asset_by_id(&clip.asset_id);
-                let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
-                PrefetchRequest {
-                    asset_path,
-                    source_time: src_t,
-                    width: w,
-                    height: h,
+        // ── 转场检测 ──
+        // 对处于转场区的 active clip，记录其淡出 opacity，并收集同轨下一 clip
+        let mut fade_out: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+        let mut extra_next: Vec<(&Clip, f64, f64)> = Vec::new();
+        for cr in &video_clips {
+            if let Some(tr) = &cr.clip.transition {
+                if tr.transition_type != "none" && tr.duration > 0.0 {
+                    let trans_start = cr.clip.timeline_out - tr.duration;
+                    if t >= trans_start && t < cr.clip.timeline_out {
+                        let progress = ((t - trans_start) / tr.duration).max(0.0).min(1.0);
+                        fade_out.insert(cr.clip.id.as_str(), 1.0 - progress);
+                        if let Some(next) = self.find_next_clip(cr.track_id, cr.clip.timeline_out) {
+                            extra_next.push((next, progress, tr.duration));
+                        }
+                    }
                 }
-            })
-            .collect();
+            }
+        }
+
+        // 1. 构建并行预取请求（active clips 用 timeline 时间；转场后 clip 用转场进度对应源时间）
+        let mut prefetch_reqs: Vec<PrefetchRequest> = video_clips.iter().map(|cr| {
+            let clip = cr.clip;
+            let src_t = timeline_to_source_time(t, clip);
+            let (w, h) = self.clip_decode_size(clip);
+            let asset = self.project.asset_by_id(&clip.asset_id);
+            let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
+            PrefetchRequest { asset_path, source_time: src_t, width: w, height: h }
+        }).collect();
+        for (next, progress, dur) in &extra_next {
+            let src_t = next.src_range.start + *progress * *dur * next.speed;
+            let (w, h) = self.clip_decode_size(next);
+            let asset = self.project.asset_by_id(&next.asset_id);
+            let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
+            prefetch_reqs.push(PrefetchRequest { asset_path, source_time: src_t, width: w, height: h });
+        }
 
         // 2. 并行预取（std::thread::scope 内部并行调 FFmpeg）
         self.decoder_pool.prefetch(&prefetch_reqs);
 
-        // 3. 逐层解码（命中缓存）并构建合成层
-        let mut layers: Vec<CompositeLayer> = Vec::with_capacity(video_clips.len());
+        // 3. 逐层解码（active clips）
+        let mut layers: Vec<CompositeLayer> = Vec::with_capacity(video_clips.len() + extra_next.len());
         for (cr, req) in video_clips.iter().zip(prefetch_reqs.iter()) {
             let clip = cr.clip;
             let frame = self.decoder_pool
                 .decode(&req.asset_path, req.source_time, req.width, req.height)
                 .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", clip.asset_id, e)))?;
-
-            layers.push(CompositeLayer {
-                frame: frame.to_video_frame(t, &clip.asset_id),
-                transform: clip.transform.clone(),
-            });
+            let mut tf = clip.transform.clone();
+            if let Some(o) = fade_out.get(cr.clip.id.as_str()) { tf.opacity *= o; }
+            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &clip.asset_id), transform: tf });
+        }
+        // 额外层：转场后 clip（叠加在顶层，淡入/滑入）
+        for ((next, progress, _dur), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
+            let frame = self.decoder_pool
+                .decode(&req.asset_path, req.source_time, req.width, req.height)
+                .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", next.asset_id, e)))?;
+            let mut tf = next.transform.clone();
+            match next.transition.as_ref().map(|x| x.transition_type.as_str()) {
+                Some("slide") => { tf.x = 1.5 - *progress; } // 从右侧滑入（简化）
+                _ => {} // fade / dissolve 用 opacity 交叉淡化
+            }
+            tf.opacity *= *progress;
+            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &next.asset_id), transform: tf });
         }
 
         // 4. 多轨道 Over 合成（输出画布尺寸的 RGBA 帧）
@@ -419,64 +591,77 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
     }
 
     fn render_audio_chunk(&mut self, t: f64, samples: usize) -> Result<AudioChunk, AppError> {
-        // 查询当前时刻的活跃音频片段
-        let active_clips = self.timeline.clips_at(t);
+        let active = self.timeline.clips_at(t);
 
-        // 优先音频片段，其次视频片段（视频自带音频）
-        let clip = active_clips
-            .iter()
-            .find(|c| c.track_type == "audio")
-            .or_else(|| active_clips.iter().find(|c| c.track_type == "video" || c.track_type == "effect"))
-            .map(|cr| cr.clip);
-
-        let clip = match clip {
-            Some(c) => c,
-            None => return Ok(AudioChunk::silence(
-                self.config.sample_rate, self.config.audio_channels, samples, t,
-            )),
-        };
-
-        let src_t = timeline_to_source_time(t, clip);
-        let duration = samples as f64 / self.config.sample_rate as f64;
-
-        let asset = self.project.asset_by_id(&clip.asset_id);
-        let input_path = asset.map(|a| a.path.as_str()).unwrap_or("");
-
-        let cmd = ffmpeg::build_extract_audio_cmd(
-            input_path, src_t, duration,
-            self.config.sample_rate, self.config.audio_channels,
-        );
-
-        let output = Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| AppError::Render(format!("FFmpeg 音频抽取失败: {}", e)))?;
-
-        if !output.status.success() {
-            return Ok(AudioChunk::silence(
-                self.config.sample_rate, self.config.audio_channels, samples, t,
-            ));
+        // 收集音频源（audio 轨 + video/effect 轨自带音频）及其轨道 id
+        let mut sources: Vec<(&Clip, &str)> = Vec::new();
+        let mut any_solo = false;
+        for cr in &active {
+            if cr.track_type == "audio" || cr.track_type == "video" || cr.track_type == "effect" {
+                sources.push((cr.clip, cr.track_id));
+                if let Some(tr) = self.track_by_id(cr.track_id) {
+                    if tr.solo { any_solo = true; }
+                }
+            }
         }
 
-        // f32le → f32 样本
-        let bytes = output.stdout;
-        let f32_samples: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|chunk| {
-                let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
-                f32::from_le_bytes(arr)
-            })
-            .collect();
+        // muted / solo 过滤
+        sources.retain(|(_clip, tid)| {
+            if let Some(tr) = self.track_by_id(tid) {
+                if tr.muted { return false; }
+                if any_solo && !tr.solo { return false; }
+            }
+            true
+        });
 
-        // 应用音量
-        let volume = clip.volume as f32;
-        let adjusted: Vec<f32> = f32_samples.iter().map(|&s| s * volume).collect();
+        let channels = self.config.audio_channels as usize;
+        let sample_rate = self.config.sample_rate;
+        let mut mixed: Vec<f32> = vec![0.0; samples * channels.max(1)];
+
+        for (clip, tid) in &sources {
+            let track = self.track_by_id(tid);
+            let track_vol = track.map(|tr| tr.volume).unwrap_or(1.0) as f32;
+            let track_pan = track.map(|tr| tr.pan).unwrap_or(0.0) as f32;
+            let gain = clip.volume as f32 * track_vol;
+            let (l_gain, r_gain) = Self::pan_gains(track_pan);
+
+            let src_t = timeline_to_source_time(t, clip);
+            let duration = samples as f64 / sample_rate as f64;
+            let asset = self.project.asset_by_id(&clip.asset_id);
+            let input_path = asset.map(|a| a.path.as_str()).unwrap_or("");
+            let cmd = ffmpeg::build_extract_audio_cmd(
+                input_path, src_t, duration,
+                sample_rate, self.config.audio_channels,
+            );
+            let output = Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| AppError::Render(format!("FFmpeg 音频抽取失败: {}", e)))?;
+            if !output.status.success() { continue; }
+
+            let f32_samples: Vec<f32> = output.stdout.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let ch = channels.max(1);
+            let n = f32_samples.len() / ch;
+            for i in 0..n.min(samples) {
+                for c in 0..ch {
+                    let src_val = f32_samples.get(i * ch + c).copied().unwrap_or(0.0);
+                    let out_gain = if ch == 1 { gain } else if c == 0 { gain * l_gain } else { gain * r_gain };
+                    let idx = i * ch + c;
+                    if idx < mixed.len() { mixed[idx] += src_val * out_gain; }
+                }
+            }
+        }
+
+        // 限幅到 [-1, 1] 防止削波
+        for s in mixed.iter_mut() { *s = s.clamp(-1.0, 1.0); }
 
         Ok(AudioChunk {
-            samples: adjusted,
-            sample_rate: self.config.sample_rate,
+            samples: mixed,
+            sample_rate,
             channels: self.config.audio_channels,
             timestamp: t,
             frame_count: samples,
@@ -526,6 +711,7 @@ mod tests {
             speed_curve: Vec::new(),
             text: None,
             subtitle: None,
+            transition: None,
         }
     }
 
@@ -721,5 +907,30 @@ mod tests {
         assert_eq!(pipeline.total_frames(), 0);
         assert!(pipeline.is_done()); // 0 帧 → 立即完成
         assert!((pipeline.progress() - 0.0).abs() < 1e-6); // 无帧可渲染 → 0%
+    }
+
+    #[test]
+    fn test_find_next_clip() {
+        let project = Project {
+            version: "1.0".to_string(),
+            canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
+            assets: vec![Asset {
+                id: "a1".to_string(), asset_type: "video".to_string(), path: "test_input.mp4".to_string(),
+                duration: 10.0, width: 1920, height: 1080, codec: "h264".to_string(),
+            }],
+            tracks: vec![Track {
+                id: "t1".to_string(), track_type: "video".to_string(), order: 0,
+                clips: vec![
+                    make_clip("c1", "a1", 0.0, 5.0, 0.0, 5.0),
+                    make_clip("c2", "a1", 5.0, 10.0, 5.0, 10.0),
+                ],
+                ..Default::default()
+            }],
+        };
+        let pipeline = ExportPipeline::from_project(&project);
+        let next = pipeline.find_next_clip("t1", 5.0);
+        assert!(next.is_some());
+        assert_eq!(next.unwrap().id, "c2");
+        assert!(pipeline.find_next_clip("t1", 10.0).is_none());
     }
 }

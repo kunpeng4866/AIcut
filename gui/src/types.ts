@@ -39,10 +39,22 @@ export interface ClipConfig {
   effects?: any[]; masks?: any[]; filters?: any[]; keyframes?: Record<string, any>;
   text?: TextContent;
   subtitle?: SubtitleContent;
+  // 转场：本片段结尾与同轨下一片段之间的过渡（None = 无）
+  transition?: TransitionConfig;
+}
+// 转场配置（与后端 Transition 结构对应）
+export type TransitionType = 'none' | 'fade' | 'dissolve' | 'slide';
+export interface TransitionConfig {
+  transitionType?: TransitionType; // 默认 'none'
+  duration?: number;               // 秒，默认 0.5
 }
 export interface TrackConfig {
   id: string; type: string; order?: number; clips: ClipConfig[];
   locked?: boolean; visible?: boolean; muted?: boolean; solo?: boolean; isMain?: boolean;
+  // 混音器：轨道音量 0.0–2.0（1.0 = 原始音量）
+  volume?: number;
+  // 混音器：声相 -1.0(全左) – 1.0(全右)（0.0 = 居中）
+  pan?: number;
 }
 export interface ProjectConfig { version?: string; canvas: CanvasConfig; assets: AssetConfig[]; tracks: TrackConfig[] }
 export interface MediaInfo { path: string; media_type: string; duration: number; width: number; height: number; codec: string; fps: number }

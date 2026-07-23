@@ -249,7 +249,7 @@ export default function PreviewCanvas() {
       const track = project.tracks.find(t => t.clips.some(c => c.id === clip.id));
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
-      v.volume = shouldHaveAudio ? volume * (clip.volume ?? 1) : 0;
+      v.volume = shouldHaveAudio ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
     });
     activeAudioClips.forEach(({ clip, trackId }) => {
       const a = audioRefs.current.get(clip.id);
@@ -257,7 +257,7 @@ export default function PreviewCanvas() {
       const track = project.tracks.find(t => t.id === trackId);
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
-      a.volume = shouldHaveAudio ? volume * (clip.volume ?? 1) : 0;
+      a.volume = shouldHaveAudio ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
     });
   }, [volume, activeVideoClips, activeAudioClips, project.tracks, hasSolo]);
 

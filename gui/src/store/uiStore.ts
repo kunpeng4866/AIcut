@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 
 type LeftPanel = 'media' | 'effects' | 'text' | 'audio' | 'stickers';
-type RightPanel = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle';
+type RightPanel = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition';
 
 interface UIState {
   selectedTrackId: string | null;

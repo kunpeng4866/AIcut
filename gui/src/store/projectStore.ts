@@ -82,6 +82,8 @@ interface ProjectState {
   toggleTrackVisible: (id: string) => void;
   toggleTrackMute: (id: string) => void;
   toggleTrackSolo: (id: string) => void;
+  updateTrackVolume: (id: string, volume: number) => void;
+  updateTrackPan: (id: string, pan: number) => void;
   addClip: (trackId: string, clip: ClipConfig) => void;
   removeClip: (trackId: string, clipId: string) => void;
   updateClip: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
@@ -107,7 +109,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
   });
 
   return {
-    project: { canvas: { width: 1920, height: 1080, fps: 30 }, assets: [], tracks: [{ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true }] },
+    project: { canvas: { width: 1920, height: 1080, fps: 30 }, assets: [], tracks: [{ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true, volume: 1, pan: 0 }] },
     isDirty: false,
     filePath: null,
     setProject: (p) => {
@@ -125,7 +127,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
         project: {
           version: '1.0.0', canvas: { width: 1920, height: 1080, fps: 30 },
           assets: [],
-          tracks: [{ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true }],
+          tracks: [{ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true, volume: 1, pan: 0 }],
         },
         isDirty: false, filePath: null,
       });
@@ -139,7 +141,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (!tracks.some(t => t.type === 'video' && t.isMain)) {
         const mainIdx = tracks.findIndex(t => t.type === 'video');
         if (mainIdx >= 0) tracks[mainIdx] = { ...tracks[mainIdx], isMain: true };
-        else tracks.push({ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, isMain: true });
+        else tracks.push({ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true, volume: 1, pan: 0 });
       }
       set({ project: { ...parsed, tracks }, isDirty: false, filePath: path });
     },
@@ -169,7 +171,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       const newId = uid('track');
       mutate((p) => {
         const insertAt = calcInsertIndex(p.tracks, type);
-        const newTrack: TrackConfig = { id: newId, type, order: p.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false };
+        const newTrack: TrackConfig = { id: newId, type, order: p.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false, volume: 1, pan: 0 };
         const tracks = [...p.tracks.slice(0, insertAt), newTrack, ...p.tracks.slice(insertAt)];
         return { ...p, tracks };
       });
@@ -179,7 +181,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       const newId = uid('track');
       mutate((p) => {
         const clamped = Math.max(0, Math.min(index, p.tracks.length));
-        const newTrack: TrackConfig = { id: newId, type, order: p.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false };
+        const newTrack: TrackConfig = { id: newId, type, order: p.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false, volume: 1, pan: 0 };
         const tracks = sortTracks([...p.tracks.slice(0, clamped), newTrack, ...p.tracks.slice(clamped)]);
         return { ...p, tracks };
       });
@@ -190,6 +192,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     toggleTrackVisible: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, visible: !t.visible } : t) })),
     toggleTrackMute: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, muted: !t.muted } : t) })),
     toggleTrackSolo: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, solo: !t.solo } : t) })),
+    updateTrackVolume: (id, volume) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, volume } : t) })),
+    updateTrackPan: (id, pan) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, pan } : t) })),
     addClip: (trackId, clip) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => [...clips, clip]));

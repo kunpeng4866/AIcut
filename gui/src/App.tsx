@@ -8,6 +8,7 @@ import Header from './components/Header';
 import MediaPanel from './components/MediaPanel';
 import PreviewCanvas from './components/PreviewCanvas';
 import PropertiesPanel from './components/PropertiesPanel';
+import MixerPanel from './components/MixerPanel';
 import Timeline from './components/Timeline';
 import Splitter from './components/Splitter';
 
@@ -42,6 +43,7 @@ export default function App() {
     setRightPanelWidth,
     setTimelineHeight,
   } = useUIStore();
+  const [rightView, setRightView] = React.useState<'props' | 'mixer'>('props');
 
   // 首次启动：加载配置；若AI未配置则弹出向导
   useEffect(() => {
@@ -106,9 +108,23 @@ export default function App() {
         {/* 预览/右 分隔条 */}
         <Splitter direction="horizontal" onDrag={(d) => setRightPanelWidth(useUIStore.getState().rightPanelWidth - d)} />
 
-        {/* 右面板：属性 */}
-        <aside style={{ width: rightPanelWidth, background: C.panel, borderLeft: `1px solid ${C.border}`, flexShrink: 0 }}>
-          <PropertiesPanel />
+        {/* 右面板：属性 / 混音器 切换 */}
+        <aside style={{ width: rightPanelWidth, background: C.panel, borderLeft: `1px solid ${C.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+            {([['props', '属性'], ['mixer', '混音器']] as const).map(([key, label]) => (
+              <button key={key} onClick={() => setRightView(key)} style={{
+                flex: 1, padding: '8px 0', background: 'transparent',
+                color: rightView === key ? C.textMain : C.textSub,
+                border: 'none', borderBottom: rightView === key ? `2px solid ${C.accent}` : '2px solid transparent',
+                cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
+              }}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {rightView === 'props' ? <PropertiesPanel /> : <MixerPanel />}
+          </div>
         </aside>
       </div>
 
