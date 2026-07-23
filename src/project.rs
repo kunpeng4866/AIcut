@@ -58,7 +58,7 @@ pub struct Asset {
 }
 
 /// 2D 变换（归一化 0-1，原点左下角）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Transform {
     #[serde(default = "default_center")]
     pub x: f64,
@@ -100,6 +100,33 @@ pub struct Track {
     pub order: u32,
     #[serde(default)]
     pub clips: Vec<Clip>,
+    /// GUI 控制字段（导出时使用）
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default)]
+    pub is_main: bool,
+}
+
+impl Default for Track {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            track_type: String::new(),
+            order: 0,
+            clips: Vec::new(),
+            locked: false,
+            visible: true,
+            muted: false,
+            solo: false,
+            is_main: false,
+        }
+    }
 }
 
 /// 片段：素材引用 + 源/时间线范围 + 变换 + 效果/蒙版/滤镜/关键帧
@@ -134,6 +161,7 @@ pub struct Clip {
 
 // ---- 默认辅助函数 ----
 fn default_version() -> String { "1.0".into() }
+fn default_true() -> bool { true }
 fn default_fps() -> u32 { DEFAULT_FPS }
 fn default_sample_rate() -> u32 { DEFAULT_SAMPLE_RATE }
 fn default_center() -> f64 { 0.5 }
@@ -286,6 +314,7 @@ mod tests {
                             effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
                         },
                     ],
+                    ..Default::default()
                 },
             ],
         };
@@ -347,6 +376,7 @@ mod tests {
                     volume: 1.0, speed: 1.0,
                     effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
                 }],
+                ..Default::default()
             }],
         };
         let errs = p.validate();

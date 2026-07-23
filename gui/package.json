@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "electron:start": "node launch.js",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && node launch.js\"",
+    "electron:build": "vite build && tsc -p tsconfig.electron.json && electron-builder",
     "preview": "vite preview"
   },
   "dependencies": {

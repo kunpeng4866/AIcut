@@ -1,3 +1,29 @@
+# 强制文本文件使用 LF 换行符，杜绝 CRLF/裸CR 污染
+* text=auto eol=lf
+
+*.ts       text eol=lf
+*.tsx      text eol=lf
+*.js       text eol=lf
+*.jsx      text eol=lf
+*.json     text eol=lf
+*.rs       text eol=lf
+*.md       text eol=lf
+*.css      text eol=lf
+*.html     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+# 二进制资源不转换
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.mp4      binary
+*.mp3      binary
+*.wav      binary
+*.m4a      binary
+*.woff    binary
+*.woff2   binary
+*.ttf      binary
 *.ttf filter=lfs diff=lfs merge=lfs -text
 *.onnx filter=lfs diff=lfs merge=lfs -text
 *.pt filter=lfs diff=lfs merge=lfs -text

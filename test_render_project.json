@@ -1,0 +1,40 @@
+{
+  "version": "1.0.0",
+  "canvas": { "width": 1920, "height": 1080, "fps": 30 },
+  "assets": [
+    {
+      "id": "asset_test1",
+      "type": "video",
+      "path": "E:/AIcut/test_video.mp4",
+      "duration": 3.0,
+      "width": 640,
+      "height": 360,
+      "codec": "h264"
+    }
+  ],
+  "tracks": [
+    {
+      "id": "track_video1",
+      "type": "video",
+      "order": 0,
+      "clips": [
+        {
+          "id": "clip_1",
+          "assetId": "asset_test1",
+          "src_range": { "start": 0, "end": 3.0 },
+          "timelineIn": 0,
+          "timelineOut": 3.0,
+          "transform": { "x": 0.5, "y": 0.5, "scale_x": 1, "scale_y": 1, "rotation": 0, "opacity": 1 },
+          "volume": 1,
+          "speed": 1,
+          "effects": [],
+          "masks": [],
+          "filters": [],
+          "keyframes": {}
+        }
+      ],
+      "locked": false,
+      "visible": true
+    }
+  ]
+}

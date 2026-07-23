@@ -211,6 +211,9 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             aout_label = "[aout]".to_string();
         }
         nodes.extend(audio_parts);
+    } else if !video_clips.is_empty() {
+        // 无显式音频轨道时，自动从第一个视频输入提取音频
+        aout_label = "[0:a]".to_string();
     }
     cmd.filter_graph = nodes.join(";");
     let map_label = format!("{}{}", vout_label, aout_label);

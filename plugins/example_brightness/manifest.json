@@ -1,0 +1,32 @@
+{
+  "id": "filter.brightness",
+  "name": "亮度调节",
+  "version": "1.0.0",
+  "author": "AIcut",
+  "description": "调整画面亮度与对比度，基于 FFmpeg eq 滤镜",
+  "plugin_type": "Filter",
+  "min_app_version": "0.1.0",
+  "parameters": [
+    {
+      "key": "brightness",
+      "label": "亮度",
+      "param_type": "Slider",
+      "default": 0.0,
+      "min": -1.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    {
+      "key": "contrast",
+      "label": "对比度",
+      "param_type": "Slider",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 3.0,
+      "step": 0.01
+    }
+  ],
+  "filter_spec": "eq=brightness={brightness}:contrast={contrast}",
+  "shader": null,
+  "thumbnail": "thumbnail.png"
+}

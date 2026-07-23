@@ -1,244 +1,133 @@
-// AIcut Desktop — Main App
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import type { ProjectConfig, AssetConfig, ClipConfig } from './types';
+// AIcut 主布局 — 顶部导航 + 左面板 + 预览 + 右面板 + 时间轴
+import React, { useEffect } from 'react';
+import { useConfigStore } from './store/configStore';
+import { useUIStore } from './store/uiStore';
+import { isAIConfigured } from './config/ai_config';
+import ConfigWizard from './config/ConfigWizard';
+import Header from './components/Header';
+import MediaPanel from './components/MediaPanel';
+import PreviewCanvas from './components/PreviewCanvas';
+import PropertiesPanel from './components/PropertiesPanel';
+import Timeline from './components/Timeline';
+import Splitter from './components/Splitter';
 
-const DEFAULT_PROJECT: ProjectConfig = {
-  version: '1.0',
-  canvas: { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
-  assets: [], tracks: [],
+// 深色主题色板
+const C = {
+  bg: '#1a1a2e',
+  panel: '#16213e',
+  control: '#0f3460',
+  accent: '#e94560',
+  textMain: '#eee',
+  textSub: '#aaa',
+  border: '#0f3460',
 };
 
-let assetCounter = 0;
+// 左面板标签页定义
+const LEFT_TABS: { key: 'media' | 'effects' | 'text' | 'audio' | 'stickers'; label: string }[] = [
+  { key: 'media', label: '素材' },
+  { key: 'effects', label: '特效' },
+  { key: 'text', label: '文字' },
+  { key: 'audio', label: '音频' },
+  { key: 'stickers', label: '贴纸' },
+];
 
 export default function App() {
-  const [project, setProject] = useState<ProjectConfig>(DEFAULT_PROJECT);
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const [renderCmd, setRenderCmd] = useState('');
-  const [presets, setPresets] = useState<string[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { config, isLoaded, showConfigWizard, updateConfig, setShowConfigWizard } = useConfigStore();
+  const { activeLeftPanel, setActiveLeftPanel } = useUIStore();
+  const {
+    leftPanelWidth,
+    rightPanelWidth,
+    timelineHeight,
+    setLeftPanelWidth,
+    setRightPanelWidth,
+    setTimelineHeight,
+  } = useUIStore();
 
-  useEffect(() => { window.aicut.getPresets().then(setPresets).catch(() => {}); }, []);
-
-  const handleImport = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-
-  const handleFilesSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList?.length) return;
-
-    // Try Electron dialog first
-    if (window.aicut.openFiles) {
-      const paths = await window.aicut.openFiles();
-      if (paths?.length) {
-        const newAssets: AssetConfig[] = [];
-        for (const f of paths) {
-          try {
-            const result = await window.aicut.probe(f);
-            newAssets.push({
-              id: `a${++assetCounter}`, type: 'video', path: f,
-              duration: result.info?.duration || 5,
-              width: result.info?.width || 1920, height: result.info?.height || 1080,
-              codec: result.info?.codec || 'h264',
-            });
-          } catch {
-            newAssets.push({
-              id: `a${++assetCounter}`, type: 'video', path: f,
-              duration: 5, width: 1920, height: 1080, codec: 'h264',
-            });
-          }
-        }
-        setProject(p => ({
-          ...p,
-          assets: [...p.assets, ...newAssets],
-          tracks: p.tracks.length ? p.tracks : [{ id: 'main', type: 'video', order: 0, clips: [] }],
-        }));
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        return;
+  // 首次启动：加载配置；若AI未配置则弹出向导
+  useEffect(() => {
+    const { loadConfig } = useConfigStore.getState();
+    loadConfig().then(() => {
+      const state = useConfigStore.getState();
+      if (state.config && !isAIConfigured(state.config)) {
+        state.setShowConfigWizard(true);
       }
-    }
-
-    // Browser mode: use File API
-    const newAssets: AssetConfig[] = [];
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      const path = URL.createObjectURL(file);
-      newAssets.push({
-        id: `a${++assetCounter}`, type: file.type.startsWith('audio') ? 'audio' : 'video',
-        path, duration: 5, width: 1920, height: 1080, codec: 'h264',
-      });
-    }
-    setProject(p => ({
-      ...p,
-      assets: [...p.assets, ...newAssets],
-      tracks: p.tracks.length ? p.tracks : [{ id: 'main', type: 'video', order: 0, clips: [] }],
-    }));
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
-
-  const handleAddToTimeline = useCallback((asset: AssetConfig) => {
-    setProject(p => {
-      const track = p.tracks[0] || { id: 'main', type: 'video', order: 0, clips: [] };
-      const lastClip = track.clips[track.clips.length - 1];
-      const start = lastClip ? lastClip.timelineOut : 0;
-      const duration = asset.duration || 5;
-      const newClip: ClipConfig = {
-        id: `c${Date.now()}`, assetId: asset.id,
-        src_range: { start: 0, end: duration },
-        timelineIn: start, timelineOut: start + duration,
-        transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
-        volume: 1, speed: 1,
-        effects: [], masks: [], filters: [], keyframes: {},
-      };
-      return {
-        ...p,
-        tracks: [{ ...track, clips: [...track.clips, newClip] }],
-      };
     });
   }, []);
 
-  const handleRender = useCallback(async () => {
-    const json = JSON.stringify(project);
-    const result = await window.aicut.render(json);
-    if (result.success && result.command) setRenderCmd(result.command);
-  }, [project]);
-
-  const selectedClip = project.tracks[0]?.clips.find(c => c.id === selectedClipId);
+  // 配置加载中
+  if (!isLoaded) {
+    return (
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', background: C.bg, color: C.textMain, fontFamily: 'system-ui', fontSize: 14 }}>
+        AIcut 加载中...
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui' }}>
-      <input type="file" ref={fileInputRef} onChange={handleFilesSelected}
-             multiple accept="video/*,audio/*,image/*" style={{ display: 'none' }} />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: C.bg, fontFamily: 'system-ui', overflow: 'hidden' }}>
+      {/* 顶部导航栏 */}
+      <Header />
 
-      {/* Sidebar */}
-      <aside style={{ width: 280, background: '#1a1a2e', color: '#eee', padding: 12, overflowY: 'auto' }}>
-        <h2 style={{ fontSize: 16, margin: '0 0 12px' }}>AIcut</h2>
-        <button onClick={handleImport} style={btnStyle}>📁 导入素材</button>
-        <div style={{ marginTop: 16 }}>
-          <h3 style={{ fontSize: 13, margin: '0 0 8px' }}>素材库 ({project.assets.length})</h3>
-          {project.assets.map(a => (
-            <div key={a.id} onClick={() => handleAddToTimeline(a)}
-                 style={{ padding: 6, margin: '4px 0', background: '#16213e', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
-              {a.path.length > 40 ? '📹 ' + a.path.substring(a.path.lastIndexOf('/') + 1 || a.path.lastIndexOf('\\') + 1 || 0) : a.path}
-            </div>
-          ))}
-        </div>
-        <div style={{ marginTop: 16 }}>
-          <h3 style={{ fontSize: 13, margin: '0 0 8px' }}>滤镜预置</h3>
-          {presets.map(p => (
-            <div key={p} style={{ padding: 4, fontSize: 12, color: '#aaa' }}>{p}</div>
-          ))}
-        </div>
-        <button onClick={handleRender} style={{ ...btnStyle, marginTop: 16, background: '#e94560' }}>
-          🎬 渲染导出
-        </button>
-      </aside>
+      {/* 中间区域：左面板 + 预览 + 右面板 */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        {/* 左面板 */}
+        <aside style={{ width: leftPanelWidth, background: C.panel, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+          {/* 面板切换标签 */}
+          <div style={{ display: 'flex', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+            {LEFT_TABS.map((tab) => (
+              <button key={tab.key} onClick={() => setActiveLeftPanel(tab.key)} style={{
+                flex: 1, padding: '8px 0', background: 'transparent',
+                color: activeLeftPanel === tab.key ? C.textMain : C.textSub,
+                border: 'none', borderBottom: activeLeftPanel === tab.key ? `2px solid ${C.accent}` : '2px solid transparent',
+                cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
+              }}>
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          {/* 面板内容 */}
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {activeLeftPanel === 'media' ? <MediaPanel /> : (
+              <div style={{ padding: 24, color: C.textSub, fontSize: 13, textAlign: 'center' }}>
+                {LEFT_TABS.find((t) => t.key === activeLeftPanel)?.label}面板（开发中）
+              </div>
+            )}
+          </div>
+        </aside>
 
-      {/* Main */}
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ flex: 1, background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
-          <span style={{ color: '#555' }}>
-            {renderCmd ? '✅ 命令已生成，在终端执行' : '预览区域 — 导入素材开始编辑'}
-          </span>
-        </div>
+        {/* 左/预览 分隔条 */}
+        <Splitter direction="horizontal" onDrag={(d) => setLeftPanelWidth(useUIStore.getState().leftPanelWidth + d)} />
 
-        {/* Timeline */}
-        <div style={{ height: 200, background: '#16213e', borderTop: '2px solid #0f3460', padding: 8, overflowX: 'auto' }}>
-          <h4 style={{ margin: '0 0 8px', fontSize: 12, color: '#aaa' }}>时间轴</h4>
-          <div style={{ display: 'flex', gap: 4, height: 80, alignItems: 'center' }}>
-            {(project.tracks[0]?.clips || []).map(c => {
-              const asset = project.assets.find(a => a.id === c.assetId);
-              const dur = c.timelineOut - c.timelineIn;
-              return (
-                <div key={c.id} onClick={() => setSelectedClipId(c.id)}
-                     style={{
-                       width: Math.max(dur * 40, 60), height: 60,
-                       background: c.id === selectedClipId ? '#e94560' : '#0f3460',
-                       borderRadius: 4, cursor: 'pointer', fontSize: 10,
-                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                       color: '#fff', flexShrink: 0,
-                     }}>
-                  {asset?.path ? asset.path.substring(Math.max(asset.path.lastIndexOf('/'), asset.path.lastIndexOf('\\')) + 1).substring(0, 15) : c.id}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </main>
+        {/* 预览画布 */}
+        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <PreviewCanvas />
+        </main>
 
-      {/* Properties Panel */}
-      <aside style={{ width: 260, background: '#1a1a2e', color: '#eee', padding: 12, overflowY: 'auto' }}>
-        <h3 style={{ fontSize: 13, margin: '0 0 12px' }}>属性面板</h3>
-        {selectedClip ? (
-          <div style={{ fontSize: 12 }}>
-            <div style={{ marginBottom: 8 }}>
-              <label>不透明度</label>
-              <input type="range" min={0} max={1} step={0.01}
-                     value={selectedClip.transform?.opacity || 1}
-                     onChange={e => {
-                       const v = parseFloat(e.target.value);
-                       setProject(p => ({
-                         ...p, tracks: p.tracks.map(t => ({
-                           ...t, clips: t.clips.map(c =>
-                             c.id === selectedClipId ? { ...c, transform: { ...c.transform, opacity: v } } : c)
-                         }))
-                       }));
-                     }}
-                     style={{ width: '100%' }} />
-              <span>{(selectedClip.transform?.opacity || 1).toFixed(2)}</span>
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <label>缩放 X</label>
-              <input type="range" min={0.1} max={3} step={0.01}
-                     value={selectedClip.transform?.scale_x || 1}
-                     onChange={e => {
-                       const v = parseFloat(e.target.value);
-                       setProject(p => ({
-                         ...p, tracks: p.tracks.map(t => ({
-                           ...t, clips: t.clips.map(c =>
-                             c.id === selectedClipId ? { ...c, transform: { ...c.transform, scale_x: v, scale_y: v } } : c)
-                         }))
-                       }));
-                     }}
-                     style={{ width: '100%' }} />
-              <span>{(selectedClip.transform?.scale_x || 1).toFixed(2)}</span>
-            </div>
-            <div>
-              <label>速度</label>
-              <input type="range" min={0.1} max={4} step={0.1}
-                     value={selectedClip.speed || 1}
-                     onChange={e => {
-                       const v = parseFloat(e.target.value);
-                       setProject(p => ({
-                         ...p, tracks: p.tracks.map(t => ({
-                           ...t, clips: t.clips.map(c =>
-                             c.id === selectedClipId ? { ...c, speed: v } : c)
-                         }))
-                       }));
-                     }}
-                     style={{ width: '100%' }} />
-              <span>{selectedClip.speed || 1}x</span>
-            </div>
-          </div>
-        ) : (
-          <div style={{ fontSize: 12, color: '#666' }}>
-            画布: {project.canvas.width}x{project.canvas.height} @ {project.canvas.fps}fps<br/>
-            素材: {project.assets.length} 个<br/>
-            片段: {project.tracks[0]?.clips.length || 0} 个
-          </div>
-        )}
-        {renderCmd && (
-          <div style={{ marginTop: 12, padding: 8, background: '#16213e', borderRadius: 4, fontSize: 10, wordBreak: 'break-all' }}>
-            <strong>FFmpeg 命令:</strong>
-            <code style={{ display: 'block', marginTop: 4 }}>{renderCmd.substring(0, 200)}...</code>
-          </div>
-        )}
-      </aside>
+        {/* 预览/右 分隔条 */}
+        <Splitter direction="horizontal" onDrag={(d) => setRightPanelWidth(useUIStore.getState().rightPanelWidth - d)} />
+
+        {/* 右面板：属性 */}
+        <aside style={{ width: rightPanelWidth, background: C.panel, borderLeft: `1px solid ${C.border}`, flexShrink: 0 }}>
+          <PropertiesPanel />
+        </aside>
+      </div>
+
+      {/* 中间/时间轴 分隔条 */}
+      <Splitter direction="vertical" onDrag={(d) => setTimelineHeight(useUIStore.getState().timelineHeight - d)} />
+
+      {/* 底部时间轴 */}
+      <div style={{ height: timelineHeight, background: C.panel, borderTop: `1px solid ${C.border}`, flexShrink: 0 }}>
+        <Timeline />
+      </div>
+
+      {/* AI配置向导弹窗 */}
+      {showConfigWizard && config && (
+        <ConfigWizard
+          initialConfig={config}
+          onComplete={(cfg) => { updateConfig(cfg); setShowConfigWizard(false); }}
+          onCancel={() => setShowConfigWizard(false)}
+        />
+      )}
     </div>
   );
 }
-
-const btnStyle: React.CSSProperties = {
-  width: '100%', padding: '8px 12px', background: '#0f3460', color: '#fff',
-  border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 13,
-};

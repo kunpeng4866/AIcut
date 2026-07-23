@@ -72,6 +72,11 @@ impl RenderCommand {
         if let Some(label) = &self.map_label {
             args.push("-map".to_string());
             args.push(label.clone());
+            // 检测是否包含音频流（[a0] [aout] [0:a] 等）
+            let has_audio = label.contains("[a") || label.contains(":a]");
+            if has_audio {
+                args.extend(["-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string()]);
+            }
         }
         args.extend([
             "-c:v".to_string(),
@@ -249,6 +254,110 @@ pub fn generate_proxies_batch(project: &crate::project::Project, proxy_dir: &str
         }
     }
     (ok, fails)
+}
+
+// ════════════════════ 管道编码器 + 抽帧命令 ════════════════════
+
+/// 构建管道编码器命令：stdin 喂 rawvideo 帧，stdout 输出编码后文件
+///
+/// 用法：启动 `ffmpeg` 子进程，逐帧将 RGBA 数据写入 stdin，
+/// ffmpeg 实时编码并写入 output_path。
+///
+/// 参数：
+/// - output: 输出文件路径
+/// - width/height: 画布分辨率
+/// - fps: 帧率
+/// - codec: 视频编码器（如 libx264）
+/// - crf: 质量（18=高质量，23=默认）
+/// - audio_codec: 音频编码器（如 aac），None 则不编码音频
+pub fn build_pipe_encoder_cmd(
+    output: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    codec: &str,
+    crf: u32,
+    bitrate_mbps: f64,
+) -> Vec<String> {
+    vec![
+        "ffmpeg".to_string(),
+        "-y".to_string(),
+        "-f".to_string(), "rawvideo".to_string(),
+        "-pix_fmt".to_string(), "rgba".to_string(),
+        "-s".to_string(), format!("{}x{}", width, height),
+        "-r".to_string(), fps.to_string(),
+        "-i".to_string(), "pipe:0".to_string(),  // stdin
+        "-c:v".to_string(), codec.to_string(),
+        "-crf".to_string(), crf.to_string(),
+        "-b:v".to_string(), format!("{}M", bitrate_mbps),
+        "-pix_fmt".to_string(), "yuv420p".to_string(),
+        "-r".to_string(), fps.to_string(),
+        output.to_string(),
+    ]
+}
+
+/// 构建单帧抽帧命令：从视频素材中提取时间 t 的一帧（RGBA rawvideo）
+///
+/// 使用 `-ss` 在 `-i` 之前（快速 seek 到最近关键帧），适合预览。
+/// 导出时可用 accurate seek 版本（-ss 在 -i 之后）。
+///
+/// 参数：
+/// - input: 源视频路径
+/// - t: 源素材时间（秒）
+/// - width/height: 输出帧尺寸
+pub fn build_extract_frame_cmd(input: &str, t: f64, width: u32, height: u32) -> Vec<String> {
+    vec![
+        "ffmpeg".to_string(),
+        "-ss".to_string(), format!("{:.3}", t),
+        "-i".to_string(), input.to_string(),
+        "-frames:v".to_string(), "1".to_string(),
+        "-f".to_string(), "rawvideo".to_string(),
+        "-pix_fmt".to_string(), "rgba".to_string(),
+        "-s".to_string(), format!("{}x{}", width, height),
+        "pipe:1".to_string(),  // stdout
+    ]
+}
+
+/// 构建精确抽帧命令（-ss 在 -i 之后，慢但精确）
+pub fn build_extract_frame_accurate(input: &str, t: f64, width: u32, height: u32) -> Vec<String> {
+    vec![
+        "ffmpeg".to_string(),
+        "-i".to_string(), input.to_string(),
+        "-ss".to_string(), format!("{:.3}", t),
+        "-frames:v".to_string(), "1".to_string(),
+        "-f".to_string(), "rawvideo".to_string(),
+        "-pix_fmt".to_string(), "rgba".to_string(),
+        "-s".to_string(), format!("{}x{}", width, height),
+        "pipe:1".to_string(),
+    ]
+}
+
+/// 构建音频抽取命令：从素材中提取一段音频（f32le PCM）
+///
+/// 参数：
+/// - input: 源文件路径
+/// - t: 起始时间（秒）
+/// - duration: 提取时长（秒）
+/// - sample_rate: 采样率
+/// - channels: 声道数
+pub fn build_extract_audio_cmd(
+    input: &str,
+    t: f64,
+    duration: f64,
+    sample_rate: u32,
+    channels: u16,
+) -> Vec<String> {
+    vec![
+        "ffmpeg".to_string(),
+        "-ss".to_string(), format!("{:.3}", t),
+        "-i".to_string(), input.to_string(),
+        "-t".to_string(), format!("{:.3}", duration),
+        "-f".to_string(), "f32le".to_string(),
+        "-acodec".to_string(), "pcm_f32le".to_string(),
+        "-ac".to_string(), channels.to_string(),
+        "-ar".to_string(), sample_rate.to_string(),
+        "pipe:1".to_string(),
+    ]
 }
 
 // ════════════════════ 单元测试 ════════════════════

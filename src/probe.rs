@@ -43,14 +43,32 @@ pub fn probe(path: &str) -> Result<MediaInfo, String> {
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // ffprobe 可能返回空 JSON（如路径编码问题），在此报错而非返回默认值
+    if stdout.trim().is_empty() || stdout.trim() == "{}" {
+        return Err(format!("ffprobe 无法探测文件 (返回空结果): {}", path));
+    }
+
     parse_ffprobe_json(path, &stdout)
+}
+
+/// 从 JSON 值中提取 duration，同时支持数字和字符串格式
+/// ffprobe 不同版本/平台可能返回 `"37.76"` (string) 或 `37.76` (number)
+fn json_duration(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
 }
 
 fn parse_ffprobe_json(path: &str, json: &str) -> Result<MediaInfo, String> {
     let root: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| format!("ffprobe JSON 解析失败: {}", e))?;
 
-    let mut info = MediaInfo { path: path.to_string(), ..Default::default() };
+    // 初始 media_type 设为空字符串，避免默认 "video" 导致音频流被跳过
+    let mut info = MediaInfo {
+        path: path.to_string(),
+        media_type: String::new(),
+        ..Default::default()
+    };
 
     // 取第一个视频流或音频流
     if let Some(streams) = root["streams"].as_array() {
@@ -66,9 +84,7 @@ fn parse_ffprobe_json(path: &str, json: &str) -> Result<MediaInfo, String> {
                     if let Some(fps_str) = s["r_frame_rate"].as_str() {
                         info.fps = parse_fraction(fps_str).unwrap_or(30.0);
                     }
-                    info.duration = s["duration"].as_f64()
-                        .or_else(|| s["duration"].as_str().and_then(|v| v.parse().ok()))
-                        .unwrap_or(0.0);
+                    info.duration = json_duration(&s["duration"]).unwrap_or(0.0);
                 }
                 "audio" => {
                     if info.media_type == "video" { continue; } // 已有视频流
@@ -76,7 +92,7 @@ fn parse_ffprobe_json(path: &str, json: &str) -> Result<MediaInfo, String> {
                     info.codec = s["codec_name"].as_str().unwrap_or("aac").into();
                     info.sample_rate = s["sample_rate"].as_str()
                         .and_then(|s| s.parse().ok()).unwrap_or(48000);
-                    if let Some(dur) = s["duration"].as_f64() { info.duration = dur; }
+                    info.duration = json_duration(&s["duration"]).unwrap_or(0.0);
                 }
                 _ => {}
             }
@@ -85,10 +101,11 @@ fn parse_ffprobe_json(path: &str, json: &str) -> Result<MediaInfo, String> {
 
     // format 级别的 duration 作为后备
     if info.duration == 0.0 {
-        if let Some(dur) = root["format"]["duration"].as_f64() {
+        if let Some(dur) = json_duration(&root["format"]["duration"]) {
             info.duration = dur;
         }
     }
+    // format 级别的 bit_rate（字符串格式）
     if let Some(bitrate) = root["format"]["bit_rate"].as_str() {
         info.bitrate_kbps = bitrate.parse::<f64>().unwrap_or(8000.0) / 1000.0;
     }
@@ -126,6 +143,34 @@ mod tests {
         assert_eq!(info.height, 1080);
         assert!((info.duration - 10.0).abs() < 0.01);
         assert_eq!(info.media_type, "video");
+    }
+
+    #[test]
+    fn test_parse_ffprobe_json_audio_only() {
+        // ffprobe 对 m4a 文件返回的格式：duration 是字符串
+        let json = r#"{"streams":[{"codec_type":"audio","codec_name":"aac","sample_rate":"48000","duration":"37.759937"}],"format":{"duration":"37.759938","bit_rate":"195121"}}"#;
+        let info = parse_ffprobe_json("test.m4a", json).unwrap();
+        assert_eq!(info.media_type, "audio");
+        assert_eq!(info.codec, "aac");
+        assert_eq!(info.sample_rate, 48000);
+        assert!((info.duration - 37.76).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_ffprobe_json_audio_with_video() {
+        // 视频文件含音频流：应识别为 video，不跳过音频 duration
+        let json = r#"{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"30/1","duration":"10.5"},{"codec_type":"audio","codec_name":"aac","sample_rate":"44100","duration":"10.5"}],"format":{"duration":"10.5"}}"#;
+        let info = parse_ffprobe_json("test.mp4", json).unwrap();
+        assert_eq!(info.media_type, "video");
+        assert!((info.duration - 10.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_json_duration() {
+        assert_eq!(json_duration(&serde_json::json!(37.76)), Some(37.76));
+        assert_eq!(json_duration(&serde_json::json!("37.76")), Some(37.76));
+        assert_eq!(json_duration(&serde_json::json!(null)), None);
+        assert_eq!(json_duration(&serde_json::json!("invalid")), None);
     }
 
     #[test]

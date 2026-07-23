@@ -136,6 +136,7 @@ pub fn script_to_project(script: &ScriptResult, assets: &[String]) -> crate::pro
         assets: vec![],
         tracks: vec![crate::project::Track {
             id: "main".into(), track_type: "video".into(), order: 0, clips: vec![],
+            ..Default::default()
         }],
     };
 

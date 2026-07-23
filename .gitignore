@@ -13,3 +13,12 @@ Thumbs.db
 !docs/*.png
 .env
 .env.local
+
+# 本地项目记忆（含工作区日志/长期记忆，非源码）
+.workbuddy/
+
+# 编码损坏修复时的备份副本（非源码）
+tmp_corrupted_backup/
+
+# 测试导出产物（生成物，非源码）
+*.mp4

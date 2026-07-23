@@ -803,6 +803,7 @@ fn test_project_io_roundtrip_with_tracks() {
                 volume: 1.0, speed: 1.0,
                 effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![],
             }],
+            ..Default::default()
         }],
     };
     let tmp = std::env::temp_dir().join("aicut_roundtrip_tracks.json");

@@ -3,24 +3,102 @@ export interface CanvasConfig { width: number; height: number; fps?: number; sam
 export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number }
 export interface RangeConfig { start: number; end: number }
+// 文字片段内容
+export interface TextContent {
+  content: string;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: string;
+  color?: string;
+  strokeColor?: string;
+  strokeWidth?: number;
+  textAlign?: 'left' | 'center' | 'right';
+  x?: number;
+  y?: number;
+  rotation?: number;
+  opacity?: number;
+}
+
+// 字幕片段内容
+export interface SubtitleItem {
+  start: number;   // 相对 clip.timelineIn 的偏移（秒）
+  end: number;     // 结束偏移
+  text: string;
+}
+export interface SubtitleContent {
+  items: SubtitleItem[];
+  fontFamily?: string;
+  fontSize?: number;
+  color?: string;
+  position?: 'bottom' | 'top' | 'center';
+}
+
 export interface ClipConfig {
   id: string; assetId: string; src_range: RangeConfig; timelineIn: number; timelineOut: number;
   transform?: TransformConfig; volume?: number; speed?: number;
   effects?: any[]; masks?: any[]; filters?: any[]; keyframes?: Record<string, any>;
+  text?: TextContent;
+  subtitle?: SubtitleContent;
 }
-export interface TrackConfig { id: string; type: string; order?: number; clips: ClipConfig[] }
+export interface TrackConfig {
+  id: string; type: string; order?: number; clips: ClipConfig[];
+  locked?: boolean; visible?: boolean; muted?: boolean; solo?: boolean; isMain?: boolean;
+}
 export interface ProjectConfig { version?: string; canvas: CanvasConfig; assets: AssetConfig[]; tracks: TrackConfig[] }
 export interface MediaInfo { path: string; media_type: string; duration: number; width: number; height: number; codec: string; fps: number }
 export interface RenderResult { command: string }
 
+// ── 导出选项 ──
+export type ExportResolution = 'original' | '1080p' | '720p' | '480p';
+export type ExportFormat = 'mp4-h264' | 'mp4-h265' | 'mov';
+export type ExportQuality = 'high' | 'medium' | 'low';
+
+export interface ExportOptions {
+  resolution: ExportResolution;
+  format: ExportFormat;
+  quality: ExportQuality;
+}
+
+export interface ExportAPI {
+  start: (project: ProjectConfig, outputPath: string, options: ExportOptions) => Promise<{ success: boolean; error?: string }>;
+  onProgress: (callback: (progress: number) => void) => void;
+  onDone: (callback: () => void) => void;
+  onError: (callback: (err: string) => void) => void;
+  cancel: () => Promise<void>;
+  openFolder: (filePath: string) => Promise<void>;
+}
+
 declare global { interface Window { aicut: AicutAPI } }
 export interface AicutAPI {
+  // 引擎
   render(json: string): Promise<{ success: boolean; command?: string; error?: string }>;
   probe(path: string): Promise<{ success: boolean; info?: MediaInfo; error?: string }>;
   getPresets(): Promise<string[]>;
   getVersion(): Promise<string>;
   validate(json: string): Promise<{ valid: boolean; errors?: string[] }>;
+  // 文件
   openFiles(): Promise<string[]>;
   saveProject(path: string, content: string): Promise<boolean>;
   loadProject(path: string): Promise<string>;
+  openSaveDialog(defaultName?: string): Promise<string | null>;
+  // AI配置
+  getConfig(): Promise<string>;
+  setConfig(json: string): Promise<boolean>;
+  // TTS 语音合成
+  ttsSynthesize(text: string, voice: string, outputPath: string): Promise<{ success: boolean; audioPath?: string; error?: string }>;
+  ttsVoices(): Promise<string>;
+  // 插件
+  listPlugins(): Promise<string>;
+  scanPlugins(): Promise<number>;
+  buildPluginFilter(pluginId: string, params: string): Promise<string>;
+  // 导出（旧 API，保留兼容）
+  exportVideo(command: string, outputPath: string): Promise<{ success: boolean; error?: string }>;
+  openExportDialog(defaultName?: string): Promise<string | null>;
+  // 导出（新 API，带进度）
+  export: ExportAPI;
+  // 草稿
+  saveDraft(name: string, content: string): Promise<boolean>;
+  loadDraft(name: string): Promise<string>;
+  listDrafts(): Promise<string[]>;
+  deleteDraft(name: string): Promise<boolean>;
 }
