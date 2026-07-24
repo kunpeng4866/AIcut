@@ -283,6 +283,26 @@ export default function PreviewCanvas() {
     return () => { cancelled = true; };
   }, []);
 
+  // 计算 clip 的 CSS filter 预览（HTML5 回退路径用）。插件声明 css_filter 模板（含 {key} 占位）时生效；
+  // 多个启用的 css_filter 插件用空格拼接。导出仍走精确的 filter_spec，此处仅做轻量预览近似。
+  const computeCssFilter = (clip: any): string | undefined => {
+    const map = pluginManifests;
+    const parts: string[] = [];
+    for (const f of (clip?.filters || []) as any[]) {
+      if (!f || !f.enabled || !f.kind) continue;
+      const m = map[f.kind];
+      if (!m || !m.css_filter) continue;
+      let expr = m.css_filter as string;
+      for (const p of (m.parameters || []) as any[]) {
+        const raw = f.params ? f.params[p.key] : undefined;
+        const val = (raw === undefined || raw === null) ? (p.default ?? 0) : raw;
+        expr = expr.split('{' + p.key + '}').join(String(val));
+      }
+      parts.push(expr);
+    }
+    return parts.length ? parts.join(' ') : undefined;
+  };
+
   // WebGPU 渲染 hook
   const { ready: gpuReady, error: gpuError } = useWebGPUPreview({
     canvasRef,
@@ -531,6 +551,7 @@ export default function PreviewCanvas() {
                     maxWidth: '100%', maxHeight: '100%',
                     zIndex: idx,  // 底层 idx=0，顶层 idx=最大
                     top: 0, left: 0,
+                    filter: computeCssFilter(clip),  // HTML5 回退：CSS filter 实时预览插件（WebGPU 走 WGSL）
                   }}
                   onLoadedMetadata={onLoadedMetadataFor(clip)}
                   onClick={handleTogglePlay}

@@ -572,6 +572,9 @@ app.commandLine.appendSwitch('disable-domain-reliability');
 app.commandLine.appendSwitch('disable-sync');
 app.commandLine.appendSwitch('disable-variations');
 app.commandLine.appendSwitch('disable-client-side-phishing-detection');
+// 启用 renderer 的 WebGPU（navigator.gpu），让插件 WGSL 滤镜预览可用；
+// 若显卡/驱动不支持导致初始化失败，会自动回退 HTML5（CSS filter 兜底）。
+app.commandLine.appendSwitch('enable-unsafe-webgpu');
 
 app.whenReady().then(async () => {
   // 注册 aicut-asset:// 协议处理器：直接读取本地文件，绕过代理
