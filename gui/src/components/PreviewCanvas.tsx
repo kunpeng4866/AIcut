@@ -53,7 +53,8 @@ function effectiveRate(clip: ClipConfig, t: number): number {
 // 给定全局时间线时间 t 与 clip，返回素材源时间 srcT 及是否处于冻结帧
 function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: boolean } {
   const dur = clip.timelineOut - clip.timelineIn;
-  const offNorm = dur > 1e-6 ? (t - clip.timelineIn) / dur : 0; // 归一化 [0,1]
+  const off = t - clip.timelineIn;                  // 绝对偏移（秒）
+  const offNorm = dur > 1e-6 ? off / dur : 0;        // 归一化 [0,1]（供曲线积分与冻结窗口判断）
   const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const clamp = (x: number) => Math.max(clip.src_range.start, Math.min(clip.src_range.end, x));
   if (remap.curve && remap.curve.length > 0) {
@@ -62,13 +63,15 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
     return { srcT: clamp(srcT), frozen: false };
   }
   let frozen = false; let srcT: number;
-  if (remap.freeze && offNorm >= remap.freeze.start && offNorm < remap.freeze.start + remap.freeze.duration) {
+  // 冻结窗口判断：与后端 base_source_time 一致，用绝对偏移 off（freeze.start/duration 为绝对秒，见 PropertiesPanel 输入）
+  if (remap.freeze && off >= remap.freeze.start && off < remap.freeze.start + remap.freeze.duration) {
     srcT = remap.freeze.sourceTime; frozen = true;
   } else {
     const speed = clip.speed ?? 1;
+    // 普通/倒放：与后端 base_source_time 完全一致——用绝对偏移 off 乘 speed，覆盖整段素材（而非归一化值）
     srcT = remap.reverse
-      ? clip.src_range.start + (dur - offNorm) * speed
-      : clip.src_range.start + offNorm * speed;
+      ? clip.src_range.start + (dur - off) * speed
+      : clip.src_range.start + off * speed;
   }
   return { srcT: clamp(srcT), frozen };
 }

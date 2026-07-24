@@ -121,8 +121,11 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange, onCom
     // 无曲线：冻结 / 倒放 可视化
     if (!hasCurve) {
       if (freeze) {
-        const fx0 = playToX(freeze.start);
-        const fx1 = playToX(freeze.start + freeze.duration);
+        // freeze.start/duration 为绝对秒（见 PropertiesPanel），画在归一化 [0,1] 轴上需除以 dur
+        const fStart = dur > 1e-6 ? freeze.start / dur : 0;
+        const fEnd = dur > 1e-6 ? (freeze.start + freeze.duration) / dur : 0;
+        const fx0 = playToX(fStart);
+        const fx1 = playToX(fEnd);
         ctx.fillStyle = 'rgba(76,201,240,0.18)';
         ctx.fillRect(fx0, PAD, Math.max(1, fx1 - fx0), plotH);
         ctx.strokeStyle = '#4cc9f0';
@@ -155,7 +158,7 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange, onCom
       ctx.beginPath();
       ctx.moveTo(playToX(0), speedToY(points[0].speed));
       for (const p of points) ctx.lineTo(playToX(p.play), speedToY(p.speed));
-      ctx.lineTo(playToX(dur), speedToY(points[points.length - 1].speed));
+      ctx.lineTo(playToX(1), speedToY(points[points.length - 1].speed));
       ctx.stroke();
     }
 
@@ -169,6 +172,7 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange, onCom
 
     // 播放头（off 归一化到 [0,1] 与曲线 play 域一致）
     const off = dur > 1e-6 ? (currentTime - clip.timelineIn) / dur : 0;
+    const offAbs = currentTime - clip.timelineIn; // 绝对偏移（秒），供冻结窗口判断（freeze.start 为绝对秒）
     if (off >= 0 && off <= 1) {
       const px = playToX(off);
       ctx.strokeStyle = '#4cc9f0';
@@ -189,7 +193,7 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange, onCom
             }
           }
         }
-      } else if (freeze && off >= freeze.start && off < freeze.start + freeze.duration) {
+      } else if (freeze && offAbs >= freeze.start && offAbs < freeze.start + freeze.duration) {
         curSpeed = 0;
       } else {
         curSpeed = clip.speed ?? 1;
