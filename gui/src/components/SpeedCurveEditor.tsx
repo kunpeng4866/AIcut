@@ -3,8 +3,8 @@ import { useUIStore } from '../store/uiStore';
 import { ClipConfig, SpeedPointConfig, FreezeConfig } from '../types';
 
 // 曲线编辑器可视化：横轴 = 播放时间(play, timeline 相对偏移 0~dur)
-// 纵轴 = 源时间(src, 相对 src_range.start 偏移 0~srcDur)
-// 与后端 src/pipeline/strategy.rs 的 clip_source_time / piecewise_linear 一一对应。
+// 纵轴 = 源时间(src, 绝对源时间，范围 [src_range.start, src_range.end])
+// 与后端 src/pipeline/strategy.rs 的 clip_source_time / piecewise_linear 一一对应（src 为绝对源时间）。
 //   - 曲线非空：分段直线连接关键帧 (play,src)，两端按首/末点 src 延伸；reverse/freeze 被忽略
 //   - 曲线为空 + freeze：冻结区间矩形高亮 + 源时间水平平台
 //   - 曲线为空 + reverse：下降对角线 (0,srcDur)→(dur,0)
@@ -58,8 +58,11 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
   const plotH = H - PAD * 2;
   const playToX = (play: number) => PAD + (play / dur) * plotW;
   const xToPlay = (x: number) => clamp(((x - PAD) / plotW) * dur, 0, dur);
-  const srcToY = (src: number) => PAD + plotH - (src / srcDur) * plotH;
-  const yToSrc = (y: number) => clamp(((plotH - (y - PAD)) / plotH) * srcDur, 0, srcDur);
+  // 绝对源时间映射（与后端 strategy.rs::clip_source_time 一致：src 为绝对源时间，clamp 到 [src_range.start, src_range.end]）
+  const srcStart = clip.src_range.start;
+  const srcEnd = clip.src_range.end;
+  const srcToY = (src: number) => PAD + plotH - ((src - srcStart) / srcDur) * plotH;
+  const yToSrc = (y: number) => clamp(srcStart + ((plotH - (y - PAD)) / plotH) * srcDur, srcStart, srcEnd);
 
   // 绘制
   useEffect(() => {
@@ -99,18 +102,19 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     ctx.rotate(-Math.PI / 2);
     ctx.fillText('源时间 (s)', 0, 0);
     ctx.restore();
-    // 端点数值
+    // 端点数值（源时间为绝对坐标）
     ctx.textAlign = 'left';
     ctx.fillText(dur.toFixed(1), PAD + plotW - 22, PAD + plotH + 12);
     ctx.textAlign = 'right';
-    ctx.fillText(srcDur.toFixed(1), PAD - 4, PAD + 10);
+    ctx.fillText(srcEnd.toFixed(1), PAD - 4, PAD + 10);
+    ctx.fillText(srcStart.toFixed(1), PAD - 4, PAD + plotH + 10);
 
-    // 1x 参考对角线 (play == src)
+    // 1x 参考对角线：play=0→源起点, play=dur→源终点（绝对坐标）
     ctx.strokeStyle = '#26323f';
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.moveTo(playToX(0), srcToY(0));
-    ctx.lineTo(playToX(dur), srcToY(srcDur));
+    ctx.moveTo(playToX(0), srcToY(srcStart));
+    ctx.lineTo(playToX(dur), srcToY(srcEnd));
     ctx.stroke();
     ctx.setLineDash([]);
 
@@ -139,8 +143,8 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
         ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]);
         ctx.beginPath();
-        ctx.moveTo(playToX(0), srcToY(srcDur));
-        ctx.lineTo(playToX(dur), srcToY(0));
+        ctx.moveTo(playToX(0), srcToY(srcEnd));
+        ctx.lineTo(playToX(dur), srcToY(srcStart));
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle = '#e94560';
@@ -194,7 +198,8 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
       } else if (freeze && off >= freeze.start && off < freeze.start + freeze.duration) {
         curSrc = freeze.sourceTime;
       } else {
-        curSrc = reverse ? srcDur - off : off; // 简化：speed=1 示意
+        const sp = clip.speed ?? 1;
+        curSrc = reverse ? (srcStart + (dur - off) * sp) : (srcStart + off * sp);
       }
       const py = srcToY(curSrc ?? 0);
       ctx.fillStyle = '#4cc9f0';

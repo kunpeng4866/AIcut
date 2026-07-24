@@ -359,8 +359,11 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
 // 变速标签页（含倒放 / 冻结帧 / 时间重映射曲线）
 function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
+  const setSpeedAction = useProjectStore((s) => s.setSpeed);
   const speed = clip.speed ?? 1;
-  const setSpeed = (v: number) => updateClip(trackId, clip.id, { speed: v });
+  const dur = clip.timelineOut - clip.timelineIn;
+  const srcDur = clip.src_range.end - clip.src_range.start;
+  const setSpeed = (v: number) => setSpeedAction(trackId, clip.id, v);
 
   const remap: TimeRemapConfig = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const reverse = remap.reverse ?? false;
@@ -374,7 +377,20 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const setFreezeField = (k: keyof FreezeConfig, v: number) =>
     updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: { ...freeze!, [k]: v } } });
   const setCurve = (next: SpeedPointConfig[]) => updateClip(trackId, clip.id, { time_remap: { ...remap, curve: next } });
-  const addKey = () => setCurve([...curve, { play: 0, src: 0 }]);
+  const addKey = () => {
+    if (curve.length === 0) {
+      // 种子：1x 基线（play:0→源起点, play:dur→源终点），避免相对/绝对错位导致的静止画面
+      setCurve([
+        { play: 0, src: clip.src_range.start },
+        { play: dur, src: clip.src_range.end },
+      ]);
+    } else {
+      const last = curve[curve.length - 1];
+      const newPlay = Math.min(dur, last.play + dur / (curve.length + 1));
+      const newSrc = clip.src_range.start + (newPlay / dur) * srcDur;
+      setCurve([...curve, { play: newPlay, src: newSrc }]);
+    }
+  };
   const removeKey = (i: number) => setCurve(curve.filter((_, idx) => idx !== i));
   const setKey = (i: number, k: keyof SpeedPointConfig, v: number) =>
     setCurve(curve.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
@@ -383,7 +399,7 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
     <div>
       <ParamSlider label="播放速度" value={speed} min={0.25} max={4} step={0.05} unit="x" editable onChange={setSpeed} />
       <div style={{ color: '#aaa', fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
-        速度作用于时间线→素材映射：&gt;1 快放，&lt;1 慢放。当前片段时长 {(clip.timelineOut - clip.timelineIn).toFixed(2)}s。
+        速度作用于时间线→素材映射：&gt;1 快放（片段变短），&lt;1 慢放（片段变长）。当前片段时长 {dur.toFixed(2)}s，源时长 {srcDur.toFixed(2)}s。
       </div>
 
       <div style={S.divider} />

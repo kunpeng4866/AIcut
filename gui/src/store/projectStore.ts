@@ -87,6 +87,7 @@ interface ProjectState {
   addClip: (trackId: string, clip: ClipConfig) => void;
   removeClip: (trackId: string, clipId: string) => void;
   updateClip: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
+  setSpeed: (trackId: string, clipId: string, speed: number) => void;
   splitClip: (trackId: string, clipId: string, time: number) => void;
   moveClip: (trackId: string, clipId: string, newTimelineIn: number, skipRealign?: boolean) => void;
   moveClipToTrack: (srcTrackId: string, clipId: string, destTrackId: string, newTimelineIn: number) => void;
@@ -205,6 +206,28 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     updateClip: (trackId, clipId, updates) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.map((c) => c.id === clipId ? { ...c, ...updates } : c)));
+    }),
+    // 改变播放速度：无曲线时同步缩放片段时长（新时长 = 源时长 / speed），并按同轨后续片段做 ripple 避免重叠；
+    // 有曲线时曲线为权威映射，仅更新 speed 字段、不缩放时长。
+    setSpeed: (trackId, clipId, speed) => mutate((p) => {
+      if (p.tracks.find(t => t.id === trackId)?.locked) return p;
+      const sp = Math.max(0.1, Math.min(8, speed));
+      return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => {
+        const target = clips.find((c) => c.id === clipId);
+        if (!target) return clips;
+        const remap = target.time_remap;
+        const hasCurve = !!(remap && remap.curve && remap.curve.length > 0);
+        if (hasCurve) return clips.map((c) => c.id === clipId ? { ...c, speed: sp } : c);
+        const srcDur = target.src_range.end - target.src_range.start;
+        const newDur = srcDur / sp;
+        const oldDur = target.timelineOut - target.timelineIn;
+        const delta = newDur - oldDur;
+        return clips.map((cl) => {
+          if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur };
+          if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
+          return cl;
+        });
+      }));
     }),
     // 在 time 处将片段一分为二：前段 timelineIn..time，后段 time..timelineOut，src_range 同步切分
     splitClip: (trackId, clipId, time) => mutate((p) => {
