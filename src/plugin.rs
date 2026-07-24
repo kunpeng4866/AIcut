@@ -77,6 +77,9 @@ pub struct PluginManifest {
     /// WGSL 着色器源码（预览用，可选）
     #[serde(default)]
     pub shader: Option<String>,
+    /// CSS filter 模板（HTML5 回退预览用，可选），`{key}` 占位符由参数值替换
+    #[serde(default)]
+    pub css_filter: Option<String>,
     #[serde(default)]
     pub thumbnail: Option<String>,
 }
