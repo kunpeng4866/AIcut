@@ -2,9 +2,10 @@
 // 所有修改操作前先 pushSnapshot 到 historyStore，修改后标记 isDirty
 // 轨道排序规则：text/sticker/effect (顶) → video (中, 主轨最下) → audio (底)
 import { create } from 'zustand';
-import type { ProjectConfig, AssetConfig, ClipConfig, TransformConfig, TrackConfig } from '../types';
+import type { ProjectConfig, AssetConfig, ClipConfig, TransformConfig, TrackConfig, SpeedPointConfig } from '../types';
 import { useHistoryStore } from './historyStore';
 import { useUIStore } from './uiStore';
+import { rawSpeedIntegral } from '../utils/speedCurve';
 
 const TYPE_PRIORITY: Record<string, number> = {
   text: 0, sticker: 0, effect: 0,
@@ -88,6 +89,11 @@ interface ProjectState {
   removeClip: (trackId: string, clipId: string) => void;
   updateClip: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
   setSpeed: (trackId: string, clipId: string, speed: number) => void;
+  // 曲线编辑（拖拽过程）：仅更新曲线，不改时长、不做磁吸重排（避免 X 轴抖动与历史快照爆炸）
+  setCurveLive: (trackId: string, clipId: string, curve: SpeedPointConfig[]) => void;
+  // 曲线编辑提交（拖拽结束 / 增删 / 数字输入）：按曲线平均速率反向推导片段时长，
+  // 使 ∫₀^dur speed dτ = srcDur（整段素材恰好播完），并 ripple 同轨后续片段。
+  setCurveCommit: (trackId: string, clipId: string, curve: SpeedPointConfig[]) => void;
   splitClip: (trackId: string, clipId: string, time: number) => void;
   moveClip: (trackId: string, clipId: string, newTimelineIn: number, skipRealign?: boolean) => void;
   moveClipToTrack: (srcTrackId: string, clipId: string, destTrackId: string, newTimelineIn: number) => void;
@@ -207,9 +213,10 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.map((c) => c.id === clipId ? { ...c, ...updates } : c)));
     }),
-    // 改变播放速度：无曲线时同步缩放片段时长（新时长 = 源时长 / speed），并按同轨后续片段做 ripple 避免重叠；
-    // 有曲线时：曲线为相对速度形状，整体速度由时间线长决定 → 缩放曲线所有关键帧的 play 位置 + 片段时长（保持曲线形状），并 ripple。
-    // 这样"速度滑块"在有无曲线时都能整体变速，且归一化积分保证素材始终播完、绝不定格。
+    // 改变播放速度：曲线优先（绝对速度模型）。
+    // 无曲线：线性变速，新时长 = 源时长 / speed，并按同轨后续片段 ripple 避免重叠。
+    // 有曲线：全局速度滑块 = 曲线绝对速度的全局乘数（保持曲线相对形状），乘到各关键帧 speed 后
+    //         再按平均速率反推时长（∫₀^dur speed dτ = srcDur），并 ripple。
     setSpeed: (trackId, clipId, speed) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       const sp = Math.max(0.1, Math.min(8, speed));
@@ -217,25 +224,67 @@ export const useProjectStore = create<ProjectState>((set, get) => {
         const target = clips.find((c) => c.id === clipId);
         if (!target) return clips;
         const remap = target.time_remap;
-        const hasCurve = !!(remap && remap.curve && remap.curve.length > 0);
+        const hasCurve = !!(remap && remap.curve && remap.curve.length >= 2);
         const srcDur = target.src_range.end - target.src_range.start;
-        const newDur = srcDur / sp;
         const oldDur = target.timelineOut - target.timelineIn;
-        const delta = newDur - oldDur;
         if (hasCurve) {
-          const scale = oldDur > 1e-6 ? newDur / oldDur : 1;
+          // 曲线存在：全局速度=曲线绝对速度的全局乘数（保持相对形状），再按归一化平均速度反推时长
+          const oldSp = Math.max(0.001, target.speed ?? 1);
+          const ratio = sp / oldSp;
+          const scaled = remap!.curve!.map((pt) => ({ ...pt, speed: pt.speed * ratio }));
+          const f1 = rawSpeedIntegral(scaled, 1);
+          const newDur = f1 > 1e-9 ? srcDur / f1 : oldDur;
+          const delta = newDur - oldDur;
           return clips.map((cl) => {
-            if (cl.id === clipId) {
-              const r = cl.time_remap;
-              const newCurve = r?.curve ? r.curve.map((pt) => ({ ...pt, play: pt.play * scale })) : r?.curve;
-              return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur, time_remap: r ? { ...r, curve: newCurve } : r };
-            }
+            if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur, time_remap: { ...cl.time_remap, curve: scaled } };
             if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
             return cl;
           });
         }
+        // 无曲线：线性变速，新时长 = 源时长 / speed
+        const newDur = srcDur / sp;
+        const delta = newDur - oldDur;
         return clips.map((cl) => {
           if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur };
+          if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
+          return cl;
+        });
+      }));
+    }),
+    // 曲线编辑（拖拽过程）：仅更新曲线，不改时长、不做磁吸重排（避免 X 轴抖动），且不压历史快照
+    // （历史快照在 setCurveCommit 提交时统一压一次）。
+    setCurveLive: (trackId, clipId, curve) => set((state) => {
+      const tracks = state.project.tracks.map((t) => t.id === trackId ? {
+        ...t,
+        clips: t.clips.map((c) => c.id === clipId ? { ...c, time_remap: { ...c.time_remap, curve } } : c),
+      } : t);
+      return { project: { ...state.project, tracks }, isDirty: true };
+    }),
+    // 曲线编辑提交：曲线 play 为「归一化 [0,1]」域（与片段绝对时长解耦）。
+    // 反推片段时长使 ∫₀^1 speed dτ = srcDur/dur（整段素材恰好播完）：
+    //   f1 = ∫₀^1 speed dτ（归一化平均速度），newDur = srcDur / f1。
+    // 关键：只改 timelineOut（片段时长），绝不重缩放关键帧的 play —— 因此拖动某个关键帧的
+    // 左右/高低位置，其它关键帧位置保持不变，仅整段时长随之伸缩，符合直觉且流畅。
+    setCurveCommit: (trackId, clipId, curve) => mutate((p) => {
+      if (p.tracks.find(t => t.id === trackId)?.locked) return p;
+      return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => {
+        const target = clips.find((c) => c.id === clipId);
+        if (!target) return clips;
+        // 不足两点：曲线无意义，清空回退线性映射（不动时长）
+        if (curve.length < 2) {
+          return clips.map((cl) => cl.id === clipId ? { ...cl, time_remap: { ...cl.time_remap, curve: [] } } : cl);
+        }
+        const srcDur = target.src_range.end - target.src_range.start;
+        const oldDur = target.timelineOut - target.timelineIn;
+        const f1 = rawSpeedIntegral(curve, 1); // ∫₀^1 speed dτ（归一化平均速度）
+        if (f1 < 1e-9) {
+          // 全 0 速度 → 冻结态，无法在有限时长播完整段；保持当前时长仅存曲线
+          return clips.map((cl) => cl.id === clipId ? { ...cl, time_remap: { ...cl.time_remap, curve } } : cl);
+        }
+        const newDur = srcDur / f1;
+        const delta = newDur - oldDur;
+        return clips.map((cl) => {
+          if (cl.id === clipId) return { ...cl, timelineOut: cl.timelineIn + newDur, time_remap: { ...cl.time_remap, curve } };
           if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
           return cl;
         });

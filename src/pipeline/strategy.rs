@@ -220,7 +220,8 @@ pub fn timeline_to_source_time(t: f64, clip: &crate::project::Clip) -> f64 {
 /// remap = clip.time_remap
 /// if remap.curve 非空:
 ///     src_dur = clip.src_range.end - clip.src_range.start
-///     src_t = speed_integral(curve, off, clip.src_range.start, dur, src_dur)  // 速度曲线积分（按整段归一化）
+///     off_norm = off / dur                            // 归一化 [0,1]，曲线 play 域
+///     src_t = src_start + dur * speed_integral(curve, off_norm, 0)  // 绝对速度积分（speed 为用户设定绝对倍率）
 ///     frozen = false
 /// else:
 ///     frozen = false
@@ -232,7 +233,7 @@ pub fn timeline_to_source_time(t: f64, clip: &crate::project::Clip) -> f64 {
 ///             src_t = clip.src_range.start + (dur - off) * clip.speed   // 从 [start+span] 倒走到 start
 ///         else:
 ///             src_t = clip.src_range.start + off * clip.speed
-/// 曲线模式：src_t = speed_integral(curve, off, start, dur, src_dur)（按整段归一化，绝不越界定格）
+/// 曲线模式：src_t = src_start + dur * speed_integral(curve, off_norm, 0)（play 归一化绝对积分；整段素材恰好播完由前端按平均速率反推 dur 保证，绝不越界定格）
 /// clamp src_t 到 [clip.src_range.start, clip.src_range.end]
 /// return (src_t, frozen)
 /// ```
@@ -245,10 +246,14 @@ pub fn clip_source_time(t: f64, clip: &crate::project::Clip) -> (f64, bool) {
     let off = t - clip.timeline_in;
     let remap = &clip.time_remap;
 
-    let src_dur = clip.src_range.end - clip.src_range.start;
     let (src_t, frozen) = if !remap.curve.is_empty() {
-        // curve 权威映射：速度曲线积分（按整段时长归一化，src 单调且恰好消耗整段素材）
-        (speed_integral(&remap.curve, off, clip.src_range.start, dur, src_dur), false)
+        // curve 权威映射（play 归一化 [0,1]，与片段绝对时长解耦）：
+        // srcT = src_start + dur * ∫₀^offNorm speed(τ) dτ，其中 offNorm = off/dur ∈ [0,1]。
+        // dur 已由前端 setCurveCommit 按平均速率反推（dur = srcDur / ∫₀^1 speed dτ），
+        // 使整段素材恰好播完、绝不越界定格。
+        let off_norm = if dur > 1e-9 { off / dur } else { 0.0 };
+        let f = speed_integral(&remap.curve, off_norm, 0.0); // ∫₀^offNorm speed dτ（归一化）
+        (clip.src_range.start + dur * f, false)
     } else {
         let mut frozen = false;
         let src_t = if let Some(freeze) = &remap.freeze {
@@ -278,20 +283,29 @@ fn base_source_time(clip: &crate::project::Clip, dur: f64, off: f64, reverse: bo
     }
 }
 
-/// 速度曲线原始积分（不含归一化）：返回 ∫₀^off speed(τ) dτ 的梯形积分值（相对 src_start=0）。
-/// `speed(τ)` 按 play 分段线性插值。与前端 `rawSpeedIntegral` 逐字节一致。
-fn raw_speed_integral(curve: &[crate::project::SpeedPoint], off: f64) -> f64 {
+/// 速度曲线积分（绝对速度）：把"速度曲线"积分为源素材时间。
+///
+/// 数学：`srcT(off) = src_start + ∫₀^off speed(τ) dτ`，
+/// 其中 `speed(τ)` 按 play 分段线性插值（trapezoid 积分）。speed 为绝对速度倍率（用户设定的值）。
+/// speed>0 时 srcT 单调推进 → 连续播放；speed=0 段 → 冻结帧（srcT 恒定）。
+///
+/// 注意：曲线积分要求片段时间线长 dur 由前端 `setCurveCommit` 按曲线平均速率**反向推导**
+/// （`newDur = oldDur * srcDur / ∫₀^oldDur speed dτ`），使 `∫₀^dur speed dτ = srcDur`，
+/// 即整段素材恰好在 dur 内播完 —— 任意曲线形状（含局部 speed>1）都不会越界被 clamp 定格。
+/// 导出（graph.rs::build_speed_curve_expr）用同样的绝对积分拼 setpts，与预览一致。
+pub fn speed_integral(curve: &[crate::project::SpeedPoint], off: f64, src_start: f64) -> f64 {
     if curve.is_empty() {
-        return 0.0;
+        return src_start;
     }
     let mut pts: Vec<&crate::project::SpeedPoint> = curve.iter().collect();
     pts.sort_by(|a, b| a.play.partial_cmp(&b.play).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut acc = 0.0f64;
 
+    // 段 [0, pts[0].play]：以 pts[0].speed 为恒定速度（hold 第一段前的速度）
     let first = pts[0];
     if off <= first.play {
-        return (off.max(0.0)) * first.speed;
+        return src_start + (off.max(0.0)) * first.speed;
     }
     acc += first.play * first.speed;
 
@@ -304,41 +318,18 @@ fn raw_speed_integral(curve: &[crate::project::SpeedPoint], off: f64) -> f64 {
             let frac = if span.abs() < 1e-12 { 0.0 } else { (off - a.play) / span };
             let speed_off = a.speed + (b.speed - a.speed) * frac;
             acc += (a.speed + speed_off) / 2.0 * (off - a.play);
-            return acc;
+            return src_start + acc;
         } else if span.abs() >= 1e-12 {
             acc += (a.speed + b.speed) / 2.0 * span;
         }
     }
+
+    // off 超过末点 play：以末点 speed 外延
     let last_pt = pts[last];
     if off > last_pt.play {
         acc += (off - last_pt.play) * last_pt.speed;
     }
-    acc
-}
-
-/// 速度曲线积分：把"速度曲线"积分为源素材时间，并按整段时间线时长归一化，
-/// 保证 [0,dur] 恰好消耗整段素材 [src_start, src_start+src_dur]——
-/// 任意曲线形状（含局部 speed>1）都不会越界被 clamp 定格，源素材始终播完。
-///
-/// 数学：`srcT(off) = src_start + rawIntegral(off) * (src_dur / rawIntegral(dur))`
-/// 其中 `rawIntegral` 是 speed 按 play 分段线性的梯形积分。
-///
-/// 性质：
-/// - 曲线为常数 speed=c 时：rawIntegral(dur)=c*dur，K=src_dur/(c*dur)，退化为匀速，
-///   等效整体速度 = src_dur/dur（与标量 speed 无关，整体速度由时间线长决定）。
-/// - 曲线为变速形状时：各段按相对比例分配速度，但整体精确消耗 src_dur，绝不定格。
-/// - 全 0 速度（冻结整段）→ 停在 src_start。
-pub fn speed_integral(curve: &[crate::project::SpeedPoint], off: f64, src_start: f64, dur: f64, src_dur: f64) -> f64 {
-    if curve.is_empty() {
-        return src_start;
-    }
-    let total_raw = raw_speed_integral(curve, dur);
-    if total_raw.abs() < 1e-9 {
-        // 全 0 速度 → 冻结在起点
-        return src_start;
-    }
-    let k = src_dur / total_raw;
-    src_start + raw_speed_integral(curve, off) * k
+    src_start + acc
 }
 
 /// 计算片段在时间线上的活跃时间范围
@@ -568,49 +559,49 @@ mod tests {
 
     #[test]
     fn test_clip_source_time_curve_interp() {
-        // 速度曲线：play=0→speed1, play=2→speed2；src[0,10), dur=4, src_dur=10
-        // 归一化：total_raw = ∫₀^4 = (1+2)/2*2 + (4-2)*2 = 3+4 = 7；K = 10/7
+        // 速度曲线（绝对速度，play 归一化 [0,1]，末点必在 play=1）：play=0→speed1, play=1→speed2；src[0,10), dur=4
+        // src_t = src_start + dur * ∫₀^offNorm speed dτ，offNorm = off/dur
         let remap = TimeRemap {
             reverse: false,
             freeze: None,
             curve: vec![
                 SpeedPoint { play: 0.0, speed: 1.0 },
-                SpeedPoint { play: 2.0, speed: 2.0 },
+                SpeedPoint { play: 1.0, speed: 2.0 },
             ],
         };
         let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
-        // off=0 → src = 0
+        // off=0 → offNorm=0 → f=0 → src = 0
         let (s0, _) = clip_source_time(0.0, &clip);
         assert!((s0 - 0.0).abs() < 1e-9);
-        // off=1 → raw=1.25，归一化 src = 1.25 * 10/7 ≈ 1.7857
+        // off=1 → offNorm=0.25 → 段[0,1] speed 1→2，f=(1+1.25)/2*0.25=0.28125 → src = 4*0.28125 = 1.125
         let (src_t, frozen) = clip_source_time(1.0, &clip);
-        assert!((src_t - 1.25 * 10.0 / 7.0).abs() < 1e-9);
+        assert!((src_t - 1.125).abs() < 1e-9);
         assert!(!frozen);
-        // off=3 → raw=5，归一化 src = 5 * 10/7 ≈ 7.1429（不再越界定格）
-        let (s3, _) = clip_source_time(3.0, &clip);
-        assert!((s3 - 5.0 * 10.0 / 7.0).abs() < 1e-9);
-        // off=4(末尾) → raw=7，归一化 src = 7*10/7 = 10 = src_end（整段素材恰好播完）
+        // off=2 → offNorm=0.5 → f=(1+1.5)/2*0.5=0.625 → src = 4*0.625 = 2.5
+        let (s3, _) = clip_source_time(2.0, &clip);
+        assert!((s3 - 2.5).abs() < 1e-9);
+        // off=4(末尾) → offNorm=1 → f=(1+2)/2*1=1.5 → src = 4*1.5 = 6
+        // （此处 dur=4 未反推，仅验证归一化映射数学；真实工程由 setCurveCommit 反推 dur 使 ∫₀^1=srcDur/dur）
         let (s4, _) = clip_source_time(4.0, &clip);
-        assert!((s4 - 10.0).abs() < 1e-9);
+        assert!((s4 - 6.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_clip_source_time_curve_overrides_reverse_freeze() {
-        // curve 非空时应忽略 reverse/freeze
-        // 速度曲线：play=0→speed1, play=4→speed3；src[0,10), dur=4, src_dur=10
-        // 归一化：total_raw = (1+3)/2*4 = 8；K = 10/8 = 1.25
+        // curve 非空时应忽略 reverse/freeze（归一化绝对积分）
+        // 速度曲线：play=0→speed1, play=1→speed3；src[0,10), dur=4
         let remap = TimeRemap {
             reverse: true,
             freeze: Some(FreezeConfig { start: 0.0, source_time: 99.0, duration: 100.0 }),
             curve: vec![
                 SpeedPoint { play: 0.0, speed: 1.0 },
-                SpeedPoint { play: 4.0, speed: 3.0 },
+                SpeedPoint { play: 1.0, speed: 3.0 },
             ],
         };
         let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
         let (src_t, frozen) = clip_source_time(2.0, &clip);
-        // 段[0,4] speed 1→3，off=2 处 raw=3，归一化 src = 3 * 1.25 = 3.75（忽略 freeze）
-        assert!((src_t - 3.75).abs() < 1e-9);
+        // off=2 → offNorm=0.5 → f=(1+2)/2*0.5=0.75 → src = 4*0.75 = 3（忽略 freeze）
+        assert!((src_t - 3.0).abs() < 1e-9);
         assert!(!frozen);
     }
 

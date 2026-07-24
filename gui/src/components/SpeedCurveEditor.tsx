@@ -24,9 +24,10 @@ interface Props {
   freeze: FreezeConfig | null;
   reverse: boolean;
   onChange: (next: SpeedPointConfig[]) => void;
+  onCommit: (next: SpeedPointConfig[]) => void;
 }
 
-export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Props) {
+export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange, onCommit }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(360);
@@ -57,8 +58,9 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
 
   const plotW = width - PAD * 2;
   const plotH = H - PAD * 2;
-  const playToX = (play: number) => PAD + (play / dur) * plotW;
-  const xToPlay = (x: number) => clamp(((x - PAD) / plotW) * dur, 0, dur);
+  // 曲线 play 为归一化 [0,1] 域（与片段绝对时长解耦）：横轴 0..1 对应整段片段
+  const playToX = (play: number) => PAD + play * plotW;
+  const xToPlay = (x: number) => clamp((x - PAD) / plotW, 0, 1);
   const speedToY = (speed: number) => PAD + plotH - ((speed - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)) * plotH;
   const yToSpeed = (y: number) => clamp(SPEED_MIN + ((plotH - (y - PAD)) / plotH) * (SPEED_MAX - SPEED_MIN), SPEED_MIN, SPEED_MAX);
 
@@ -165,9 +167,9 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
       ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
     }
 
-    // 播放头
-    const off = currentTime - clip.timelineIn;
-    if (off >= 0 && off <= dur) {
+    // 播放头（off 归一化到 [0,1] 与曲线 play 域一致）
+    const off = dur > 1e-6 ? (currentTime - clip.timelineIn) / dur : 0;
+    if (off >= 0 && off <= 1) {
       const px = playToX(off);
       ctx.strokeStyle = '#4cc9f0';
       ctx.lineWidth = 1;
@@ -218,7 +220,7 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     const hit = hitTest(mx, my);
     if (hit >= 0) {
       if (e.shiftKey) {
-        onChange(curveRef.current.filter((_, i) => i !== hit));
+        onCommit(curveRef.current.filter((_, i) => i !== hit));
       } else {
         setDragOrig(hit);
       }
@@ -238,14 +240,17 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     onChange(curveRef.current.map((p, i) => i === dragOrig ? { play: newPlay, speed: newSpeed } : p));
   };
 
-  const onMouseUp = () => setDragOrig(null);
+  const onMouseUp = () => {
+    if (dragOrig !== null) onCommit(curveRef.current);
+    setDragOrig(null);
+  };
 
   const onDoubleClick = (e: React.MouseEvent) => {
     const { mx, my } = getPos(e);
     if (hitTest(mx, my) >= 0) return; // 落在点上不新增
     const newPlay = xToPlay(mx);
     const newSpeed = yToSpeed(my);
-    onChange([...curveRef.current, { play: newPlay, speed: newSpeed }]);
+    onCommit([...curveRef.current, { play: newPlay, speed: newSpeed }]);
   };
 
   return (

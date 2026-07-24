@@ -360,6 +360,8 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
 function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
   const setSpeedAction = useProjectStore((s) => s.setSpeed);
+  const setCurveLive = useProjectStore((s) => s.setCurveLive);
+  const setCurveCommit = useProjectStore((s) => s.setCurveCommit);
   const speed = clip.speed ?? 1;
   const dur = clip.timelineOut - clip.timelineIn;
   const srcDur = clip.src_range.end - clip.src_range.start;
@@ -376,23 +378,25 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
     updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: on ? { start: 0, sourceTime: 0, duration: 1 } : null } });
   const setFreezeField = (k: keyof FreezeConfig, v: number) =>
     updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: { ...freeze!, [k]: v } } });
-  const setCurve = (next: SpeedPointConfig[]) => updateClip(trackId, clip.id, { time_remap: { ...remap, curve: next } });
+  // 拖拽过程（onChange）只更新曲线，避免时长抖动；提交（onCommit/增删/数字输入）才反推时长
+  const setCurve = (next: SpeedPointConfig[]) => setCurveLive(trackId, clip.id, next);
+  const commitCurve = (next: SpeedPointConfig[]) => setCurveCommit(trackId, clip.id, next);
   const addKey = () => {
     if (curve.length === 0) {
-      // 种子：1x 速度基线（play:0→speed 1, play:dur→speed 1），避免空曲线导致的静止画面
-      setCurve([
+      // 种子：归一化 [0,1] 的 1x 基线（play 0→1，speed 1→1），避免空曲线导致的静止画面
+      commitCurve([
         { play: 0, speed: 1 },
-        { play: dur, speed: 1 },
+        { play: 1, speed: 1 },
       ]);
     } else {
       const last = curve[curve.length - 1];
-      const newPlay = Math.min(dur, last.play + dur / (curve.length + 1));
-      setCurve([...curve, { play: newPlay, speed: 1 }]);
+      const newPlay = Math.min(1, last.play + 1 / (curve.length + 1));
+      commitCurve([...curve, { play: newPlay, speed: 1 }]);
     }
   };
-  const removeKey = (i: number) => setCurve(curve.filter((_, idx) => idx !== i));
+  const removeKey = (i: number) => commitCurve(curve.filter((_, idx) => idx !== i));
   const setKey = (i: number, k: keyof SpeedPointConfig, v: number) =>
-    setCurve(curve.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
+    commitCurve(curve.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
 
   return (
     <div>
@@ -444,13 +448,13 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
         <span style={{ color: '#eee', fontSize: 11 }}>时间重映射曲线</span>
         <button style={S.btn} onClick={addKey}>+ 添加关键帧</button>
       </div>
-      <SpeedCurveEditor clip={clip} curve={curve} freeze={freeze} reverse={reverse} onChange={setCurve} />
+      <SpeedCurveEditor clip={clip} curve={curve} freeze={freeze} reverse={reverse} onChange={setCurve} onCommit={commitCurve} />
       {curve.length === 0 && <div style={{ color: '#aaa', fontSize: 11, marginBottom: 6 }}>暂无关键帧（使用线性 speed 映射）</div>}
       {curve.map((pt, i) => (
         <div key={i} style={{ ...S.item, display: 'flex', gap: 4, alignItems: 'center', padding: 4, marginBottom: 4 }}>
           <span style={{ color: '#aaa', fontSize: 10, width: 28 }}>play</span>
-          <input type="number" style={{ ...S.input, flex: 1 }} value={pt.play} step={0.1}
-            onChange={(e) => setKey(i, 'play', parseFloat(e.target.value) || 0)} />
+          <input type="number" style={{ ...S.input, flex: 1 }} value={+(pt.play * dur).toFixed(3)} step={0.1}
+            onChange={(e) => setKey(i, 'play', Math.max(0, Math.min(1, (parseFloat(e.target.value) || 0) / (dur || 1))))} />
           <span style={{ color: '#aaa', fontSize: 10, width: 24 }}>速度</span>
           <input type="number" style={{ ...S.input, flex: 1 }} value={pt.speed} step={0.1} min={0}
             onChange={(e) => setKey(i, 'speed', Math.max(0, parseFloat(e.target.value) || 0))} />

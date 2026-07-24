@@ -7,6 +7,7 @@ import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
+import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -24,87 +25,25 @@ const formatTC = (sec: number): string => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 };
 
-// 速度曲线原始积分（不含归一化）：返回 ∫₀^off speed(τ) dτ 的梯形积分值（相对 srcStart=0）。
-// speed 按 play 分段线性插值。与后端 strategy.rs::raw_speed_integral 逐字节一致。
-function rawSpeedIntegral(curve: SpeedPointConfig[], off: number): number {
-  if (!curve || curve.length === 0) return 0;
-  const pts = [...curve].sort((a, b) => a.play - b.play);
-  if (off <= pts[0].play) return Math.max(off, 0) * pts[0].speed;
-  let acc = pts[0].play * pts[0].speed; // 段 [0, 首点.play] 以首点速度恒定
-  let lastPlay = pts[0].play;
-  let lastSpeed = pts[0].speed;
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1];
-    const b = pts[i];
-    const span = b.play - a.play;
-    if (off <= b.play) {
-      const frac = span < 1e-12 ? 0 : (off - a.play) / span;
-      const speedOff = a.speed + (b.speed - a.speed) * frac;
-      acc += (a.speed + speedOff) / 2 * (off - a.play);
-      return acc;
-    }
-    if (span >= 1e-12) acc += (a.speed + b.speed) / 2 * span;
-    lastPlay = b.play;
-    lastSpeed = b.speed;
-  }
-  if (off > lastPlay) acc += (off - lastPlay) * lastSpeed; // 超出末点：以末点速度外延
-  return acc;
-}
-
-// 速度曲线积分（与后端 strategy.rs::speed_integral 一致）：
-// 按整段时间线时长归一化，保证 [0,dur] 恰好消耗整段素材 [srcStart, srcStart+srcDur]，
-// 任意曲线形状（含局部 speed>1）都不会越界定格，源素材始终播完。
-// srcT(off) = srcStart + rawSpeedIntegral(off) * (srcDur / rawSpeedIntegral(dur))
-function speedIntegral(curve: SpeedPointConfig[], off: number, srcStart: number, dur: number, srcDur: number): number {
-  if (!curve || curve.length === 0) return srcStart;
-  const totalRaw = rawSpeedIntegral(curve, dur);
-  if (Math.abs(totalRaw) < 1e-9) return srcStart; // 全 0 → 冻结在起点
-  const k = srcDur / totalRaw;
-  return srcStart + rawSpeedIntegral(curve, off) * k;
-}
-
-// 曲线在 play 偏移 off 处的"瞬时原始速度"（分段线性插值，非积分）
-function rawSpeedAt(curve: SpeedPointConfig[], off: number): number {
-  if (!curve || curve.length === 0) return 1;
-  const pts = [...curve].sort((a, b) => a.play - b.play);
-  if (off <= pts[0].play) return pts[0].speed;
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1];
-    const b = pts[i];
-    if (off <= b.play) {
-      const span = b.play - a.play;
-      const frac = span < 1e-12 ? 0 : (off - a.play) / span;
-      return a.speed + (b.speed - a.speed) * frac;
-    }
-  }
-  return pts[pts.length - 1].speed;
-}
-
 // 曲线是否含 0 速度关键帧（→ 有冻结段，无法仅用 playbackRate 表达，需逐帧 seek）
 function curveHasZeroSpeed(curve: SpeedPointConfig[]): boolean {
   if (!curve || curve.length === 0) return false;
   return curve.some((p) => p.speed <= 0.001);
 }
 
-// 曲线在 play 偏移 off 处的"瞬时有效速度" = 原始速度 × 归一化系数 K
-function curveEffectiveSpeedAt(curve: SpeedPointConfig[], off: number, dur: number, srcDur: number): number {
-  const totalRaw = rawSpeedIntegral(curve, dur);
-  if (Math.abs(totalRaw) < 1e-9) return 0;
-  const k = srcDur / totalRaw;
-  return rawSpeedAt(curve, off) * k;
-}
-
 // 非手动驱动片段在播放头 t 处应使用的 playbackRate：
-// 变速曲线 → 当前 play 偏移处的瞬时有效速度（让 video 自播放、动态调速，避免逐帧 seek 卡顿）；
+// 变速曲线 → 当前 play 偏移处的瞬时「绝对速度」（用户设定值，让 video 自播放、动态调速，避免逐帧 seek 卡顿）；
 // 恒定/普通 → 整体速度 srcDur/dur。统一 clamp 到浏览器支持的 [0.0625, 16]。
+// 注意：曲线绝对积分已由 store.setCurveCommit 反推片段时长，使 ∫₀^dur speed dτ = srcDur，
+// 故此处直接用绝对速度作为 playbackRate，2.0 即真实 2×，无需再乘归一化系数。
 function effectiveRate(clip: ClipConfig, t: number): number {
   const dur = clip.timelineOut - clip.timelineIn;
   if (dur < 1e-6) return 1;
   const srcDur = clip.src_range.end - clip.src_range.start;
-  const off = t - clip.timelineIn;
+  const off = (t - clip.timelineIn) / dur; // 归一化 [0,1]
   const curve = clip.time_remap?.curve;
   const r = curve && curve.length > 0
-    ? curveEffectiveSpeedAt(curve, off, dur, srcDur)
+    ? rawSpeedAt(curve, off)
     : srcDur / dur;
   if (!isFinite(r) || r <= 0) return 1;
   return Math.max(0.0625, Math.min(16, r));
@@ -114,22 +53,22 @@ function effectiveRate(clip: ClipConfig, t: number): number {
 // 给定全局时间线时间 t 与 clip，返回素材源时间 srcT 及是否处于冻结帧
 function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: boolean } {
   const dur = clip.timelineOut - clip.timelineIn;
-  const off = t - clip.timelineIn;
+  const offNorm = dur > 1e-6 ? (t - clip.timelineIn) / dur : 0; // 归一化 [0,1]
   const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const clamp = (x: number) => Math.max(clip.src_range.start, Math.min(clip.src_range.end, x));
   if (remap.curve && remap.curve.length > 0) {
-    const srcDur = clip.src_range.end - clip.src_range.start;
-    const srcT = speedIntegral(remap.curve, off, clip.src_range.start, dur, srcDur);
+    // 绝对速度曲线积分（play 归一化 [0,1]）：srcT = src_start + dur * ∫₀^offNorm speed(τ) dτ
+    const srcT = clip.src_range.start + dur * rawSpeedIntegral(remap.curve, offNorm);
     return { srcT: clamp(srcT), frozen: false };
   }
   let frozen = false; let srcT: number;
-  if (remap.freeze && off >= remap.freeze.start && off < remap.freeze.start + remap.freeze.duration) {
+  if (remap.freeze && offNorm >= remap.freeze.start && offNorm < remap.freeze.start + remap.freeze.duration) {
     srcT = remap.freeze.sourceTime; frozen = true;
   } else {
     const speed = clip.speed ?? 1;
     srcT = remap.reverse
-      ? clip.src_range.start + (dur - off) * speed
-      : clip.src_range.start + off * speed;
+      ? clip.src_range.start + (dur - offNorm) * speed
+      : clip.src_range.start + offNorm * speed;
   }
   return { srcT: clamp(srcT), frozen };
 }

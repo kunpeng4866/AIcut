@@ -12,23 +12,26 @@ use crate::filters::{build_clip_filters, build_filter_spec, build_mask_spec, fmt
 
 /// 从"速度曲线"构建分段线性 setpts 表达式。
 ///
-/// 输入 curve 的每个关键帧 = (play, speed)。先把速度曲线按整段时长归一化积分成"源时间控制点"：
-/// 对每个关键帧 play_i，计算 `src_i = speed_integral(curve, play_i, src_start, dur, src_dur)`，
-/// 得到控制点 (src_i, play_i)。再用这些控制点构建与旧代码**完全相同形态**的分段线性
-/// setpts 表达式：输出帧的 PTS（播放时间）= src 的分段线性函数。
+/// 输入 curve 的每个关键帧 = (play, speed)，其中 play 为**归一化 [0,1]** 时间域，
+/// speed 为**绝对速度倍率**（用户设定值，2.0 = 2×）。与后端 strategy.rs::clip_source_time 同模型：
+/// `srcT = src_start + dur * ∫₀^play_i speed(τ) dτ`，整段素材恰好播完由前端 setCurveCommit
+/// 反推 dur（`dur = srcDur / ∫₀^1 speed dτ`）保证。
 ///
-/// 归一化保证整段素材 [src_start, src_start+src_dur] 恰好映射到 [0,dur]，
-/// 任意曲线形状（含局部 speed>1）都不会越界定格，导出与预览一致。
+/// 控制点 (src_i, play_i*dur)：src_i 为源时间（绝对秒），play_i*dur 为时间线秒，
+/// 使源区间 [srcStart, srcEnd] 恰好映射到时间线 [0, dur]。build_piecewise_setpts_from_ctrl
+/// 据此拼出与旧代码**完全相同形态**的分段线性 setpts（rate = Δplay_sec / Δsrc = 1 / 平均speed）。
+/// 导出与预览一致，任意曲线形状（含局部 speed>1）都不越界定格。
 ///
 /// 若曲线为空或控制点不足，返回 None，调用方回退到线性 speed 的 setpts。
-pub fn build_speed_curve_expr(curve: &[crate::project::SpeedPoint], src_start: f64, dur: f64, src_dur: f64) -> Option<String> {
+pub fn build_speed_curve_expr(curve: &[crate::project::SpeedPoint], src_start: f64, dur: f64) -> Option<String> {
     if curve.len() < 2 { return None; }
-    // 按 play 升序排序并归一化积分得到 (src_i, play_i) 控制点
+    // 按 play 升序排序；控制点 (src_i, play_i*dur)
     let mut pts: Vec<&crate::project::SpeedPoint> = curve.iter().collect();
     pts.sort_by(|a, b| a.play.partial_cmp(&b.play).unwrap_or(std::cmp::Ordering::Equal));
     let ctrl: Vec<(f64, f64)> = pts.iter().map(|p| {
-        let src = crate::pipeline::strategy::speed_integral(curve, p.play, src_start, dur, src_dur);
-        (src, p.play)
+        let f = crate::pipeline::strategy::speed_integral(curve, p.play, 0.0); // ∫₀^play_i speed dτ（归一化）
+        let src = src_start + dur * f;
+        (src, p.play * dur)
     }).collect();
     build_piecewise_setpts_from_ctrl(&ctrl)
 }
@@ -83,8 +86,7 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str) -> Strin
     // 曲线变速优先（time_remap.curve 权威，否则回退 speed_curve），否则线性变速
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
-    let src_dur = c.src_range.end - c.src_range.start;
-    if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur, src_dur) {
+    if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur) {
         chain.push_str(&format!(",setpts={}", expr));
     } else if (c.speed - 1.0).abs() > 0.001 {
         chain.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
