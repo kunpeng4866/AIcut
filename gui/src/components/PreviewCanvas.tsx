@@ -76,14 +76,19 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
   return { srcT: clamp(srcT), frozen };
 }
 
-// 该 clip 是否必须手动驱动（pause + 逐帧 seek），而非依赖 <video>/<audio> 自播放。
-// 只有 倒放 / 冻结帧 / 含 0 速度的曲线 无法用 playbackRate 表达，必须由 RAF 时钟逐帧 seek 到 srcT。
-// 变速曲线（所有 speed>0，仅速率变化）改用「自播放 + 每帧动态 playbackRate」——
-// HTML5 逐帧 seek 跟不上高速播放会掉帧/卡住，而 playbackRate 可在播放中随时调速、平滑不掉帧。
-function clipNeedsManualDrive(clip: ClipConfig): boolean {
+// 该 clip 在时刻 t 是否必须手动驱动（pause + 逐帧 seek），而非依赖 <video>/<audio> 自播放。
+// 仅 倒放 / 当前处于冻结窗口 / 含 0 速度曲线 无法用 playbackRate 表达，必须逐帧 seek 到 srcT。
+// 冻结片段的「非冻结段」与变速曲线（speed>0）一律自播放——视频正常、音频也正常出声；
+// 只有真正处于定格的瞬间才暂停+seek（画面定格、且音频随暂停静音）。
+// 注：冻结窗口内的静音音量已由 volume effect 依据 clipSourceTime().frozen 处理。
+function clipNeedsManualDrive(clip: ClipConfig, t: number): boolean {
   const remap = clip.time_remap;
   if (!remap) return false;
-  if (remap.reverse || remap.freeze) return true;
+  if (remap.reverse) return true;                          // 倒放整段手动（已确认倒放静音即可）
+  if (remap.freeze) {                                      // 仅冻结窗口内手动；窗口外自播放+音频
+    const off = t - clip.timelineIn;
+    return off >= remap.freeze.start && off < remap.freeze.start + remap.freeze.duration;
+  }
   if (remap.curve && remap.curve.length > 0 && curveHasZeroSpeed(remap.curve)) return true;
   return false;
 }
@@ -273,7 +278,7 @@ export default function PreviewCanvas() {
     activeVideoClips.forEach(({ clip }) => {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
-      if (clipNeedsManualDrive(clip)) { v.pause(); return; }
+      if (clipNeedsManualDrive(clip, currentTime)) { v.pause(); return; }
       // 自播放：用当前播放头处的瞬时有效速率（变速曲线会动态变化，见 seek effect 每帧更新）
       v.playbackRate = effectiveRate(clip, currentTime);
       if (isPlaying) v.play().catch(() => {});
@@ -282,7 +287,7 @@ export default function PreviewCanvas() {
     activeAudioClips.forEach(({ clip }) => {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
-      if (clipNeedsManualDrive(clip)) { a.pause(); return; }
+      if (clipNeedsManualDrive(clip, currentTime)) { a.pause(); return; }
       a.playbackRate = effectiveRate(clip, currentTime);
       if (isPlaying) a.play().catch(() => {});
       else a.pause();
@@ -298,7 +303,7 @@ export default function PreviewCanvas() {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
       const { srcT: targetTime } = clipSourceTime(currentTime, clip);
-      if (clipNeedsManualDrive(clip)) {
+      if (clipNeedsManualDrive(clip, currentTime)) {
         if (v.readyState >= 1 && !v.seeking) v.currentTime = Math.max(0, targetTime);
       } else {
         // 自播放：每帧把 playbackRate 更新为当前瞬时有效速率（变速曲线动态调速、平滑不掉帧），
@@ -311,7 +316,7 @@ export default function PreviewCanvas() {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
       const { srcT: targetTime } = clipSourceTime(currentTime, clip);
-      if (clipNeedsManualDrive(clip)) {
+      if (clipNeedsManualDrive(clip, currentTime)) {
         if (a.readyState >= 1 && !a.seeking) a.currentTime = Math.max(0, targetTime);
       } else {
         a.playbackRate = effectiveRate(clip, currentTime);
@@ -350,7 +355,7 @@ export default function PreviewCanvas() {
     const { srcT: targetTime } = clipSourceTime(currentTime, clip);
     v.currentTime = Math.max(0, Math.min(v.duration || targetTime, targetTime));
     // 手动驱动片段（time_remap）不 play()，交由 RAF 逐帧 seek
-    if (!clipNeedsManualDrive(clip) && useUIStore.getState().isPlaying) v.play().catch(() => {});
+    if (!clipNeedsManualDrive(clip, currentTime) && useUIStore.getState().isPlaying) v.play().catch(() => {});
   };
 
   // 音频元数据加载完成
@@ -359,7 +364,7 @@ export default function PreviewCanvas() {
     if (!a) return;
     const { srcT: targetTime } = clipSourceTime(currentTime, clip);
     a.currentTime = Math.max(0, Math.min(a.duration || targetTime, targetTime));
-    if (!clipNeedsManualDrive(clip) && useUIStore.getState().isPlaying) a.play().catch(() => {});
+    if (!clipNeedsManualDrive(clip, currentTime) && useUIStore.getState().isPlaying) a.play().catch(() => {});
   };
 
   const handleTogglePlay = useCallback(() => { togglePlay(); }, [togglePlay]);
