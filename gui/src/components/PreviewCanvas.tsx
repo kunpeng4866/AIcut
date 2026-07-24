@@ -8,6 +8,7 @@ import { useUIStore } from '../store/uiStore';
 import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
+import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -121,6 +122,10 @@ export default function PreviewCanvas() {
   const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
   const [volume, setVolume] = useState(1);
 
+  // 手动驱动片段（倒放/冻结/零速曲线）的预解码帧缓存：播放时按源时间直接取帧，绕开每帧 seek
+  const cacheMap = useRef<Map<string, ClipFrameCache>>(new Map());
+  const bitmapSources = useRef<Map<string, ImageBitmap | null>>(new Map());
+
   // WebGPU 可用性检测
   const webgpuAvailable = typeof navigator !== 'undefined' && !!(navigator as any).gpu;
 
@@ -230,10 +235,17 @@ export default function PreviewCanvas() {
   const { ready: gpuReady, error: gpuError } = useWebGPUPreview({
     canvasRef,
     videoRefs,
+    bitmapSources,
     canvasWidth: project.canvas.width,
     canvasHeight: project.canvas.height,
     clips: activeVideoClips,
     enabled: webgpuAvailable && activeVideoClips.length > 0,
+  });
+
+  // 是否有手动驱动片段正在后台预解码（用于"解码中"提示）
+  const decoding = activeVideoClips.some(({ clip }) => {
+    const c = cacheMap.current.get(clip.id);
+    return !!c && c.status === 'decoding';
   });
 
   // WebGPU 实际可用 = 检测到 navigator.gpu 且运行时无错误
@@ -347,6 +359,49 @@ export default function PreviewCanvas() {
       a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
     });
   }, [volume, activeVideoClips, activeAudioClips, project.tracks, hasSolo, currentTime]);
+
+  // 预解码触发：对"手动驱动类型"片段（倒放/冻结/零速曲线）后台启动帧缓存（仅首次）。
+  // 不支持 rVFC / 超长片段 → status='unsupported'，由播放逻辑回退到现有 seek。
+  useEffect(() => {
+    if (!isRVFCSupported()) return;
+    for (const { clip, asset } of activeVideoClips) {
+      const remap = clip.time_remap;
+      const isManualType = !!remap && (remap.reverse || remap.freeze ||
+        (remap.curve && remap.curve.length > 0 && curveHasZeroSpeed(remap.curve)));
+      if (!isManualType) continue;
+      if (cacheMap.current.has(clip.id)) continue;
+      const cache = new ClipFrameCache();
+      cacheMap.current.set(clip.id, cache);
+      const src = pathToUrl(asset.path);
+      cache.decode(src, clip.src_range.start, clip.src_range.end).catch(() => { cache.status = 'error'; });
+    }
+    // 缓存数量上限（简化 LRU：超出丢弃最旧），避免内存无限增长
+    if (cacheMap.current.size > 6) {
+      const oldest = cacheMap.current.keys().next().value as string;
+      cacheMap.current.get(oldest)?.dispose();
+      cacheMap.current.delete(oldest);
+    }
+  }, [activeVideoClips]);
+
+  // 每帧把"已就绪缓存"的当前源时间对应帧写入 bitmapSources，供 WebGPU 取帧呈现；
+  // 未就绪/回退状态下该 clip 不写入 → WebGPU 继续采视频（现有 seek 路径）。
+  useEffect(() => {
+    bitmapSources.current.clear();
+    for (const { clip } of activeVideoClips) {
+      const cache = cacheMap.current.get(clip.id);
+      if (cache && cache.status === 'ready') {
+        const { srcT } = clipSourceTime(currentTime, clip);
+        const bmp = cache.getFrame(srcT);
+        if (bmp) bitmapSources.current.set(clip.id, bmp);
+      }
+    }
+  }, [currentTime, activeVideoClips]);
+
+  // 卸载时释放所有缓存（关闭 bitmap、停止隐藏 video）
+  useEffect(() => () => {
+    cacheMap.current.forEach((c) => c.dispose());
+    cacheMap.current.clear();
+  }, []);
 
   // 视频元数据加载完成：seek 到正确位置 + 恢复播放
   const onLoadedMetadataFor = (clip: ClipConfig) => () => {
@@ -468,6 +523,19 @@ export default function PreviewCanvas() {
           }}>
             {engineLabel}
             {hasSolo && <span style={{ color: '#ff9800', marginLeft: 6 }}>🎤 SOLO</span>}
+          </div>
+        )}
+
+        {/* 预解码进度提示（倒放/冻结片段后台抓取帧时） */}
+        {hasContent && decoding && (
+          <div style={{
+            position: 'absolute', top: 8, left: 8,
+            fontSize: 12, fontWeight: 700, color: '#ffd166',
+            padding: '4px 10px', borderRadius: 6,
+            background: 'rgba(0,0,0,0.7)', border: '1px solid #ffd166',
+            fontFamily: 'monospace', whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 10,
+          }}>
+            ⟳ 解码中…
           </div>
         )}
       </div>

@@ -79,6 +79,7 @@ export interface ActiveVideoClip {
 interface UseWebGPUPreviewOptions {
   canvasRef: React.RefObject<HTMLCanvasElement>;
   videoRefs: React.MutableRefObject<Map<string, HTMLVideoElement>>;
+  bitmapSources?: React.MutableRefObject<Map<string, ImageBitmap | null>>;
   canvasWidth: number;
   canvasHeight: number;
   clips: ActiveVideoClip[];
@@ -92,7 +93,7 @@ interface UseWebGPUPreviewOptions {
  * 卸载或禁用时销毁所有 GPU 资源。
  */
 export function useWebGPUPreview({
-  canvasRef, videoRefs, canvasWidth, canvasHeight, clips, enabled,
+  canvasRef, videoRefs, bitmapSources, canvasWidth, canvasHeight, clips, enabled,
 }: UseWebGPUPreviewOptions) {
   const deviceRef = useRef<GPUDevice | null>(null);
   const pipelineRef = useRef<GPURenderPipeline | null>(null);
@@ -197,13 +198,17 @@ export function useWebGPUPreview({
         if (activeClips.length === 0) return;
 
         // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
-        const items: { video: HTMLVideoElement; clip: ClipConfig; vw: number; vh: number }[] = [];
+        // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
+        // 否则回退采视频元素（现有 seek 路径）。
+        const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number }[] = [];
         for (const { clip } of activeClips) {
           const video = videoRefs.current.get(clip.id);
           if (!video || video.readyState < 2) continue;
-          const vw = video.videoWidth || canvasWidth;
-          const vh = video.videoHeight || canvasHeight;
-          items.push({ video, clip, vw, vh });
+          const bmp = bitmapSources?.current.get(clip.id) || null;
+          const source: HTMLVideoElement | ImageBitmap = bmp || video;
+          const vw = bmp ? bmp.width : (video.videoWidth || canvasWidth);
+          const vh = bmp ? bmp.height : (video.videoHeight || canvasHeight);
+          items.push({ source, clip, vw, vh });
         }
         if (items.length === 0) return;
 
@@ -215,7 +220,7 @@ export function useWebGPUPreview({
         // 多 pass 渲染：从底到顶依次 Over 合成
         // Pass 0: clear 黑色背景；Pass 1-N: load 保留前一 pass 结果
         items.forEach((item, idx) => {
-          const { video, clip, vw, vh } = item;
+          const { source, clip, vw, vh } = item;
 
           // 上传视频帧到临时纹理
           const texture = device.createTexture({
@@ -224,7 +229,7 @@ export function useWebGPUPreview({
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
           });
           device.queue.copyExternalImageToTexture(
-            { source: video, flipY: false },
+            { source, flipY: false },
             { texture },
             [vw, vh],
           );
