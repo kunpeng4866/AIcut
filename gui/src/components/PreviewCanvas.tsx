@@ -151,6 +151,10 @@ export default function PreviewCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+  // 音量放大支持：HTMLMediaElement.volume 硬限 [0,1]，而 clip.volume / track.volume 可达 2，
+  // 超出 1 的部分必须经 Web Audio GainNode 放大；AudioContext 不可用/未运行时回退 clamp 到 [0,1]，绝不抛异常。
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const gainMapRef = useRef<Map<string, { el: HTMLMediaElement; src: MediaElementAudioSourceNode; gain: GainNode }>>(new Map());
   const stageRef = useRef<HTMLDivElement>(null);
   const [volume, setVolume] = useState(1);
 
@@ -555,6 +559,56 @@ export default function PreviewCanvas() {
     });
   }, [currentTime, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn]);
 
+  // ---- 音量放大支持：HTMLMediaElement.volume 硬限 [0,1] ----
+  // clip.volume / track.volume 可达 2，超出 1 的部分用 Web Audio GainNode 放大；
+  // 若 AudioContext 不可用/未运行，则回退 clamp 到 [0,1]，绝不抛 "outside the range" 异常。
+  const getOrCreateAudioCtx = useCallback((): AudioContext | null => {
+    if (audioCtxRef.current) return audioCtxRef.current;
+    const AC = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AC) return null;
+    try { audioCtxRef.current = new AC(); } catch { return null; }
+    return audioCtxRef.current;
+  }, []);
+
+  const ensureAudioGraph = useCallback((el: HTMLMediaElement, id: string): GainNode | null => {
+    const ctx = getOrCreateAudioCtx();
+    if (!ctx || ctx.state !== 'running') return null; // 未运行则不要抢占元素音频，避免静音
+    const entry = gainMapRef.current.get(id);
+    if (entry && entry.el === el) return entry.gain;
+    if (entry) {
+      try { entry.src.disconnect(); entry.gain.disconnect(); } catch { /* noop */ }
+      gainMapRef.current.delete(id);
+    }
+    try {
+      const src = ctx.createMediaElementSource(el);
+      const gain = ctx.createGain();
+      gain.gain.value = 1;
+      src.connect(gain);
+      gain.connect(ctx.destination);
+      gainMapRef.current.set(id, { el, src, gain });
+      return gain;
+    } catch {
+      return null; // 元素已被其它图占用，放弃放大
+    }
+  }, [getOrCreateAudioCtx]);
+
+  const applyVolume = useCallback((el: HTMLMediaElement, id: string, target: number) => {
+    const t = Math.max(0, target);
+    const entry = gainMapRef.current.get(id);
+    if (entry && entry.el === el) { entry.gain.gain.value = t; return; }
+    if (t > 1) {
+      const ctx = getOrCreateAudioCtx();
+      if (ctx) {
+        ctx.resume?.();
+        const gain = ensureAudioGraph(el, id);
+        if (gain) { gain.gain.value = t; el.volume = 1; return; }
+      }
+      el.volume = 1; // 无法放大则满音量输出，避免抛错
+      return;
+    }
+    el.volume = t; // t ∈ [0,1] 且无图：直接经元素音量，安全
+  }, [ensureAudioGraph, getOrCreateAudioCtx]);
+
   // 音量：根据静音/独奏/隐藏状态设置每个元素的音量
   useEffect(() => {
     activeVideoClips.forEach(({ clip }) => {
@@ -565,7 +619,8 @@ export default function PreviewCanvas() {
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
-      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getClipFadeGain(clip, currentTime) : 0;
+      const target = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getClipFadeGain(clip, currentTime) : 0;
+      applyVolume(v, clip.id, target);
     });
     activeTransitionLayers.forEach(({ layer, outClip }) => {
       const v = videoRefs.current.get(layer.clip.id);
@@ -577,7 +632,8 @@ export default function PreviewCanvas() {
       // 视频转场入片段：音频按 equal-power 淡入包络
       const inEnv = getIncomingAudioTransitionLayer(track, outClip, currentTime)?.progress ?? 1;
       const env = inEnv > 1 ? 1 : audioCrossfadeEnv(inEnv < 0 ? 0 : inEnv).inEnv;
-      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (layer.clip.volume ?? 1) * env * getClipFadeGain(layer.clip, currentTime) : 0;
+      const target = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (layer.clip.volume ?? 1) * env * getClipFadeGain(layer.clip, currentTime) : 0;
+      applyVolume(v, layer.clip.id, target);
     });
     activeAudioClips.forEach(({ clip, trackId }) => {
       const a = audioRefs.current.get(clip.id);
@@ -587,7 +643,8 @@ export default function PreviewCanvas() {
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
       // 出片段在转场窗内乘音频包络（cos 淡出），窗外=1；再乘音频包络线增益
-      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getOutClipAudioEnv(clip, currentTime) * getClipFadeGain(clip, currentTime) : 0;
+      const target = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getOutClipAudioEnv(clip, currentTime) * getClipFadeGain(clip, currentTime) : 0;
+      applyVolume(a, clip.id, target);
     });
     // 转场窗内"入片段"音频（同轨下一片段，提前淡入）：equal-power 淡入包络；再乘音频包络线增益
     activeAudioTransitionIn.forEach(({ clip, trackId, progress }) => {
@@ -598,9 +655,10 @@ export default function PreviewCanvas() {
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
       const inEnv = audioCrossfadeEnv(progress).inEnv;
-      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * inEnv * getClipFadeGain(clip, currentTime) : 0;
+      const target = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * inEnv * getClipFadeGain(clip, currentTime) : 0;
+      applyVolume(a, clip.id, target);
     });
-  }, [volume, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn, project.tracks, hasSolo, currentTime]);
+  }, [volume, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn, project.tracks, hasSolo, currentTime, applyVolume]);
 
   // 预解码触发：对"手动驱动类型"片段（倒放/冻结/零速曲线）后台启动帧缓存（仅首次）。
   // 不支持 rVFC / 超长片段 → status='unsupported'，由播放逻辑回退到现有 seek。
@@ -688,7 +746,7 @@ export default function PreviewCanvas() {
     if (!clipNeedsManualDrive(clip, currentTime) && useUIStore.getState().isPlaying) a.play().catch(() => {});
   };
 
-  const handleTogglePlay = useCallback(() => { togglePlay(); }, [togglePlay]);
+  const handleTogglePlay = useCallback(() => { audioCtxRef.current?.resume?.(); togglePlay(); }, [togglePlay]);
 
   // 进度条点击/拖拽跳转
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -699,6 +757,7 @@ export default function PreviewCanvas() {
 
   // 音量变化
   const handleVolume = (e: React.ChangeEvent<HTMLInputElement>) => {
+    audioCtxRef.current?.resume?.();
     setVolume(parseFloat(e.target.value));
   };
 
