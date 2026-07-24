@@ -26,6 +26,16 @@ const formatTC = (sec: number): string => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 };
 
+// 保音高变速（time-stretch）：设置 HTMLMediaElement.preservesPitch = true，
+// 浏览器会补偿 playbackRate 变化引起的音高偏移 → 变速不变调，与后端重采样导出一致。
+// 规范默认虽为 true，但历史上部分引擎默认 false，故显式设置以保证确定性。
+// 包含 Safari <17.2 (webkit) / Firefox <101 (moz) 前缀，缺失属性赋值无害。
+function applyPreservesPitch(el: HTMLMediaElement) {
+  el.preservesPitch = true;
+  (el as any).webkitPreservesPitch = true; // Safari <17.2
+  (el as any).mozPreservesPitch = true;    // Firefox <101（缺失则无害）
+}
+
 // 曲线是否含 0 速度关键帧（→ 有冻结段，无法仅用 playbackRate 表达，需逐帧 seek）
 function curveHasZeroSpeed(curve: SpeedPointConfig[]): boolean {
   if (!curve || curve.length === 0) return false;
@@ -310,6 +320,7 @@ export default function PreviewCanvas() {
     activeVideoClips.forEach(({ clip }) => {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
+      applyPreservesPitch(v); // 保音高变速（变速不变调），重复设置无害
       if (clipNeedsManualDrive(clip, currentTime)) { v.pause(); return; }
       // 自播放：用当前播放头处的瞬时有效速率（变速曲线会动态变化，见 seek effect 每帧更新）
       v.playbackRate = effectiveRate(clip, currentTime);
@@ -319,6 +330,7 @@ export default function PreviewCanvas() {
     activeAudioClips.forEach(({ clip }) => {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
+      applyPreservesPitch(a); // 保音高变速（变速不变调），重复设置无害
       if (clipNeedsManualDrive(clip, currentTime)) { a.pause(); return; }
       a.playbackRate = effectiveRate(clip, currentTime);
       if (isPlaying) a.play().catch(() => {});
@@ -427,6 +439,7 @@ export default function PreviewCanvas() {
   const onLoadedMetadataFor = (clip: ClipConfig) => () => {
     const v = videoRefs.current.get(clip.id);
     if (!v) return;
+    applyPreservesPitch(v); // 元素初次加载即设置，保证变速不变调
     const { srcT: targetTime } = clipSourceTime(currentTime, clip);
     v.currentTime = Math.max(0, Math.min(v.duration || targetTime, targetTime));
     // 手动驱动片段（time_remap）不 play()，交由 RAF 逐帧 seek
@@ -437,6 +450,7 @@ export default function PreviewCanvas() {
   const onLoadedMetadataForAudio = (clip: ClipConfig) => () => {
     const a = audioRefs.current.get(clip.id);
     if (!a) return;
+    applyPreservesPitch(a); // 元素初次加载即设置，保证变速不变调
     const { srcT: targetTime } = clipSourceTime(currentTime, clip);
     a.currentTime = Math.max(0, Math.min(a.duration || targetTime, targetTime));
     if (!clipNeedsManualDrive(clip, currentTime) && useUIStore.getState().isPlaying) a.play().catch(() => {});
