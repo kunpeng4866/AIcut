@@ -755,10 +755,10 @@ export default function Timeline() {
                 {t.locked && <span style={{ fontSize: 9, color: '#e94560', fontWeight: 600 }}>锁</span>}
               </div>
               <div style={{ display: 'flex', gap: 1, marginTop: 2 }}>
-                <button onClick={() => toggleTrackLock(t.id)} style={{ ...iconBtn, color: t.locked ? '#e94560' : '#aaa', fontWeight: t.locked ? 700 : 400 }} title={t.locked ? '解锁轨道' : '锁定轨道'}>{t.locked ? '锁' : '开'}</button>
-                <button onClick={() => toggleTrackVisible(t.id)} style={{ ...iconBtn, color: t.visible !== false ? '#aaa' : '#555' }} title="显示/隐藏轨道">{t.visible !== false ? '显' : '隐'}</button>
-                <button onClick={() => toggleTrackMute(t.id)} style={{ ...iconBtn, color: t.muted ? '#ff9800' : '#aaa' }} title="静音/取消静音">{t.muted ? '静' : '音'}</button>
-                <button onClick={() => toggleTrackSolo(t.id)} style={{ ...iconBtn, color: t.solo ? '#4caf50' : '#aaa' }} title="独奏此轨道">独</button>
+                <button onClick={() => toggleTrackLock(t.id)} style={{ ...iconBtn, color: t.locked ? '#e94560' : '#aaa', fontWeight: 400 }} title={t.locked ? '解锁轨道' : '锁定轨道'}>{t.locked ? '🔒' : '🔓'}</button>
+                <button onClick={() => toggleTrackVisible(t.id)} style={{ ...iconBtn, color: t.visible !== false ? '#aaa' : '#555' }} title="显示/隐藏轨道">{t.visible !== false ? '👁' : '🚫'}</button>
+                <button onClick={() => toggleTrackMute(t.id)} style={{ ...iconBtn, color: t.muted ? '#ff9800' : '#aaa' }} title="静音/取消静音">{t.muted ? '🔇' : '🔊'}</button>
+                <button onClick={() => toggleTrackSolo(t.id)} style={{ ...iconBtn, color: t.solo ? '#4caf50' : '#aaa' }} title="独奏此轨道">{t.solo ? '⭐' : '☆'}</button>
               </div>
             </div>
           ))}
