@@ -366,8 +366,14 @@ function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
 // 音频标签页
 function AudioTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
-  const audio: any = (clip as any).audio || { fadein: 0, fadeout: 0, denoise: false, voice: '无' };
+  const audio: any = (clip as any).audio || { pan: 0, denoise: false, voice: '无' };
+  const dur = Math.max(0, clip.timelineOut - clip.timelineIn);
   const set = (k: string, v: any) => updateClip(trackId, clip.id, { audio: { ...audio, [k]: v } } as Partial<ClipConfig>);
+  // 淡入/淡出绑定到顶层 audioFadeIn/audioFadeOut（与 Timeline 控制点、预览、导出同一真相源），并夹在 [0, 片段时长]
+  const setFade = (key: 'audioFadeIn' | 'audioFadeOut', raw: number) => {
+    const v = isNaN(raw) ? 0 : Math.min(Math.max(0, raw), dur);
+    updateClip(trackId, clip.id, { [key]: v } as Partial<ClipConfig>);
+  };
   return (
     <div>
       {/* 片段音量：直接映射到后端 clip.volume（导出混音使用） */}
@@ -375,14 +381,14 @@ function AudioTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
       <ParamSlider label="声相" value={audio.pan ?? 0} min={-1} max={1} step={0.01} onChange={(v) => set('pan', v)} />
       <div style={S.row}>
         <span style={S.label}>淡入</span>
-        <input type="number" style={S.input} value={audio.fadein ?? 0} step={0.1} min={0}
-          onChange={(e) => set('fadein', parseFloat(e.target.value) || 0)} />
+        <input type="number" style={S.input} value={clip.audioFadeIn ?? 0} step={0.1} min={0} max={dur}
+          onChange={(e) => setFade('audioFadeIn', parseFloat(e.target.value))} />
         <span style={{ color: '#aaa', fontSize: 11 }}>秒</span>
       </div>
       <div style={S.row}>
         <span style={S.label}>淡出</span>
-        <input type="number" style={S.input} value={audio.fadeout ?? 0} step={0.1} min={0}
-          onChange={(e) => set('fadeout', parseFloat(e.target.value) || 0)} />
+        <input type="number" style={S.input} value={clip.audioFadeOut ?? 0} step={0.1} min={0} max={dur}
+          onChange={(e) => setFade('audioFadeOut', parseFloat(e.target.value))} />
         <span style={{ color: '#aaa', fontSize: 11 }}>秒</span>
       </div>
       <div style={S.row}>

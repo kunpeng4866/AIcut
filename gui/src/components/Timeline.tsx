@@ -210,7 +210,8 @@ const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.m
 function FadeHandles({ clip, track, zoom, width }: {
   clip: ClipConfig; track: TrackConfig; zoom: number; width: number;
 }) {
-  if (track.type !== 'audio') return null;
+  // 音频轨与视频轨（视频片段自带音轨）都显示淡入/淡出控制点
+  if (track.type !== 'audio' && track.type !== 'video') return null;
   const H = TRACK_HEIGHT - 8;
   const TOP = 5;
   const dur = clip.timelineOut - clip.timelineIn;
@@ -252,6 +253,18 @@ function FadeHandles({ clip, track, zoom, width }: {
     window.addEventListener('mouseup', onUp);
   };
 
+  // 双击控制点 = 复位该淡入/淡出为 0
+  const resetFadeIn = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (track.locked) return;
+    useProjectStore.getState().updateClip(track.id, clip.id, { audioFadeIn: 0 });
+  };
+  const resetFadeOut = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (track.locked) return;
+    useProjectStore.getState().updateClip(track.id, clip.id, { audioFadeOut: 0 });
+  };
+
   return (
     <svg width={width} height={H}
       style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', overflow: 'visible', zIndex: 4 }}>
@@ -271,12 +284,12 @@ function FadeHandles({ clip, track, zoom, width }: {
           <line x1={xFo} y1={yOf(1)} x2={width} y2={H} stroke="#fb923c" strokeWidth={2} pointerEvents="none" />
         </>
       )}
-      {/* fade-in handle (green, always visible) */}
+      {/* fade-in handle (green, always visible) — 拖动改时长，双击复位为 0 */}
       <circle cx={xFi} cy={yOf(1)} r={5} fill="#4ade80" stroke="#0b6" strokeWidth={1}
-        style={{ cursor: 'col-resize', pointerEvents: 'auto' }} onMouseDown={startFadeIn} />
-      {/* fade-out handle (orange, always visible) */}
+        style={{ cursor: 'col-resize', pointerEvents: 'auto' }} onMouseDown={startFadeIn} onDoubleClick={resetFadeIn} />
+      {/* fade-out handle (orange, always visible) — 拖动改时长，双击复位为 0 */}
       <circle cx={xFo} cy={yOf(1)} r={5} fill="#fb923c" stroke="#a35" strokeWidth={1}
-        style={{ cursor: 'col-resize', pointerEvents: 'auto' }} onMouseDown={startFadeOut} />
+        style={{ cursor: 'col-resize', pointerEvents: 'auto' }} onMouseDown={startFadeOut} onDoubleClick={resetFadeOut} />
     </svg>
   );
 }
