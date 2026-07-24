@@ -63,12 +63,51 @@ function speedIntegral(curve: SpeedPointConfig[], off: number, srcStart: number,
   return srcStart + rawSpeedIntegral(curve, off) * k;
 }
 
-// 曲线是否为"常量速度"（所有关键帧速度一致）→ 可用 playbackRate 自播放，无需逐帧 seek
-function curveIsConstant(curve: SpeedPointConfig[]): boolean {
-  if (!curve || curve.length === 0) return true;
-  const first = curve[0].speed;
-  for (const p of curve) if (Math.abs(p.speed - first) > 1e-3) return false;
-  return true;
+// 曲线在 play 偏移 off 处的"瞬时原始速度"（分段线性插值，非积分）
+function rawSpeedAt(curve: SpeedPointConfig[], off: number): number {
+  if (!curve || curve.length === 0) return 1;
+  const pts = [...curve].sort((a, b) => a.play - b.play);
+  if (off <= pts[0].play) return pts[0].speed;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    if (off <= b.play) {
+      const span = b.play - a.play;
+      const frac = span < 1e-12 ? 0 : (off - a.play) / span;
+      return a.speed + (b.speed - a.speed) * frac;
+    }
+  }
+  return pts[pts.length - 1].speed;
+}
+
+// 曲线是否含 0 速度关键帧（→ 有冻结段，无法仅用 playbackRate 表达，需逐帧 seek）
+function curveHasZeroSpeed(curve: SpeedPointConfig[]): boolean {
+  if (!curve || curve.length === 0) return false;
+  return curve.some((p) => p.speed <= 0.001);
+}
+
+// 曲线在 play 偏移 off 处的"瞬时有效速度" = 原始速度 × 归一化系数 K
+function curveEffectiveSpeedAt(curve: SpeedPointConfig[], off: number, dur: number, srcDur: number): number {
+  const totalRaw = rawSpeedIntegral(curve, dur);
+  if (Math.abs(totalRaw) < 1e-9) return 0;
+  const k = srcDur / totalRaw;
+  return rawSpeedAt(curve, off) * k;
+}
+
+// 非手动驱动片段在播放头 t 处应使用的 playbackRate：
+// 变速曲线 → 当前 play 偏移处的瞬时有效速度（让 video 自播放、动态调速，避免逐帧 seek 卡顿）；
+// 恒定/普通 → 整体速度 srcDur/dur。统一 clamp 到浏览器支持的 [0.0625, 16]。
+function effectiveRate(clip: ClipConfig, t: number): number {
+  const dur = clip.timelineOut - clip.timelineIn;
+  if (dur < 1e-6) return 1;
+  const srcDur = clip.src_range.end - clip.src_range.start;
+  const off = t - clip.timelineIn;
+  const curve = clip.time_remap?.curve;
+  const r = curve && curve.length > 0
+    ? curveEffectiveSpeedAt(curve, off, dur, srcDur)
+    : srcDur / dur;
+  if (!isFinite(r) || r <= 0) return 1;
+  return Math.max(0.0625, Math.min(16, r));
 }
 
 // 统一时间重映射：与后端 Rust clip_source_time 逐字节一致的纯函数
@@ -96,14 +135,14 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
 }
 
 // 该 clip 是否必须手动驱动（pause + 逐帧 seek），而非依赖 <video>/<audio> 自播放。
-// 倒放 / 冻结帧 / 变速曲线（非恒定）都无法用 playbackRate 表达，必须由 RAF 时钟逐帧 seek 到 srcT，
-// 否则 video 自播放(1x) 与手动 seek(速率≠1x) 互掐 → 卡顿 / 反复播同一帧。
-// 注意：恒定速度曲线（所有关键帧速度相同）退化为匀速，可直接用 playbackRate 自播放，避免无谓卡顿。
+// 只有 倒放 / 冻结帧 / 含 0 速度的曲线 无法用 playbackRate 表达，必须由 RAF 时钟逐帧 seek 到 srcT。
+// 变速曲线（所有 speed>0，仅速率变化）改用「自播放 + 每帧动态 playbackRate」——
+// HTML5 逐帧 seek 跟不上高速播放会掉帧/卡住，而 playbackRate 可在播放中随时调速、平滑不掉帧。
 function clipNeedsManualDrive(clip: ClipConfig): boolean {
   const remap = clip.time_remap;
   if (!remap) return false;
   if (remap.reverse || remap.freeze) return true;
-  if (remap.curve && remap.curve.length > 0 && !curveIsConstant(remap.curve)) return true;
+  if (remap.curve && remap.curve.length > 0 && curveHasZeroSpeed(remap.curve)) return true;
   return false;
 }
 
@@ -293,10 +332,8 @@ export default function PreviewCanvas() {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
       if (clipNeedsManualDrive(clip)) { v.pause(); return; }
-      // 整体速度 = 素材时长 / 时间线长（恒定曲线/普通片段通用，避免用可能被曲线覆盖的 speed 字段）
-      const dur = clip.timelineOut - clip.timelineIn;
-      const overall = (clip.src_range.end - clip.src_range.start) / Math.max(1e-6, dur);
-      v.playbackRate = overall;
+      // 自播放：用当前播放头处的瞬时有效速率（变速曲线会动态变化，见 seek effect 每帧更新）
+      v.playbackRate = effectiveRate(clip, currentTime);
       if (isPlaying) v.play().catch(() => {});
       else v.pause();
     });
@@ -304,9 +341,7 @@ export default function PreviewCanvas() {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
       if (clipNeedsManualDrive(clip)) { a.pause(); return; }
-      const dur = clip.timelineOut - clip.timelineIn;
-      const overall = (clip.src_range.end - clip.src_range.start) / Math.max(1e-6, dur);
-      a.playbackRate = overall;
+      a.playbackRate = effectiveRate(clip, currentTime);
       if (isPlaying) a.play().catch(() => {});
       else a.pause();
     });
@@ -323,8 +358,11 @@ export default function PreviewCanvas() {
       const { srcT: targetTime } = clipSourceTime(currentTime, clip);
       if (clipNeedsManualDrive(clip)) {
         if (v.readyState >= 1 && !v.seeking) v.currentTime = Math.max(0, targetTime);
-      } else if (v.readyState >= 1 && Math.abs(v.currentTime - targetTime) > 0.3) {
-        v.currentTime = Math.max(0, targetTime);
+      } else {
+        // 自播放：每帧把 playbackRate 更新为当前瞬时有效速率（变速曲线动态调速、平滑不掉帧），
+        // 位置偏差 >0.3 才纠正 seek（速率跟踪良好时几乎不触发）
+        v.playbackRate = effectiveRate(clip, currentTime);
+        if (v.readyState >= 1 && Math.abs(v.currentTime - targetTime) > 0.3) v.currentTime = Math.max(0, targetTime);
       }
     });
     activeAudioClips.forEach(({ clip }) => {
@@ -333,8 +371,9 @@ export default function PreviewCanvas() {
       const { srcT: targetTime } = clipSourceTime(currentTime, clip);
       if (clipNeedsManualDrive(clip)) {
         if (a.readyState >= 1 && !a.seeking) a.currentTime = Math.max(0, targetTime);
-      } else if (a.readyState >= 1 && Math.abs(a.currentTime - targetTime) > 0.3) {
-        a.currentTime = Math.max(0, targetTime);
+      } else {
+        a.playbackRate = effectiveRate(clip, currentTime);
+        if (a.readyState >= 1 && Math.abs(a.currentTime - targetTime) > 0.3) a.currentTime = Math.max(0, targetTime);
       }
     });
   }, [currentTime, activeVideoClips, activeAudioClips]);
