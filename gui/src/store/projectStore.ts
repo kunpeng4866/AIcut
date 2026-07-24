@@ -2,7 +2,7 @@
 // 所有修改操作前先 pushSnapshot 到 historyStore，修改后标记 isDirty
 // 轨道排序规则：text/sticker/effect (顶) → video (中, 主轨最下) → audio (底)
 import { create } from 'zustand';
-import type { ProjectConfig, AssetConfig, ClipConfig, TransformConfig, TrackConfig, SpeedPointConfig } from '../types';
+import type { ProjectConfig, AssetConfig, ClipConfig, TransformConfig, TrackConfig, SpeedPointConfig, FreezeConfig } from '../types';
 import { useHistoryStore } from './historyStore';
 import { useUIStore } from './uiStore';
 import { rawSpeedIntegral } from '../utils/speedCurve';
@@ -94,6 +94,9 @@ interface ProjectState {
   // 曲线编辑提交（拖拽结束 / 增删 / 数字输入）：按曲线平均速率反向推导片段时长，
   // 使 ∫₀^dur speed dτ = srcDur（整段素材恰好播完），并 ripple 同轨后续片段。
   setCurveCommit: (trackId: string, clipId: string, curve: SpeedPointConfig[]) => void;
+  // 冻结帧提交：把冻结时长计入片段时长（timelineOut = 基础时长 srcDur/speed + freeze.duration），
+  // 并 ripple 同轨后续片段。与后端 strategy.rs::effective_off 配套——退出冻结平滑无跳变、整段素材播完。
+  setFreezeCommit: (trackId: string, clipId: string, freeze: FreezeConfig | null) => void;
   splitClip: (trackId: string, clipId: string, time: number) => void;
   moveClip: (trackId: string, clipId: string, newTimelineIn: number, skipRealign?: boolean) => void;
   moveClipToTrack: (srcTrackId: string, clipId: string, destTrackId: string, newTimelineIn: number) => void;
@@ -241,8 +244,9 @@ export const useProjectStore = create<ProjectState>((set, get) => {
             return cl;
           });
         }
-        // 无曲线：线性变速，新时长 = 源时长 / speed
-        const newDur = srcDur / sp;
+        // 无曲线：线性变速，新时长 = 源时长 / speed + 冻结时长（冻结存在时计入，曲线优先故其不含冻结）
+        const freezeDur = target.time_remap?.freeze ? target.time_remap.freeze.duration : 0;
+        const newDur = srcDur / sp + freezeDur;
         const delta = newDur - oldDur;
         return clips.map((cl) => {
           if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur };
@@ -285,6 +289,29 @@ export const useProjectStore = create<ProjectState>((set, get) => {
         const delta = newDur - oldDur;
         return clips.map((cl) => {
           if (cl.id === clipId) return { ...cl, timelineOut: cl.timelineIn + newDur, time_remap: { ...cl.time_remap, curve } };
+          if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
+          return cl;
+        });
+      }));
+    }),
+    // 冻结帧提交：把冻结时长计入片段时长，并 ripple 同轨后续片段（与 setSpeed/setCurveCommit 同构）。
+    // 配套后端 strategy.rs::effective_off：退出冻结时源从 freeze.sourceTime 平滑继续，
+    // timelineOut 延长 freeze.duration 后整段素材恰好播完（不再在退出冻结处突跳）。
+    // 曲线优先：若片段同时含曲线则引擎忽略冻结，冻结时长不计入 timelineOut。
+    setFreezeCommit: (trackId, clipId, freeze) => mutate((p) => {
+      if (p.tracks.find(t => t.id === trackId)?.locked) return p;
+      return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => {
+        const target = clips.find((c) => c.id === clipId);
+        if (!target) return clips;
+        const srcDur = target.src_range.end - target.src_range.start;
+        const speed = target.speed ?? 1;
+        const oldDur = target.timelineOut - target.timelineIn;
+        const hasCurve = !!(target.time_remap?.curve && target.time_remap.curve.length >= 2);
+        const freezeDur = (!hasCurve && freeze) ? freeze.duration : 0;
+        const newDur = srcDur / speed + freezeDur;   // 基础时长 + 冻结时长
+        const delta = newDur - oldDur;
+        return clips.map((cl) => {
+          if (cl.id === clipId) return { ...cl, timelineOut: cl.timelineIn + newDur, time_remap: { ...cl.time_remap, freeze } };
           if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
           return cl;
         });

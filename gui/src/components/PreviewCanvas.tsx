@@ -52,6 +52,16 @@ function effectiveRate(clip: ClipConfig, t: number): number {
 
 // 统一时间重映射：与后端 Rust clip_source_time 逐字节一致的纯函数
 // 给定全局时间线时间 t 与 clip，返回素材源时间 srcT 及是否处于冻结帧
+// 非冻结段的有效偏移：从片段起点到 t 之间、扣除「冻结窗口已流逝时间」后的播放时间。
+// 与后端 strategy.rs::effective_off 逐字节一致：退出冻结时源时间从 freeze.sourceTime 平滑继续，
+// 不再突跳 freeze.duration 秒；完整素材在「前端计入 freeze.duration 的延长 timelineOut」内播完。
+function frozenElapsed(freeze: { start: number; duration: number } | null, off: number): number {
+  if (!freeze) return 0;
+  if (off <= freeze.start) return 0;
+  if (off >= freeze.start + freeze.duration) return freeze.duration;
+  return off - freeze.start;
+}
+
 function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: boolean } {
   const dur = clip.timelineOut - clip.timelineIn;
   const off = t - clip.timelineIn;                  // 绝对偏移（秒）
@@ -69,10 +79,12 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
     srcT = remap.freeze.sourceTime; frozen = true;
   } else {
     const speed = clip.speed ?? 1;
-    // 普通/倒放：与后端 base_source_time 完全一致——用绝对偏移 off 乘 speed，覆盖整段素材（而非归一化值）
+    // 普通/倒放：与后端 base_source_time 完全一致——用「有效偏移」(扣除冻结已流逝) 乘 speed，
+    // 覆盖整段素材（而非归一化值）。冻结窗口之外按有效偏移推进，退出冻结平滑无跳变。
+    const effOff = off - frozenElapsed(remap.freeze ?? null, off);
     srcT = remap.reverse
-      ? clip.src_range.start + (dur - off) * speed
-      : clip.src_range.start + off * speed;
+      ? clip.src_range.start + (dur - effOff) * speed
+      : clip.src_range.start + effOff * speed;
   }
   return { srcT: clamp(srcT), frozen };
 }

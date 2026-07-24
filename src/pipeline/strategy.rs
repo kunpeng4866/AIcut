@@ -261,7 +261,10 @@ pub fn clip_source_time(t: f64, clip: &crate::project::Clip) -> (f64, bool) {
                 frozen = true;
                 freeze.source_time
             } else {
-                base_source_time(clip, dur, off, remap.reverse)
+                // 冻结窗口之外：按「有效（非冻结）播放时间」推进源，使退出冻结时
+                // 源时间从 freeze.source_time 平滑继续（不再突跳 freeze.duration 秒）。
+                // 完整素材在「前端已把 freeze.duration 计入 timelineOut」的延长时间线内恰好播完。
+                base_source_time(clip, dur, effective_off(freeze, off), remap.reverse)
             }
         } else {
             base_source_time(clip, dur, off, remap.reverse)
@@ -281,6 +284,27 @@ fn base_source_time(clip: &crate::project::Clip, dur: f64, off: f64, reverse: bo
     } else {
         clip.src_range.start + off * clip.speed
     }
+}
+
+/// 非冻结段的有效偏移：从片段起点到 `off` 之间、扣除「冻结窗口已流逝时间」后的播放时间。
+///
+/// 语义：冻结窗口内源时间停滞（frozen），不消耗素材；退出冻结后源时间应从 `freeze.source_time`
+/// 平滑继续，而非带着冻结时长一起往前跳。故非冻结段的源推进时间 = `off - 冻结已流逝`。
+///
+/// - off ≤ start：未进入冻结，流逝 0
+/// - off ≥ start+duration：完全越过冻结，流逝 = duration
+/// - 区间内：流逝 = off - start
+///
+/// 与前端 `gui/src/components/PreviewCanvas.tsx::frozenElapsed` 逐字节一致。
+fn effective_off(freeze: &crate::project::FreezeConfig, off: f64) -> f64 {
+    let elapsed = if off <= freeze.start {
+        0.0
+    } else if off >= freeze.start + freeze.duration {
+        freeze.duration
+    } else {
+        off - freeze.start
+    };
+    off - elapsed
 }
 
 /// 速度曲线积分（绝对速度）：把"速度曲线"积分为源素材时间。
@@ -540,21 +564,54 @@ mod tests {
 
     #[test]
     fn test_clip_source_time_freeze() {
+        // freeze.start=3, sourceTime=3(=src_start+start*speed，冻结入口连续), duration=2。
+        // 修正后：退出冻结时源从 freeze.source_time 平滑继续（不再突跳 2 秒）；
+        // 完整素材在「前端计入 freeze.duration 的延长 timelineOut」内播完。
         let remap = TimeRemap {
             reverse: false,
-            freeze: Some(FreezeConfig { start: 0.0, source_time: 5.0, duration: 2.0 }),
+            freeze: Some(FreezeConfig { start: 3.0, source_time: 3.0, duration: 2.0 }),
             curve: Vec::new(),
         };
-        // src_range [0,20) 包含 source_time=5.0，避免被 clamp
-        let clip = make_clip_with_remap("c1", 0.0, 20.0, 0.0, 4.0, 1.0, remap);
-        // off=1 ∈ [0,2) → src_t = 5.0, frozen
-        let (src_t, frozen) = clip_source_time(1.0, &clip);
-        assert!((src_t - 5.0).abs() < 1e-9);
+        // src_range [0,10)，timeline [0,12)（dur=12 = srcDur(10) + freeze(2)）
+        let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 12.0, 1.0, remap);
+        // off=4 ∈ [3,5) → src_t = 3.0, frozen
+        let (src_t, frozen) = clip_source_time(4.0, &clip);
+        assert!((src_t - 3.0).abs() < 1e-9);
         assert!(frozen);
-        // off=3 ∉ [0,2) → 正常正向 0 + 3*1 = 3, not frozen
-        let (src_t2, frozen2) = clip_source_time(3.0, &clip);
-        assert!((src_t2 - 3.0).abs() < 1e-9);
+        // off=1（冻结前）→ 有效偏移=1 → src_t = 1.0, not frozen
+        let (src_t2, frozen2) = clip_source_time(1.0, &clip);
+        assert!((src_t2 - 1.0).abs() < 1e-9);
         assert!(!frozen2);
+        // off=5（刚退出冻结）：有效偏移 = 5-2 = 3 → src_t = 3.0（与冻结末尾相同，平滑无跳变）
+        let (src_t3, frozen3) = clip_source_time(5.0, &clip);
+        assert!((src_t3 - 3.0).abs() < 1e-9);
+        assert!(!frozen3);
+        // off=6（退出后 1 秒）：有效偏移 = 6-2 = 4 → src_t = 4.0（旧实现会得 6.0，即多跳 2 秒）
+        let (src_t4, _) = clip_source_time(6.0, &clip);
+        assert!((src_t4 - 4.0).abs() < 1e-9);
+        // off=12（末尾）：有效偏移 = 12-2 = 10 → src_t = 10.0 = src_end（整段素材恰好播完）
+        let (src_t5, _) = clip_source_time(12.0, &clip);
+        assert!((src_t5 - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_clip_source_time_freeze_reverse() {
+        // 倒放 + 冻结：effective_off 同样作用于倒放分支，退出冻结后按倒放映射继续（无额外突跳）。
+        let remap = TimeRemap {
+            reverse: true,
+            freeze: Some(FreezeConfig { start: 3.0, source_time: 7.0, duration: 2.0 }),
+            curve: Vec::new(),
+        };
+        // src_range [0,10)，timeline [0,12)，speed=1。倒放：src = src_start + (dur - effOff)*speed
+        let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 12.0, 1.0, remap);
+        // off=4（冻结中）→ src_t = 7.0, frozen
+        let (s, f) = clip_source_time(4.0, &clip);
+        assert!((s - 7.0).abs() < 1e-9);
+        assert!(f);
+        // off=5（退出冻结）：有效偏移 = 3 → 倒放 src = 0 + (12 - 3)*1 = 9.0（旧实现会得 0+(12-5)=7.0）
+        let (s2, f2) = clip_source_time(5.0, &clip);
+        assert!((s2 - 9.0).abs() < 1e-9);
+        assert!(!f2);
     }
 
     #[test]

@@ -362,6 +362,7 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const setSpeedAction = useProjectStore((s) => s.setSpeed);
   const setCurveLive = useProjectStore((s) => s.setCurveLive);
   const setCurveCommit = useProjectStore((s) => s.setCurveCommit);
+  const setFreezeCommit = useProjectStore((s) => s.setFreezeCommit);
   const speed = clip.speed ?? 1;
   const dur = clip.timelineOut - clip.timelineIn;
   const srcDur = clip.src_range.end - clip.src_range.start;
@@ -374,10 +375,12 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const hasCurve = curve.length > 0;
 
   const toggleReverse = () => updateClip(trackId, clip.id, { time_remap: { ...remap, reverse: !reverse } });
+  // 冻结开关/字段走 setFreezeCommit：自动把 freeze.duration 计入 timelineOut 并 ripple 同轨后续片段，
+  // 与后端 effective_off 配套，使退出冻结平滑无跳变、整段素材恰好播完。
   const setFreezeEnabled = (on: boolean) =>
-    updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: on ? { start: 0, sourceTime: 0, duration: 1 } : null } });
+    setFreezeCommit(trackId, clip.id, on ? { start: 0, sourceTime: 0, duration: 1 } : null);
   const setFreezeField = (k: keyof FreezeConfig, v: number) =>
-    updateClip(trackId, clip.id, { time_remap: { ...remap, freeze: { ...freeze!, [k]: v } } });
+    setFreezeCommit(trackId, clip.id, { ...freeze!, [k]: v });
   // 拖拽过程（onChange）只更新曲线，避免时长抖动；提交（onCommit/增删/数字输入）才反推时长
   const setCurve = (next: SpeedPointConfig[]) => setCurveLive(trackId, clip.id, next);
   const commitCurve = (next: SpeedPointConfig[]) => setCurveCommit(trackId, clip.id, next);
