@@ -637,6 +637,7 @@ export default function Timeline() {
           片段吸附 {clipSnap ? 'ON' : 'OFF'}
         </button>
         <div style={{ width: 1, height: 20, background: '#0f3460', margin: '0 4px' }} />
+        <button onClick={handleAddText} style={{ ...btnStyle, background: '#3d2b1b' }} title="添加文字/标题片段到文字轨">文字</button>
         <button onClick={handleImportSubtitle} style={{ ...btnStyle, background: '#1b3d3d' }}>CC 字幕</button>
         {hasSoloTrack && (
           <span style={{ color: '#ff9800', fontSize: 11, fontWeight: 600 }}>独奏已启用</span>
