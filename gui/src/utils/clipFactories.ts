@@ -60,7 +60,7 @@ export function createTextClip(timelineIn = 0, duration = 5): ClipConfig {
     src_range: { start: 0, end: duration },
     timelineIn,
     timelineOut: timelineIn + duration,
-    text: { content: '双击编辑文字', fontSize: 48, color: '#ffffff', textAlign: 'center', x: 0.5, y: 0.5 },
+    text: { content: '新文字', fontSize: 48, color: '#ffffff', textAlign: 'center', x: 0.5, y: 0.5 },
   };
 }
 

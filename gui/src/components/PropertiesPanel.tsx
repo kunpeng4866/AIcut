@@ -384,7 +384,7 @@ function TextTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
     <div style={{ padding: 8 }}>
       <div style={{ marginBottom: 8 }}>
         <div style={S.label}>文字内容</div>
-        <textarea value={t.content} onChange={(e) => set('content', e.target.value)}
+        <textarea autoFocus value={t.content} onChange={(e) => set('content', e.target.value)}
           style={{ width: '100%', height: 60, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: 4, fontSize: 12, resize: 'vertical' }} />
       </div>
       <ParamSlider label="字号" value={t.fontSize ?? 48} min={8} max={200} step={1} onChange={(v) => set('fontSize', v)} />

@@ -213,8 +213,8 @@ export default function PreviewCanvas() {
   })();
 
   // 查找当前文字/字幕叠加层
-  const activeTextOverlays: { text: string; style: React.CSSProperties }[] = (() => {
-    const result: { text: string; style: React.CSSProperties }[] = [];
+  const activeTextOverlays: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; style: React.CSSProperties }[] = (() => {
+    const result: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; style: React.CSSProperties }[] = [];
     for (const track of project.tracks) {
       for (const clip of track.clips) {
         if (!(currentTime >= clip.timelineIn && currentTime < clip.timelineOut)) continue;
@@ -222,12 +222,15 @@ export default function PreviewCanvas() {
           const t = clip.text;
           result.push({
             text: t.content,
+            kind: 'text',
+            trackId: track.id,
+            clipId: clip.id,
             style: {
               position: 'absolute', left: `${(t.x ?? 0.5) * 100}%`, top: `${(t.y ?? 0.5) * 100}%`,
               transform: 'translate(-50%, -50%)', color: t.color || '#fff',
               fontSize: t.fontSize || 48, fontFamily: t.fontFamily || 'system-ui',
               textAlign: (t.textAlign || 'center') as any, fontWeight: 'bold',
-              pointerEvents: 'none', zIndex: 100, textShadow: '0 0 10px rgba(0,0,0,0.8)',
+              pointerEvents: 'auto', cursor: 'pointer', zIndex: 100, textShadow: '0 0 10px rgba(0,0,0,0.8)',
             },
           });
         }
@@ -240,6 +243,9 @@ export default function PreviewCanvas() {
             const isCenter = s.position === 'center';
             result.push({
               text: item.text,
+              kind: 'subtitle',
+              trackId: track.id,
+              clipId: clip.id,
               style: {
                 position: 'absolute', left: '50%',
                 bottom: s.position === 'bottom' ? 40 : undefined,
@@ -609,7 +615,16 @@ export default function PreviewCanvas() {
 
         {/* 文字/字幕叠加层 */}
         {activeTextOverlays.map((item, idx) => (
-          <div key={idx} style={item.style}>{item.text}</div>
+          <div
+            key={idx}
+            style={item.style}
+            title="单击选中 · 双击编辑文字"
+            onClick={() => useUIStore.getState().selectClip(item.trackId, item.clipId)}
+            onDoubleClick={() => {
+              useUIStore.getState().selectClip(item.trackId, item.clipId);
+              useUIStore.getState().setActiveRightPanel(item.kind === 'subtitle' ? 'subtitle' : 'text');
+            }}
+          >{item.text}</div>
         ))}
 
         {/* 贴纸图片叠加层（DOM <img>，跨 WebGPU/HTML5 通用） */}
