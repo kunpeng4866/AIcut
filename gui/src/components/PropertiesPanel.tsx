@@ -665,7 +665,7 @@ function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string })
   const setDur = (d: number) => updateClip(trackId, clip.id, { transition: { ...tr, duration: d } });
   const setDir = (d: WipeDirection) => updateClip(trackId, clip.id, { transition: { ...tr, direction: d } });
   const applyToAll = () => {
-    for (const track of project.tracks.filter((t) => t.type === 'video')) {
+    for (const track of project.tracks.filter((t) => t.type === 'video' || t.type === 'audio')) {
       for (const c of track.clips) {
         const hasNext = track.clips.some((n) => n.id !== c.id && n.timelineIn >= c.timelineOut - 1e-4);
         if (hasNext) updateClip(track.id, c.id, { transition: { ...tr } });

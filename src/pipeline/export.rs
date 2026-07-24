@@ -714,6 +714,34 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             true
         });
 
+        // —— 音频交叉淡化：构建出片段包络 out_env 与入片段 extra_in ——
+        let mut out_env: HashMap<&str, f32> = HashMap::new();
+        // (in_clip, track_id, in_env, src_offset_seconds)
+        let mut extra_in: Vec<(&Clip, &str, f32, f64)> = Vec::new();
+        for (clip, tid) in &sources {
+            if let Some(tr) = &clip.transition {
+                if tr.transition_type != "none" && tr.duration > 0.0 {
+                    let out_t = clip.timeline_out;
+                    if t >= out_t - tr.duration && t < out_t {
+                        let progress = ((t - (out_t - tr.duration)) / tr.duration).clamp(0.0, 1.0);
+                        let out_e = (progress * std::f64::consts::FRAC_PI_2).cos() as f32; // equal-power 出
+                        let in_e = (progress * std::f64::consts::FRAC_PI_2).sin() as f32;  // equal-power 入
+                        out_env.insert(clip.id.as_str(), out_e);
+                        if let Some(next) = self.find_next_clip(tid, out_t) {
+                            let src_offset = if next.timeline_in < out_t - 1e-6 {
+                                // 重叠：用 clip_source_time 偏移
+                                clip_source_time(t, next).0 - next.src_range.start
+                            } else {
+                                // 相邻：progress * duration * speed
+                                progress * tr.duration * next.speed
+                            };
+                            extra_in.push((next, tid, in_e, src_offset));
+                        }
+                    }
+                }
+            }
+        }
+
         let channels = self.config.audio_channels as usize;
         let sample_rate = self.config.sample_rate;
         let mut mixed: Vec<f32> = vec![0.0; samples * channels.max(1)];
@@ -723,7 +751,8 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let track = self.track_by_id(tid);
             let track_vol = track.map(|tr| tr.volume).unwrap_or(1.0) as f32;
             let track_pan = track.map(|tr| tr.pan).unwrap_or(0.0) as f32;
-            let gain = clip.volume as f32 * track_vol;
+            let env = out_env.get(clip.id.as_str()).copied().unwrap_or(1.0);
+            let gain = clip.volume as f32 * track_vol * env;
             let (l_gain, r_gain) = Self::pan_gains(track_pan);
 
             // 从整段预抽缓存按时间索引（替代逐帧起 FFmpeg 进程）
@@ -743,6 +772,40 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
                 if s_idx < 0 {
                     continue;
                 }
+                let s_idx = s_idx as usize;
+                for c in 0..ch {
+                    let out_gain = if ch == 1 {
+                        gain
+                    } else if c == 0 {
+                        gain * l_gain
+                    } else {
+                        gain * r_gain
+                    };
+                    let src_val = cached.get(s_idx * ch + c).copied().unwrap_or(0.0);
+                    let idx = i * ch + c;
+                    if idx < mixed.len() {
+                        mixed[idx] += src_val * out_gain;
+                    }
+                }
+            }
+        }
+
+        // —— 音频交叉淡化：入片段镜像混音（in_env 包络 + src_offset）——
+        for (in_clip, tid, in_e, src_offset) in &extra_in {
+            let track = self.track_by_id(tid);
+            let track_vol = track.map(|tr| tr.volume).unwrap_or(1.0) as f32;
+            let track_pan = track.map(|tr| tr.pan).unwrap_or(0.0) as f32;
+            let gain = in_clip.volume as f32 * track_vol * (*in_e);
+            let (l_gain, r_gain) = Self::pan_gains(track_pan);
+            let cached = match self.audio_cache.get(&in_clip.id) {
+                Some(b) if !b.is_empty() => b,
+                _ => continue,
+            };
+            let base_idx = (*src_offset * sr).round() as isize;
+            let ch = channels.max(1);
+            for i in 0..samples {
+                let s_idx = base_idx + i as isize;
+                if s_idx < 0 { continue; }
                 let s_idx = s_idx as usize;
                 for c in 0..ch {
                     let out_gain = if ch == 1 {

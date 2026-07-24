@@ -133,3 +133,42 @@ export function getIncomingTransitionLayer(
     direction: tr.dir,
   };
 }
+
+// ── 音频交叉淡化 ──
+// 任何非 none 转场对音频都退化为 equal-power 交叉淡化（wipe/slide 等视觉类型对音频同理）。
+// 出片段在转场窗内音频 gain = cos(progress·π/2)（1→0）；入片段 = sin(progress·π/2)（0→1）。
+
+// equal-power 交叉淡化包络：progress 0→1 时 out 1→0、in 0→1
+export function audioCrossfadeEnv(progress: number): { outEnv: number; inEnv: number } {
+  const p = Math.max(0, Math.min(1, progress));
+  return { outEnv: Math.cos(p * Math.PI / 2), inEnv: Math.sin(p * Math.PI / 2) };
+}
+
+// 出片段在转场窗内的音频包络（1 = 无影响）。预览统一入口，给"出片段"媒体元素乘此系数。
+export function getOutClipAudioEnv(outClip: ClipConfig, currentTime: number): number {
+  const tr = transitionOf(outClip);
+  if (!tr) return 1;
+  const outT = outClip.timelineOut;
+  if (currentTime < outT - tr.dur || currentTime >= outT) return 1;
+  const progress = (currentTime - (outT - tr.dur)) / tr.dur;
+  return audioCrossfadeEnv(progress).outEnv;
+}
+
+// 给定出片段所在轨，返回转场窗内的入片段（音频交叉淡化用）。返回 { inClip, progress } 或 null。
+// 入片段在转场窗内（currentTime < in.timelineIn）尚未"活跃"，预览需单独渲染并定位其音频。
+export function getIncomingAudioTransitionLayer(
+  track: TrackConfig,
+  outClip: ClipConfig,
+  currentTime: number,
+): { inClip: ClipConfig; progress: number } | null {
+  const tr = transitionOf(outClip);
+  if (!tr) return null;
+  const outT = outClip.timelineOut;
+  if (currentTime < outT - tr.dur || currentTime >= outT) return null;
+  const progress = (currentTime - (outT - tr.dur)) / tr.dur;
+  const next = [...track.clips]
+    .filter((c) => c.id !== outClip.id && c.timelineIn >= outT - 1e-4)
+    .sort((a, b) => a.timelineIn - b.timelineIn)[0];
+  if (!next) return null;
+  return { inClip: next, progress };
+}

@@ -9,7 +9,7 @@ import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
-import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, type TransitionPreviewLayer } from '../utils/transitionUtils';
+import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, type TransitionPreviewLayer } from '../utils/transitionUtils';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -199,25 +199,25 @@ export default function PreviewCanvas() {
 
   // 查找每个活跃"出片段"在转场窗内的入片段层（同轨下一片段），供实时预览叠加。
   // 与 activeVideoClips 同源（同一可见 video 轨反转序列），故第 i 个层对应第 i 个活跃片段。
-  const activeTransitionLayers: { layer: TransitionPreviewLayer; asset: AssetConfig; outClipId: string }[] = (() => {
+  const activeTransitionLayers: { layer: TransitionPreviewLayer; asset: AssetConfig; outClip: ClipConfig }[] = (() => {
     const tracks = project.tracks
       .filter((t) => t.type === 'video' && t.visible !== false)
       .reverse(); // 与 activeVideoClips 一致：主轨在前
-    const result: { layer: TransitionPreviewLayer; asset: AssetConfig; outClipId: string }[] = [];
+    const result: { layer: TransitionPreviewLayer; asset: AssetConfig; outClip: ClipConfig }[] = [];
     for (const track of tracks) {
       const clip = track.clips.find((c) => currentTime >= c.timelineIn && currentTime < c.timelineOut);
       if (!clip) continue;
       const layer = getIncomingTransitionLayer(track, clip, currentTime);
       if (!layer) continue;
       const asset = project.assets.find((a) => a.id === layer.clip.assetId);
-      if (asset) result.push({ layer, asset, outClipId: clip.id });
+      if (asset) result.push({ layer, asset, outClip: clip });
     }
     return result;
   })();
 
   // 传给 WebGPU 预览 hook 的转场入片段信息（已算好 opacity / slide 偏移）
-  const transitionIncoming = activeTransitionLayers.map(({ layer, outClipId }) => ({
-    outClipId,
+  const transitionIncoming = activeTransitionLayers.map(({ layer, outClip }) => ({
+    outClipId: outClip.id,
     clip: layer.clip,
     opacity: layer.opacity,
     offsetX: layer.offsetX,
@@ -238,6 +238,21 @@ export default function PreviewCanvas() {
       if (clip) {
         const asset = project.assets.find((a) => a.id === clip.assetId);
         if (asset) result.push({ clip, asset, trackId: track.id });
+      }
+    }
+    return result;
+  })();
+
+  // 转场窗内的"入片段"音频（同轨下一片段），在窗内尚未活跃，需单独渲染并定位其音频
+  const activeAudioTransitionIn: { clip: ClipConfig; asset: AssetConfig; trackId: string; progress: number }[] = (() => {
+    const result: { clip: ClipConfig; asset: AssetConfig; trackId: string; progress: number }[] = [];
+    for (const track of project.tracks.filter((t) => t.type === 'audio')) {
+      const out = track.clips.find((c) => currentTime >= c.timelineIn && currentTime < c.timelineOut);
+      if (!out) continue;
+      const inc = getIncomingAudioTransitionLayer(track, out, currentTime);
+      if (inc) {
+        const asset = project.assets.find((a) => a.id === inc.inClip.assetId);
+        if (asset) result.push({ clip: inc.inClip, asset, trackId: track.id, progress: inc.progress });
       }
     }
     return result;
@@ -465,7 +480,16 @@ export default function PreviewCanvas() {
       if (isPlaying) a.play().catch(() => {});
       else a.pause();
     });
-  }, [isPlaying, activeVideoClips, activeAudioClips, activeTransitionLayers]);
+    activeAudioTransitionIn.forEach(({ clip }) => {
+      const a = audioRefs.current.get(clip.id);
+      if (!a) return;
+      applyPreservesPitch(a); // 保音高变速（变速不变调），重复设置无害
+      if (clipNeedsManualDrive(clip, currentTime)) { a.pause(); return; }
+      a.playbackRate = effectiveRate(clip, currentTime);
+      if (isPlaying) a.play().catch(() => {});
+      else a.pause();
+    });
+  }, [isPlaying, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn]);
 
   // seek 同步：currentTime 变化时同步所有视频/音频源时间
   //  - 手动驱动片段（time_remap）：每帧按 currentTime 设源时间，!seeking 防止 seek 请求堆积，
@@ -507,7 +531,29 @@ export default function PreviewCanvas() {
         if (a.readyState >= 1 && Math.abs(a.currentTime - targetTime) > 0.3) a.currentTime = Math.max(0, targetTime);
       }
     });
-  }, [currentTime, activeVideoClips, activeAudioClips, activeTransitionLayers]);
+    activeAudioTransitionIn.forEach(({ clip, progress }) => {
+      const a = audioRefs.current.get(clip.id);
+      if (!a) return;
+      // 相邻：入片段起点 + progress·duration·speed；重叠：用 clipSourceTime
+      const tr = clip.transition;
+      const dur = tr?.duration && tr.duration > 0 ? tr.duration : 0.5;
+      let targetTime: number;
+      if (currentTime < clip.timelineIn) {
+        // 入片段在转场窗内尚未"活跃"，按转场进度定位源位置
+        targetTime = clip.src_range.start + progress * dur * (clip.speed ?? 1);
+      } else {
+        // 重叠：入片段已活跃，按普通时间重映射
+        targetTime = clipSourceTime(currentTime, clip).srcT;
+      }
+      targetTime = Math.max(0, targetTime);
+      if (clipNeedsManualDrive(clip, currentTime)) {
+        if (a.readyState >= 1 && !a.seeking) a.currentTime = targetTime;
+      } else {
+        a.playbackRate = effectiveRate(clip, currentTime);
+        if (a.readyState >= 1 && Math.abs(a.currentTime - targetTime) > 0.3) a.currentTime = targetTime;
+      }
+    });
+  }, [currentTime, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn]);
 
   // 音量：根据静音/独奏/隐藏状态设置每个元素的音量
   useEffect(() => {
@@ -521,14 +567,17 @@ export default function PreviewCanvas() {
       const { frozen } = clipSourceTime(currentTime, clip);
       v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
     });
-    activeTransitionLayers.forEach(({ layer }) => {
+    activeTransitionLayers.forEach(({ layer, outClip }) => {
       const v = videoRefs.current.get(layer.clip.id);
       if (!v) return;
       const track = project.tracks.find(t => t.clips.some(c => c.id === layer.clip.id));
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, layer.clip);
-      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (layer.clip.volume ?? 1) : 0;
+      // 视频转场入片段：音频按 equal-power 淡入包络
+      const inEnv = getIncomingAudioTransitionLayer(track, outClip, currentTime)?.progress ?? 1;
+      const env = inEnv > 1 ? 1 : audioCrossfadeEnv(inEnv < 0 ? 0 : inEnv).inEnv;
+      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (layer.clip.volume ?? 1) * env : 0;
     });
     activeAudioClips.forEach(({ clip, trackId }) => {
       const a = audioRefs.current.get(clip.id);
@@ -537,9 +586,21 @@ export default function PreviewCanvas() {
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
-      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) : 0;
+      // 出片段在转场窗内乘音频包络（cos 淡出），窗外=1
+      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getOutClipAudioEnv(clip, currentTime) : 0;
     });
-  }, [volume, activeVideoClips, activeAudioClips, activeTransitionLayers, project.tracks, hasSolo, currentTime]);
+    // 转场窗内"入片段"音频（同轨下一片段，提前淡入）：equal-power 淡入包络
+    activeAudioTransitionIn.forEach(({ clip, trackId, progress }) => {
+      const a = audioRefs.current.get(clip.id);
+      if (!a) return;
+      const track = project.tracks.find(t => t.id === trackId);
+      if (!track) return;
+      const shouldHaveAudio = trackHasAudio(track);
+      const { frozen } = clipSourceTime(currentTime, clip);
+      const inEnv = audioCrossfadeEnv(progress).inEnv;
+      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * inEnv : 0;
+    });
+  }, [volume, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn, project.tracks, hasSolo, currentTime]);
 
   // 预解码触发：对"手动驱动类型"片段（倒放/冻结/零速曲线）后台启动帧缓存（仅首次）。
   // 不支持 rVFC / 超长片段 → status='unsupported'，由播放逻辑回退到现有 seek。
@@ -764,6 +825,17 @@ export default function PreviewCanvas() {
 
         {/* 隐藏 audio：每个活跃音频 clip 一个 */}
         {activeAudioClips.map(({ clip, asset }) => (
+          <audio
+            key={clip.id}
+            ref={(el) => { if (el) audioRefs.current.set(clip.id, el); else audioRefs.current.delete(clip.id); }}
+            src={pathToUrl(asset.path)}
+            style={theme.hiddenMedia}
+            onLoadedMetadata={onLoadedMetadataForAudio(clip)}
+          />
+        ))}
+
+        {/* 转场窗内"入片段"音频（同轨下一片段，提前淡入） */}
+        {activeAudioTransitionIn.map(({ clip, asset }) => (
           <audio
             key={clip.id}
             ref={(el) => { if (el) audioRefs.current.set(clip.id, el); else audioRefs.current.delete(clip.id); }}
