@@ -11,6 +11,7 @@ import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
 import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, type TransitionPreviewLayer } from '../utils/transitionUtils';
 import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
+import { findFontCss } from '../utils/subtitleFonts';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -287,8 +288,9 @@ export default function PreviewCanvas() {
             style: {
               position: 'absolute', left: `${(t.x ?? 0.5) * 100}%`, top: `${(t.y ?? 0.5) * 100}%`,
               transform: 'translate(-50%, -50%)', color: t.color || '#fff',
-              fontSize: t.fontSize || 48, fontFamily: t.fontFamily || 'system-ui',
-              textAlign: (t.textAlign || 'center') as any, fontWeight: 'bold',
+              fontSize: t.fontSize || 48, fontFamily: findFontCss(t.fontFamily),
+              textAlign: (t.textAlign || 'center') as any, fontWeight: (t.fontWeight as any) || 'bold',
+              ...(t.strokeWidth ? { WebkitTextStroke: `${t.strokeWidth}px ${t.strokeColor || '#000'}` } : {}),
               pointerEvents: 'auto', cursor: 'pointer', zIndex: 100, textShadow: '0 0 10px rgba(0,0,0,0.8)',
             },
           });
@@ -311,7 +313,8 @@ export default function PreviewCanvas() {
                 top: s.position === 'top' ? 40 : isCenter ? '50%' : undefined,
                 transform: isCenter ? 'translate(-50%, -50%)' : 'translateX(-50%)',
                 color: s.color || '#fff', fontSize: s.fontSize || 24,
-                fontFamily: 'system-ui', textAlign: 'center' as any, pointerEvents: 'none', zIndex: 101,
+                fontFamily: findFontCss(s.fontFamily), textAlign: 'center' as any, pointerEvents: 'none', zIndex: 101,
+                ...(s.strokeWidth ? { WebkitTextStroke: `${s.strokeWidth}px ${s.strokeColor || '#000'}` } : {}),
                 textShadow: '0 0 10px rgba(0,0,0,0.8)', maxWidth: '90%', whiteSpace: 'pre-wrap' as any,
                 background: isCenter ? 'transparent' : 'rgba(0,0,0,0.5)',
                 padding: isCenter ? 0 : '4px 16px', borderRadius: isCenter ? 0 : 4,

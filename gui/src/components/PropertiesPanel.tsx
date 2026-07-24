@@ -4,6 +4,7 @@ import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
+import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
 
 type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins';
 
@@ -420,6 +421,44 @@ function AudioTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   );
 }
 
+// 字体下拉（按分组 optgroup 渲染）
+function FontSelect({ value, onChange }: { value?: string; onChange: (id: string) => void }) {
+  const current = value || DEFAULT_FONT_ID;
+  return (
+    <select value={current} onChange={(e) => onChange(e.target.value)}
+      style={{ width: '100%', background: '#0f3460', color: '#eee', border: '1px solid #1a1a2e', borderRadius: 4, padding: '5px 6px', fontSize: 12 }}>
+      {SUBTITLE_FONT_GROUPS.map((g) => (
+        <optgroup key={g} label={g}>
+          {SUBTITLE_FONTS.filter((f) => f.group === g).map((f) => (
+            <option key={f.id} value={f.id}>{f.label}{f.note ? `（${f.note}）` : ''}</option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+// 字幕样式预设行（点击应用到当前片段）
+function StylePresetRow({ onApply }: { onApply: (p: typeof SUBTITLE_STYLE_PRESETS[number]) => void }) {
+  return (
+    <div>
+      <div style={{ color: '#aaa', fontSize: 11, margin: '6px 0 4px' }}>样式预设（点击应用）</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {SUBTITLE_STYLE_PRESETS.map((p) => (
+          <button key={p.key} onClick={() => onApply(p)}
+            style={{ ...S.btn, fontSize: 11, padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{
+              fontWeight: 'bold', fontSize: 13, color: p.color,
+              WebkitTextStroke: `${Math.min(1, p.strokeWidth)}px ${p.strokeColor}`,
+            }}>字</span>
+            {p.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // 文字标签页
 function TextTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
@@ -432,12 +471,23 @@ function TextTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
         <textarea autoFocus value={t.content} onChange={(e) => set('content', e.target.value)}
           style={{ width: '100%', height: 60, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: 4, fontSize: 12, resize: 'vertical' }} />
       </div>
+      <div style={{ marginBottom: 8 }}>
+        <div style={S.label}>字体</div>
+        <FontSelect value={t.fontFamily} onChange={(id) => set('fontFamily', id)} />
+      </div>
+      <StylePresetRow onApply={(p) => updateClip(trackId, clip.id, { text: { ...t, fontFamily: p.fontId, color: p.color, strokeColor: p.strokeColor, strokeWidth: p.strokeWidth, fontWeight: p.fontWeight } } as Partial<ClipConfig>)} />
       <ParamSlider label="字号" value={t.fontSize ?? 48} min={8} max={200} step={1} onChange={(v) => set('fontSize', v)} />
       <div style={S.row}>
         <span style={S.label}>颜色</span>
         <input type="color" value={t.color ?? '#ffffff'} onChange={(e) => set('color', e.target.value)}
           style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
       </div>
+      <div style={S.row}>
+        <span style={S.label}>描边色</span>
+        <input type="color" value={t.strokeColor ?? '#000000'} onChange={(e) => set('strokeColor', e.target.value)}
+          style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+      </div>
+      <ParamSlider label="描边宽" value={t.strokeWidth ?? 0} min={0} max={6} step={0.5} onChange={(v) => set('strokeWidth', v)} />
       <div style={S.row}>
         <span style={S.label}>对齐</span>
         {(['left', 'center', 'right'] as const).map(a => (
@@ -467,12 +517,23 @@ function SubtitleTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
         </div>
       ))}
       <div style={{ height: 1, background: '#0f3460', margin: '8px 0' }} />
+      <div style={{ marginBottom: 8 }}>
+        <div style={S.label}>字体</div>
+        <FontSelect value={s.fontFamily} onChange={(id) => setStyle('fontFamily', id)} />
+      </div>
+      <StylePresetRow onApply={(p) => updateClip(trackId, clip.id, { subtitle: { ...s, fontFamily: p.fontId, color: p.color, strokeColor: p.strokeColor, strokeWidth: p.strokeWidth } } as Partial<ClipConfig>)} />
       <ParamSlider label="字号" value={s.fontSize ?? 24} min={12} max={80} step={1} onChange={(v) => setStyle('fontSize', v)} />
       <div style={S.row}>
         <span style={S.label}>颜色</span>
         <input type="color" value={s.color ?? '#ffffff'} onChange={(e) => setStyle('color', e.target.value)}
           style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
       </div>
+      <div style={S.row}>
+        <span style={S.label}>描边色</span>
+        <input type="color" value={s.strokeColor ?? '#000000'} onChange={(e) => setStyle('strokeColor', e.target.value)}
+          style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+      </div>
+      <ParamSlider label="描边宽" value={s.strokeWidth ?? 0} min={0} max={6} step={0.5} onChange={(v) => setStyle('strokeWidth', v)} />
       <div style={S.row}>
         <span style={S.label}>位置</span>
         {(['bottom', 'center', 'top'] as const).map(p => (

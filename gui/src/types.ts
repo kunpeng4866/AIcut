@@ -32,6 +32,8 @@ export interface SubtitleContent {
   fontFamily?: string;
   fontSize?: number;
   color?: string;
+  strokeColor?: string;
+  strokeWidth?: number;
   position?: 'bottom' | 'top' | 'center';
 }
 
