@@ -71,7 +71,9 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
   if (remap.curve && remap.curve.length > 0) {
     // 绝对速度曲线积分（play 归一化 [0,1]）：srcT = src_start + dur * ∫₀^offNorm speed(τ) dτ
     const srcT = clip.src_range.start + dur * rawSpeedIntegral(remap.curve, offNorm);
-    return { srcT: clamp(srcT), frozen: false };
+    // 零速曲线定格段：该处瞬时 speed≈0 → 与冻结一致，定格+静音；其它段正常自播放出声
+    const speed = rawSpeedAt(remap.curve, offNorm);
+    return { srcT: clamp(srcT), frozen: speed < 1e-4 };
   }
   let frozen = false; let srcT: number;
   // 冻结窗口判断：与后端 base_source_time 一致，用绝对偏移 off（freeze.start/duration 为绝对秒，见 PropertiesPanel 输入）
@@ -90,10 +92,10 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
 }
 
 // 该 clip 在时刻 t 是否必须手动驱动（pause + 逐帧 seek），而非依赖 <video>/<audio> 自播放。
-// 仅 倒放 / 当前处于冻结窗口 / 含 0 速度曲线 无法用 playbackRate 表达，必须逐帧 seek 到 srcT。
-// 冻结片段的「非冻结段」与变速曲线（speed>0）一律自播放——视频正常、音频也正常出声；
+// 仅 倒放 / 当前处于冻结窗口 / 曲线当前处于零速（定格）段 需手动驱动：这些无法用 playbackRate 表达，必须逐帧 seek 到 srcT。
+// 零速曲线片段中 speed>0 的段与冻结片段的「非冻结段」一律自播放——视频正常、音频也正常出声；
 // 只有真正处于定格的瞬间才暂停+seek（画面定格、且音频随暂停静音）。
-// 注：冻结窗口内的静音音量已由 volume effect 依据 clipSourceTime().frozen 处理。
+// 注：定格段（冻结窗口 / 零速曲线段）的静音音量已由 volume effect 依据 clipSourceTime().frozen 处理。
 function clipNeedsManualDrive(clip: ClipConfig, t: number): boolean {
   const remap = clip.time_remap;
   if (!remap) return false;
@@ -102,7 +104,13 @@ function clipNeedsManualDrive(clip: ClipConfig, t: number): boolean {
     const off = t - clip.timelineIn;
     return off >= remap.freeze.start && off < remap.freeze.start + remap.freeze.duration;
   }
-  if (remap.curve && remap.curve.length > 0 && curveHasZeroSpeed(remap.curve)) return true;
+  if (remap.curve && remap.curve.length > 0) {
+    // 仅零速（定格）段手动驱动（pause+逐帧seek+静音）；speed>0 段自播放+出声。
+    // 删除原整段 curveHasZeroSpeed → return true（会导致整段静音），改为按当前 t 的瞬时速度判断。
+    const d = clip.timelineOut - clip.timelineIn;
+    const offNorm = d > 1e-6 ? (t - clip.timelineIn) / d : 0;
+    return rawSpeedAt(remap.curve, offNorm) < 1e-4;
+  }
   return false;
 }
 

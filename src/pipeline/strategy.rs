@@ -222,7 +222,7 @@ pub fn timeline_to_source_time(t: f64, clip: &crate::project::Clip) -> f64 {
 ///     src_dur = clip.src_range.end - clip.src_range.start
 ///     off_norm = off / dur                            // 归一化 [0,1]，曲线 play 域
 ///     src_t = src_start + dur * speed_integral(curve, off_norm, 0)  // 绝对速度积分（speed 为用户设定绝对倍率）
-///     frozen = false
+///     frozen = speed_at(curve, off_norm) < EPS        // 零速（定格）段 frozen=true（静音，与冻结一致）；speed>0 段出声
 /// else:
 ///     frozen = false
 ///     if remap.freeze 存在 且 off ∈ [freeze.start, freeze.start+freeze.duration):
@@ -253,7 +253,10 @@ pub fn clip_source_time(t: f64, clip: &crate::project::Clip) -> (f64, bool) {
         // 使整段素材恰好播完、绝不越界定格。
         let off_norm = if dur > 1e-9 { off / dur } else { 0.0 };
         let f = speed_integral(&remap.curve, off_norm, 0.0); // ∫₀^offNorm speed dτ（归一化）
-        (clip.src_range.start + dur * f, false)
+        // 零速曲线定格段：瞬时 speed≈0 → frozen=true（定格+静音，与冻结一致）；
+        // speed>0 段正常自播放+出声（导出处据此自然静音，与预览对齐）。
+        let frozen = speed_at(&remap.curve, off_norm) < 1e-4;
+        (clip.src_range.start + dur * f, frozen)
     } else {
         let mut frozen = false;
         let src_t = if let Some(freeze) = &remap.freeze {
@@ -354,6 +357,33 @@ pub fn speed_integral(curve: &[crate::project::SpeedPoint], off: f64, src_start:
         acc += (off - last_pt.play) * last_pt.speed;
     }
     src_start + acc
+}
+
+/// 曲线在 play 偏移 off 处的「瞬时原始速度」（分段线性插值，非积分）。
+///
+/// 与前端 `gui/src/utils/speedCurve.ts::rawSpeedAt` 逐字节一致：
+/// speed 按 play 分段线性插值；off ≤ 首点.play 返回首点速度；超出末点返回末点速度。
+/// 用于识别零速（定格）段：`speed_at(curve, off) < EPS` → 该段冻结+静音（与 freeze 对齐）。
+pub fn speed_at(curve: &[crate::project::SpeedPoint], off: f64) -> f64 {
+    if curve.is_empty() {
+        return 1.0;
+    }
+    let mut pts: Vec<&crate::project::SpeedPoint> = curve.iter().collect();
+    pts.sort_by(|a, b| a.play.partial_cmp(&b.play).unwrap_or(std::cmp::Ordering::Equal));
+
+    if off <= pts[0].play {
+        return pts[0].speed;
+    }
+    for i in 1..pts.len() {
+        let a = pts[i - 1];
+        let b = pts[i];
+        if off <= b.play {
+            let span = b.play - a.play;
+            let frac = if span.abs() < 1e-12 { 0.0 } else { (off - a.play) / span };
+            return a.speed + (b.speed - a.speed) * frac;
+        }
+    }
+    pts[pts.len() - 1].speed
 }
 
 /// 计算片段在时间线上的活跃时间范围
@@ -641,6 +671,54 @@ mod tests {
         // （此处 dur=4 未反推，仅验证归一化映射数学；真实工程由 setCurveCommit 反推 dur 使 ∫₀^1=srcDur/dur）
         let (s4, _) = clip_source_time(4.0, &clip);
         assert!((s4 - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_clip_source_time_curve_zero_speed_frozen() {
+        // 曲线含 speed=0 段（play=0.5 处定格）：该处 frozen=true，speed>0 处 frozen=false
+        let remap = TimeRemap {
+            reverse: false,
+            freeze: None,
+            curve: vec![
+                SpeedPoint { play: 0.0, speed: 1.0 },
+                SpeedPoint { play: 0.5, speed: 0.0 },
+                SpeedPoint { play: 1.0, speed: 2.0 },
+            ],
+        };
+        let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
+        // off=2.0 → offNorm=0.5 → speed 恰好 0 → frozen
+        let (_, frozen) = clip_source_time(2.0, &clip);
+        assert!(frozen);
+        // off=0 → offNorm=0 → speed=1 > 0 → not frozen（回归：speed=1 种子曲线不变）
+        let (_, frozen0) = clip_source_time(0.0, &clip);
+        assert!(!frozen0);
+        // off=0.4 → offNorm=0.1 → speed = 1 + (0-1)*(0.1/0.5) = 0.8 > 0 → not frozen
+        let (_, frozen1) = clip_source_time(0.4, &clip);
+        assert!(!frozen1);
+        // off=3.8 → offNorm=0.95 → speed = 0 + (2-0)*((0.95-0.5)/0.5) = 1.8 > 0 → not frozen
+        let (_, frozen2) = clip_source_time(3.8, &clip);
+        assert!(!frozen2);
+    }
+
+    #[test]
+    fn test_clip_source_time_curve_nonzero_speed_not_frozen() {
+        // 回归：speed=1 的种子曲线（无零速段）→ 全程 frozen=false，srcT 与旧实现一致
+        let remap = TimeRemap {
+            reverse: false,
+            freeze: None,
+            curve: vec![
+                SpeedPoint { play: 0.0, speed: 1.0 },
+                SpeedPoint { play: 1.0, speed: 1.0 },
+            ],
+        };
+        let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
+        for &t in &[0.0, 1.0, 2.0, 3.0, 4.0] {
+            let (src_t, frozen) = clip_source_time(t, &clip);
+            assert!(!frozen, "t={t} 应为非冻结");
+            // 恒定 speed=1：src_t = src_start + dur * offNorm = off
+            let off = t - clip.timeline_in;
+            assert!((src_t - off).abs() < 1e-9, "t={t} src_t 应为 {off}，实际 {src_t}");
+        }
     }
 
     #[test]
