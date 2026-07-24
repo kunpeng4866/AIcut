@@ -81,11 +81,15 @@ pub struct Range {
     pub end: f64,
 }
 
-/// 曲线变速控制点：(源时间位置, 播放时间位置)，用于构建分段线性 setpts 表达式
+/// 速度曲线控制点：(播放时间位置, 速度倍率)，用于构建分段线性 setpts 表达式
+///
+/// 每个关键帧 = (play, speed)：在播放时间线 `play` 秒处，素材以 `speed` 倍率推进。
+/// 源素材时间由积分得到：`srcT(off) = src_range.start + ∫₀^off speed(τ) dτ`。
+/// speed>0 时 srcT 单调推进，永不静止。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct SpeedPoint {
-    /// 源素材时间位置（秒）
-    pub src: f64,
+    /// 速度倍率（秒/秒）；1.0 = 原速，2.0 = 两倍速
+    pub speed: f64,
     /// 对应的播放时间线位置（秒）
     pub play: f64,
 }
@@ -200,7 +204,7 @@ pub struct Clip {
     pub volume: f64,
     #[serde(default = "one_f")]
     pub speed: f64,
-    /// 曲线变速控制点：[(源时间位置, 播放时间位置)]，空/None 则用线性 speed
+    /// 曲线变速控制点：[(播放时间位置, 速度倍率)]，空/None 则用线性 speed
     #[serde(default)]
     pub speed_curve: Vec<SpeedPoint>,
     /// 统一时间重映射（倒放 / 冻结帧 / 时间重映射）：预览与导出共用同一套逻辑

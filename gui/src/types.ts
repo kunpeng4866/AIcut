@@ -37,7 +37,7 @@ export interface SubtitleContent {
 
 // ── 时间重映射（与后端 clip_source_time 一致） ──
 export interface FreezeConfig { start: number; sourceTime: number; duration: number; }
-export interface SpeedPointConfig { play: number; src: number; }
+export interface SpeedPointConfig { play: number; speed: number; }
 export interface TimeRemapConfig { reverse?: boolean; freeze?: FreezeConfig | null; curve?: SpeedPointConfig[]; }
 
 export interface ClipConfig {

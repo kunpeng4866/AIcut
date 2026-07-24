@@ -84,7 +84,7 @@ fn default_transform_value() -> Transform {
 /// 条件：
 /// - 恰好 1 个视频轨道（track_type == "video" 或 "effect"）
 /// - 该轨道每个 clip 的 transform 全为默认值
-/// - 无 filters / effects / masks / keyframes / speed_curve
+/// - 无 filters / effects / masks / keyframes / speed_curve / time_remap.curve
 pub fn is_simple_project(project: &Project) -> bool {
     let video_tracks: Vec<&Track> = project.tracks.iter()
         .filter(|t| t.track_type == "video" || t.track_type == "effect")
@@ -113,6 +113,9 @@ pub fn is_simple_project(project: &Project) -> bool {
             return false;
         }
         if !clip.speed_curve.is_empty() {
+            return false;
+        }
+        if !clip.time_remap.curve.is_empty() {
             return false;
         }
     }
@@ -355,7 +358,15 @@ mod tests {
     #[test]
     fn test_is_simple_project_with_speed_curve() {
         let mut project = make_simple_project();
-        project.tracks[0].clips[0].speed_curve.push(crate::project::SpeedPoint { src: 0.0, play: 0.0 });
+        project.tracks[0].clips[0].speed_curve.push(crate::project::SpeedPoint { speed: 1.0, play: 0.0 });
+        assert!(!is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_with_time_remap_curve() {
+        // time_remap.curve 非空也应视为非简单工程（走完整路径以反映 UI 曲线）
+        let mut project = make_simple_project();
+        project.tracks[0].clips[0].time_remap.curve.push(crate::project::SpeedPoint { speed: 1.0, play: 0.0 });
         assert!(!is_simple_project(&project));
     }
 

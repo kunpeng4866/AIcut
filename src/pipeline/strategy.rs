@@ -219,7 +219,7 @@ pub fn timeline_to_source_time(t: f64, clip: &crate::project::Clip) -> f64 {
 /// off   = t - clip.timeline_in                         // 片段内时间线偏移，预期 [0, dur]
 /// remap = clip.time_remap
 /// if remap.curve 非空:
-///     src_t = piecewise_linear(curve, off)            // 按 play 升序；边界取端点 src；否则相邻点线性插值
+///     src_t = speed_integral(curve, off, clip.src_range.start)  // 速度曲线积分：∫ speed dτ
 ///     frozen = false
 /// else:
 ///     frozen = false
@@ -244,8 +244,8 @@ pub fn clip_source_time(t: f64, clip: &crate::project::Clip) -> (f64, bool) {
     let remap = &clip.time_remap;
 
     let (src_t, frozen) = if !remap.curve.is_empty() {
-        // curve 权威映射：按 play 升序分段线性插值出 src
-        (piecewise_linear(&remap.curve, off), false)
+        // curve 权威映射：速度曲线积分，src 单调推进
+        (speed_integral(&remap.curve, off, clip.src_range.start), false)
     } else {
         let mut frozen = false;
         let src_t = if let Some(freeze) = &remap.freeze {
@@ -275,39 +275,64 @@ fn base_source_time(clip: &crate::project::Clip, dur: f64, off: f64, reverse: bo
     }
 }
 
-/// 按 play 升序分段线性插值出 src
+/// 速度曲线积分：把"速度曲线"积分为源素材时间。
 ///
-/// - off <= 首点 play ⇒ 首点 src；
-/// - off >= 末点 play ⇒ 末点 src；
-/// - 否则在相邻点之间线性插值：`src = a.src + (off - a.play)/(b.play - a.play) * (b.src - a.src)`。
-fn piecewise_linear(curve: &[crate::project::SpeedPoint], off: f64) -> f64 {
+/// 数学：`srcT(off) = src_start + ∫₀^off speed(τ) dτ`，
+/// 其中 `speed(τ)` 按 play 分段线性插值（trapezoid 积分）。
+/// speed>0 时 srcT 单调推进，永不静止。
+///
+/// 算法：
+/// 1. curve 空 ⇒ 返回 src_start；
+/// 2. 按 play 升序排序；
+/// 3. 段 [0, pts[0].play]：以 `pts[0].speed` 为恒定速度（hold 第一段前的速度）；
+///    若 `off <= pts[0].play` 直接返回 `src_start + off * pts[0].speed`；
+///    否则 `acc += pts[0].play * pts[0].speed`；
+/// 4. 对相邻点 a=pts[i-1], b=pts[i]：该段 speed 从 a.speed 线性到 b.speed。
+///    - 若 `off <= b.play`：取 frac，trapezoid 面积累加后返回；
+///    - 否则整段积分累加；
+/// 5. off 超过末点 play：以末点 speed 外延累加。
+pub fn speed_integral(curve: &[crate::project::SpeedPoint], off: f64, src_start: f64) -> f64 {
     if curve.is_empty() {
-        return 0.0;
+        return src_start;
     }
     // 防御性：按 play 升序排序（契约要求 curve 已按 play 升序）
     let mut pts: Vec<&crate::project::SpeedPoint> = curve.iter().collect();
     pts.sort_by(|a, b| a.play.partial_cmp(&b.play).unwrap_or(std::cmp::Ordering::Equal));
 
-    if off <= pts[0].play {
-        return pts[0].src;
+    let mut acc = 0.0f64;
+
+    // 段 [0, pts[0].play]：以 pts[0].speed 为恒定速度（hold 第一段前的速度）
+    let first = pts[0];
+    if off <= first.play {
+        return src_start + off * first.speed;
     }
+    acc += first.play * first.speed;
+
     let last = pts.len() - 1;
-    if off >= pts[last].play {
-        return pts[last].src;
-    }
-    for i in 0..last {
-        let a = pts[i];
-        let b = pts[i + 1];
-        if off >= a.play && off <= b.play {
-            let span = b.play - a.play;
-            if span.abs() < 1e-12 {
-                return b.src;
+    for i in 1..=last {
+        let a = pts[i - 1];
+        let b = pts[i];
+        let span = b.play - a.play;
+        if off <= b.play {
+            let frac = if span.abs() < 1e-12 { 0.0 } else { (off - a.play) / span };
+            let speed_off = a.speed + (b.speed - a.speed) * frac;
+            let area = (a.speed + speed_off) / 2.0 * (off - a.play);
+            acc += area;
+            return src_start + acc;
+        } else {
+            // 整段积分（trapezoid 面积）
+            if span.abs() >= 1e-12 {
+                acc += (a.speed + b.speed) / 2.0 * span;
             }
-            let frac = (off - a.play) / span;
-            return a.src + (b.src - a.src) * frac;
         }
     }
-    pts[last].src
+
+    // off 超过末点 play：以末点 speed 继续外延
+    let last_pt = pts[last];
+    if off > last_pt.play {
+        acc += (off - last_pt.play) * last_pt.speed;
+    }
+    src_start + acc
 }
 
 /// 计算片段在时间线上的活跃时间范围
@@ -537,42 +562,44 @@ mod tests {
 
     #[test]
     fn test_clip_source_time_curve_interp() {
+        // 速度曲线：play=0→speed1, play=2→speed2
         let remap = TimeRemap {
             reverse: false,
             freeze: None,
             curve: vec![
-                SpeedPoint { play: 0.0, src: 0.0 },
-                SpeedPoint { play: 2.0, src: 4.0 },
+                SpeedPoint { play: 0.0, speed: 1.0 },
+                SpeedPoint { play: 2.0, speed: 2.0 },
             ],
         };
         let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
-        // off=1 → 0 + (1-0)/(2-0)*(4-0) = 2.0
-        let (src_t, frozen) = clip_source_time(1.0, &clip);
-        assert!((src_t - 2.0).abs() < 1e-9);
-        assert!(!frozen);
-        // off=0 → 首点 src 0
+        // off=0 → src = 0 + 0 = 0
         let (s0, _) = clip_source_time(0.0, &clip);
         assert!((s0 - 0.0).abs() < 1e-9);
-        // off=3 → 末点 src 4
+        // off=1 → 段[0,2] speed 1→2，off=1 处 speed_off=1.5, area=(1+1.5)/2*1=1.25 → src=1.25
+        let (src_t, frozen) = clip_source_time(1.0, &clip);
+        assert!((src_t - 1.25).abs() < 1e-9);
+        assert!(!frozen);
+        // off=3 → 段[0,2] 整段 area=(1+2)/2*2=3，外延 off=3 超出末点 play=2：acc=3+(3-2)*2=5 → src=5
         let (s3, _) = clip_source_time(3.0, &clip);
-        assert!((s3 - 4.0).abs() < 1e-9);
+        assert!((s3 - 5.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_clip_source_time_curve_overrides_reverse_freeze() {
         // curve 非空时应忽略 reverse/freeze
+        // 速度曲线：play=0→speed1, play=4→speed3
         let remap = TimeRemap {
             reverse: true,
             freeze: Some(FreezeConfig { start: 0.0, source_time: 99.0, duration: 100.0 }),
             curve: vec![
-                SpeedPoint { play: 0.0, src: 1.0 },
-                SpeedPoint { play: 4.0, src: 3.0 },
+                SpeedPoint { play: 0.0, speed: 1.0 },
+                SpeedPoint { play: 4.0, speed: 3.0 },
             ],
         };
         let clip = make_clip_with_remap("c1", 0.0, 10.0, 0.0, 4.0, 1.0, remap);
         let (src_t, frozen) = clip_source_time(2.0, &clip);
-        // 插值：1 + (2-0)/(4-0)*(3-1) = 2.0，frozen=false（忽略 freeze）
-        assert!((src_t - 2.0).abs() < 1e-9);
+        // 段[0,4] speed 1→3，off=2 处 frac=0.5, speed_off=2, area=(1+2)/2*2=3 → src=3（忽略 freeze）
+        assert!((src_t - 3.0).abs() < 1e-9);
         assert!(!frozen);
     }
 

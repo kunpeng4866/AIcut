@@ -616,7 +616,8 @@ fn test_render_zero_opacity_clip() {
 
 #[test]
 fn test_render_speed_curve_two_points() {
-    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":5.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":5.0},"timelineIn":0.0,"timelineOut":5.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"speed_curve":[{"src":0.0,"play":0.0},{"src":5.0,"play":2.5}],"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
+    // 速度曲线语义：每个关键帧 = (play, speed)；2 点 = 单段线性
+    let json = r#"{"version":"1.0","canvas":{"width":1920,"height":1080,"fps":30},"assets":[{"id":"a1","type":"video","path":"in.mp4","duration":5.0,"width":1920,"height":1080,"codec":"h264"}],"tracks":[{"id":"v1","type":"video","order":0,"clips":[{"id":"c1","assetId":"a1","src_range":{"start":0.0,"end":5.0},"timelineIn":0.0,"timelineOut":5.0,"transform":{"x":0.5,"y":0.5,"scale_x":1.0,"scale_y":1.0},"volume":1.0,"speed":1.0,"speed_curve":[{"play":0.0,"speed":1.0},{"play":2.5,"speed":2.0}],"effects":[],"masks":[],"filters":[],"keyframes":{}}]}]}"#;
     let cmd = render(&json.to_string()).expect("曲线变速不应 panic");
     assert!(cmd.contains("setpts="), "曲线变速应含 setpts");
     // 2 点 = 单段线性（无嵌套 if），3+ 点 = if(lt(T,... 条件链

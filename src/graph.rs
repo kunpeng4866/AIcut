@@ -10,24 +10,46 @@ use std::collections::HashMap;
 
 use crate::filters::{build_clip_filters, build_filter_spec, build_mask_spec, fmt};
 
-/// 从 SpeedPoint 数组构建分段线性 setpts 表达式。
-pub fn build_speed_curve_expr(points: &[crate::project::SpeedPoint]) -> Option<String> {
-    if points.len() < 2 { return None; }
-    let last = points.len() - 1;
-    let pf = &points[last]; let pn = &points[last - 1];
-    let dt_f = pf.src - pn.src; let dp_f = pf.play - pn.play;
+/// 从"速度曲线"构建分段线性 setpts 表达式。
+///
+/// 输入 curve 的每个关键帧 = (play, speed)。先把速度曲线积分成"源时间控制点"：
+/// 对每个关键帧 play_i，计算 `src_i = src_start + speed_integral(curve, play_i, src_start)`，
+/// 得到控制点 (src_i, play_i)。再用这些控制点构建与旧代码**完全相同形态**的分段线性
+/// setpts 表达式：输出帧的 PTS（播放时间）= src 的分段线性函数。
+///
+/// 若曲线为空或控制点不足，返回 None，调用方回退到线性 speed 的 setpts。
+pub fn build_speed_curve_expr(curve: &[crate::project::SpeedPoint], src_start: f64) -> Option<String> {
+    if curve.len() < 2 { return None; }
+    // 按 play 升序排序并积分得到 (src_i, play_i) 控制点
+    let mut pts: Vec<&crate::project::SpeedPoint> = curve.iter().collect();
+    pts.sort_by(|a, b| a.play.partial_cmp(&b.play).unwrap_or(std::cmp::Ordering::Equal));
+    let ctrl: Vec<(f64, f64)> = pts.iter().map(|p| {
+        let src = crate::pipeline::strategy::speed_integral(curve, p.play, src_start);
+        (src, p.play)
+    }).collect();
+    build_piecewise_setpts_from_ctrl(&ctrl)
+}
+
+/// 用 (src, play) 控制点（按 src 升序）构建分段线性 setpts 表达式。
+/// 结构与旧 build_speed_curve_expr 完全一致：以 `if(lt(T, src_i), seg, ...)` 分层，
+/// 每段 `new_PTS = rate*PTS + offset`，其中 rate = (play 变化)/(src 变化)。
+fn build_piecewise_setpts_from_ctrl(ctrl: &[(f64, f64)]) -> Option<String> {
+    if ctrl.len() < 2 { return None; }
+    let last = ctrl.len() - 1;
+    let (sf, pf) = ctrl[last]; let (sn, pn) = ctrl[last - 1];
+    let dt_f = sf - sn; let dp_f = pf - pn;
     let rate_f = if dt_f.abs() > 1e-6 { dp_f / dt_f } else { 1.0 };
-    let offset_f = pf.play - rate_f * pf.src;
+    let offset_f = pf - rate_f * sf;
     let mut expr = format!("{}*PTS", fmt(rate_f));
     if offset_f.abs() > 1e-6 { expr.push_str(&format!("{:+}", offset_f)); }
-    for i in (1..points.len() - 1).rev() {
-        let p0 = &points[i - 1]; let p1 = &points[i];
-        let dt = p1.src - p0.src; let dp = p1.play - p0.play;
+    for i in (1..ctrl.len() - 1).rev() {
+        let (s0, p0) = ctrl[i - 1]; let (s1, p1) = ctrl[i];
+        let dt = s1 - s0; let dp = p1 - p0;
         if dt.abs() < 1e-6 { continue; }
-        let rate = dp / dt; let offset = p0.play - rate * p0.src;
+        let rate = dp / dt; let offset = p0 - rate * s0;
         let mut seg = format!("{}*PTS", fmt(rate));
         if offset.abs() > 1e-6 { seg.push_str(&format!("{:+}", offset)); }
-        expr = format!("if(lt(T,{}),{},{})", fmt(p1.src), seg, expr);
+        expr = format!("if(lt(T,{}),{},{})", fmt(s1), seg, expr);
     }
     Some(expr)
 }
@@ -55,8 +77,9 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str) -> Strin
     let sw = (w as f64 * sx).round() as u32;
     let sh = (h as f64 * sy).round() as u32;
     let mut chain = format!("[{}:v]scale={}:{}", idx, sw, sh);
-    // 曲线变速优先，否则线性变速
-    if let Some(expr) = build_speed_curve_expr(&c.speed_curve) {
+    // 曲线变速优先（time_remap.curve 权威，否则回退 speed_curve），否则线性变速
+    let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
+    if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start) {
         chain.push_str(&format!(",setpts={}", expr));
     } else if (c.speed - 1.0).abs() > 0.001 {
         chain.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));

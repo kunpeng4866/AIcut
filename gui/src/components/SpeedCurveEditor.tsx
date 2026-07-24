@@ -2,17 +2,19 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useUIStore } from '../store/uiStore';
 import { ClipConfig, SpeedPointConfig, FreezeConfig } from '../types';
 
-// 曲线编辑器可视化：横轴 = 播放时间(play, timeline 相对偏移 0~dur)
-// 纵轴 = 源时间(src, 绝对源时间，范围 [src_range.start, src_range.end])
-// 与后端 src/pipeline/strategy.rs 的 clip_source_time / piecewise_linear 一一对应（src 为绝对源时间）。
-//   - 曲线非空：分段直线连接关键帧 (play,src)，两端按首/末点 src 延伸；reverse/freeze 被忽略
-//   - 曲线为空 + freeze：冻结区间矩形高亮 + 源时间水平平台
-//   - 曲线为空 + reverse：下降对角线 (0,srcDur)→(dur,0)
-// 交互：拖拽关键帧(限制不越过相邻点)、双击空白新增、Shift+点击删除、蓝色播放头随 currentTime 移动
+// 曲线编辑器可视化（速度曲线模型）：
+//   横轴 = 播放时间(play, timeline 相对偏移 0~dur)
+//   纵轴 = 速度倍率(speed, 0~SPEED_MAX；0 = 该段冻结)
+// 与后端 src/pipeline/strategy.rs 的 clip_source_time / speed_integral 一一对应：
+//   srcT = src_range.start + ∫₀^off speed(τ) dτ，speed 按 play 分段线性积分。
+//   speed>0 时 srcT 单调推进 → 预览连续播放，绝不静止画面；speed=0 段即冻结帧。
+// 交互：拖拽关键帧(限制不越过相邻点)、双击空白新增、Shift+点击删除、蓝色播放头随 currentTime 移动。
 
 const H = 190;            // canvas CSS 高度
 const PAD = 30;           // 坐标轴内边距
 const HIT = 9;            // 关键帧命中半径(px)
+const SPEED_MIN = 0;      // 纵轴下限（0 = 冻结）
+const SPEED_MAX = 4;      // 纵轴上限（4x）
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -32,7 +34,6 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
   const currentTime = useUIStore((s) => s.currentTime);
 
   const dur = Math.max(0.001, clip.timelineOut - clip.timelineIn);
-  const srcDur = Math.max(0.001, clip.src_range.end - clip.src_range.start);
   const hasCurve = curve.length > 0;
 
   // 始终保留最新 curve 快照，供鼠标事件构造新数组
@@ -58,11 +59,8 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
   const plotH = H - PAD * 2;
   const playToX = (play: number) => PAD + (play / dur) * plotW;
   const xToPlay = (x: number) => clamp(((x - PAD) / plotW) * dur, 0, dur);
-  // 绝对源时间映射（与后端 strategy.rs::clip_source_time 一致：src 为绝对源时间，clamp 到 [src_range.start, src_range.end]）
-  const srcStart = clip.src_range.start;
-  const srcEnd = clip.src_range.end;
-  const srcToY = (src: number) => PAD + plotH - ((src - srcStart) / srcDur) * plotH;
-  const yToSrc = (y: number) => clamp(srcStart + ((plotH - (y - PAD)) / plotH) * srcDur, srcStart, srcEnd);
+  const speedToY = (speed: number) => PAD + plotH - ((speed - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)) * plotH;
+  const yToSpeed = (y: number) => clamp(SPEED_MIN + ((plotH - (y - PAD)) / plotH) * (SPEED_MAX - SPEED_MIN), SPEED_MIN, SPEED_MAX);
 
   // 绘制
   useEffect(() => {
@@ -100,21 +98,21 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     ctx.save();
     ctx.translate(10, PAD + plotH / 2);
     ctx.rotate(-Math.PI / 2);
-    ctx.fillText('源时间 (s)', 0, 0);
+    ctx.fillText('速度 (x)', 0, 0);
     ctx.restore();
-    // 端点数值（源时间为绝对坐标）
+    // 端点数值
     ctx.textAlign = 'left';
     ctx.fillText(dur.toFixed(1), PAD + plotW - 22, PAD + plotH + 12);
     ctx.textAlign = 'right';
-    ctx.fillText(srcEnd.toFixed(1), PAD - 4, PAD + 10);
-    ctx.fillText(srcStart.toFixed(1), PAD - 4, PAD + plotH + 10);
+    ctx.fillText(SPEED_MAX.toFixed(1), PAD - 4, PAD + 10);
+    ctx.fillText(SPEED_MIN.toFixed(1), PAD - 4, PAD + plotH + 10);
 
-    // 1x 参考对角线：play=0→源起点, play=dur→源终点（绝对坐标）
+    // 1x 参考线（speed=1 水平虚线）
     ctx.strokeStyle = '#26323f';
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.moveTo(playToX(0), srcToY(srcStart));
-    ctx.lineTo(playToX(dur), srcToY(srcEnd));
+    ctx.moveTo(PAD, speedToY(1));
+    ctx.lineTo(PAD + plotW, speedToY(1));
     ctx.stroke();
     ctx.setLineDash([]);
 
@@ -128,12 +126,6 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
         ctx.strokeStyle = '#4cc9f0';
         ctx.lineWidth = 1;
         ctx.strokeRect(fx0, PAD, Math.max(1, fx1 - fx0), plotH);
-        // 源时间平台水平线
-        const fy = srcToY(freeze.sourceTime);
-        ctx.strokeStyle = '#ffd166';
-        ctx.setLineDash([5, 3]);
-        ctx.beginPath(); ctx.moveTo(PAD, fy); ctx.lineTo(PAD + plotW, fy); ctx.stroke();
-        ctx.setLineDash([]);
         ctx.fillStyle = '#4cc9f0';
         ctx.font = '10px sans-serif';
         ctx.textAlign = 'left';
@@ -143,8 +135,8 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
         ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]);
         ctx.beginPath();
-        ctx.moveTo(playToX(0), srcToY(srcEnd));
-        ctx.lineTo(playToX(dur), srcToY(srcStart));
+        ctx.moveTo(PAD, speedToY(1));
+        ctx.lineTo(PAD + plotW, speedToY(1));
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle = '#e94560';
@@ -154,20 +146,20 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
       }
     }
 
-    // 曲线（权威映射）
+    // 曲线（权威映射）：速度曲线，端点外以首/末速度水平延伸（与积分一致）
     if (hasCurve) {
       ctx.strokeStyle = '#e94560';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(playToX(0), srcToY(points[0].src));
-      for (const p of points) ctx.lineTo(playToX(p.play), srcToY(p.src));
-      ctx.lineTo(playToX(dur), srcToY(points[points.length - 1].src));
+      ctx.moveTo(playToX(0), speedToY(points[0].speed));
+      for (const p of points) ctx.lineTo(playToX(p.play), speedToY(p.speed));
+      ctx.lineTo(playToX(dur), speedToY(points[points.length - 1].speed));
       ctx.stroke();
     }
 
     // 关键帧圆点
     for (const p of points) {
-      const x = playToX(p.play), y = srcToY(p.src);
+      const x = playToX(p.play), y = speedToY(p.speed);
       ctx.fillStyle = dragOrig === p.idx ? '#ff8c42' : '#ffd166';
       ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
@@ -180,32 +172,31 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
       ctx.strokeStyle = '#4cc9f0';
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(px, PAD); ctx.lineTo(px, PAD + plotH); ctx.stroke();
-      // 当前映射点
-      let curSrc = 0;
+      // 当前速度（曲线：分段线性插值；无曲线冻结段=0，否则取 clip.speed）
+      let curSpeed = 1;
       if (hasCurve) {
-        if (off <= points[0].play) curSrc = points[0].src;
-        else if (off >= points[points.length - 1].play) curSrc = points[points.length - 1].src;
+        if (off <= points[0].play) curSpeed = points[0].speed;
+        else if (off >= points[points.length - 1].play) curSpeed = points[points.length - 1].speed;
         else {
           for (let i = 0; i < points.length - 1; i++) {
             const a = points[i], b = points[i + 1];
             if (off >= a.play && off <= b.play) {
               const r = (off - a.play) / (b.play - a.play || 1);
-              curSrc = a.src + r * (b.src - a.src);
+              curSpeed = a.speed + r * (b.speed - a.speed);
               break;
             }
           }
         }
       } else if (freeze && off >= freeze.start && off < freeze.start + freeze.duration) {
-        curSrc = freeze.sourceTime;
+        curSpeed = 0;
       } else {
-        const sp = clip.speed ?? 1;
-        curSrc = reverse ? (srcStart + (dur - off) * sp) : (srcStart + off * sp);
+        curSpeed = clip.speed ?? 1;
       }
-      const py = srcToY(curSrc ?? 0);
+      const py = speedToY(curSpeed);
       ctx.fillStyle = '#4cc9f0';
       ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
     }
-  }, [width, curve, freeze, reverse, currentTime, dur, srcDur, clip.timelineIn, points, hasCurve, dragOrig]);
+  }, [width, curve, freeze, reverse, currentTime, dur, clip.timelineIn, points, hasCurve, dragOrig]);
 
   // ── 鼠标交互 ──
   const getPos = (e: React.MouseEvent) => {
@@ -215,7 +206,7 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
   const hitTest = (mx: number, my: number): number => {
     let best = -1, bd = HIT * HIT;
     for (const p of points) {
-      const dx = mx - playToX(p.play), dy = my - srcToY(p.src);
+      const dx = mx - playToX(p.play), dy = my - speedToY(p.speed);
       const d = dx * dx + dy * dy;
       if (d < bd) { bd = d; best = p.idx; }
     }
@@ -227,7 +218,6 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     const hit = hitTest(mx, my);
     if (hit >= 0) {
       if (e.shiftKey) {
-        // 删除
         onChange(curveRef.current.filter((_, i) => i !== hit));
       } else {
         setDragOrig(hit);
@@ -239,13 +229,13 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     if (dragOrig === null) return;
     const { mx, my } = getPos(e);
     let newPlay = xToPlay(mx);
-    const newSrc = yToSrc(my);
+    const newSpeed = yToSpeed(my);
     // 限制不越过相邻关键帧的 play（保持分段单调）
     const k = points.findIndex((p) => p.idx === dragOrig);
     const left = k > 0 ? points[k - 1].play : 0;
     const right = k < points.length - 1 ? points[k + 1].play : dur;
     newPlay = clamp(newPlay, left, right);
-    onChange(curveRef.current.map((p, i) => i === dragOrig ? { play: newPlay, src: newSrc } : p));
+    onChange(curveRef.current.map((p, i) => i === dragOrig ? { play: newPlay, speed: newSpeed } : p));
   };
 
   const onMouseUp = () => setDragOrig(null);
@@ -254,8 +244,8 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
     const { mx, my } = getPos(e);
     if (hitTest(mx, my) >= 0) return; // 落在点上不新增
     const newPlay = xToPlay(mx);
-    const newSrc = yToSrc(my);
-    onChange([...curveRef.current, { play: newPlay, src: newSrc }]);
+    const newSpeed = yToSpeed(my);
+    onChange([...curveRef.current, { play: newPlay, speed: newSpeed }]);
   };
 
   return (
@@ -270,7 +260,7 @@ export function SpeedCurveEditor({ clip, curve, freeze, reverse, onChange }: Pro
         onDoubleClick={onDoubleClick}
       />
       <div style={{ color: '#888', fontSize: 10, marginTop: 3, lineHeight: 1.5 }}>
-        拖拽关键帧调整 · 双击空白处添加 · Shift+点击删除 · 蓝线为播放头
+        拖拽关键帧改速度 · 双击空白添加 · Shift+点击删除 · 蓝线为播放头（蓝点=当前速度）
       </div>
     </div>
   );

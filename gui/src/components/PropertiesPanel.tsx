@@ -379,16 +379,15 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const setCurve = (next: SpeedPointConfig[]) => updateClip(trackId, clip.id, { time_remap: { ...remap, curve: next } });
   const addKey = () => {
     if (curve.length === 0) {
-      // 种子：1x 基线（play:0→源起点, play:dur→源终点），避免相对/绝对错位导致的静止画面
+      // 种子：1x 速度基线（play:0→speed 1, play:dur→speed 1），避免空曲线导致的静止画面
       setCurve([
-        { play: 0, src: clip.src_range.start },
-        { play: dur, src: clip.src_range.end },
+        { play: 0, speed: 1 },
+        { play: dur, speed: 1 },
       ]);
     } else {
       const last = curve[curve.length - 1];
       const newPlay = Math.min(dur, last.play + dur / (curve.length + 1));
-      const newSrc = clip.src_range.start + (newPlay / dur) * srcDur;
-      setCurve([...curve, { play: newPlay, src: newSrc }]);
+      setCurve([...curve, { play: newPlay, speed: 1 }]);
     }
   };
   const removeKey = (i: number) => setCurve(curve.filter((_, idx) => idx !== i));
@@ -452,15 +451,15 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
           <span style={{ color: '#aaa', fontSize: 10, width: 28 }}>play</span>
           <input type="number" style={{ ...S.input, flex: 1 }} value={pt.play} step={0.1}
             onChange={(e) => setKey(i, 'play', parseFloat(e.target.value) || 0)} />
-          <span style={{ color: '#aaa', fontSize: 10, width: 24 }}>src</span>
-          <input type="number" style={{ ...S.input, flex: 1 }} value={pt.src} step={0.1}
-            onChange={(e) => setKey(i, 'src', parseFloat(e.target.value) || 0)} />
+          <span style={{ color: '#aaa', fontSize: 10, width: 24 }}>速度</span>
+          <input type="number" style={{ ...S.input, flex: 1 }} value={pt.speed} step={0.1} min={0}
+            onChange={(e) => setKey(i, 'speed', Math.max(0, parseFloat(e.target.value) || 0))} />
           <button style={S.btn} onClick={() => removeKey(i)}>×</button>
         </div>
       ))}
 
       <div style={{ color: '#888', fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
-        曲线非空时，倒放 / 冻结将被忽略，曲线为权威映射。
+        曲线为速度曲线：每段斜率=该时刻速度倍率，speed&gt;0 连续播放，speed=0=该段冻结。曲线非空时倒放/冻结被忽略。
       </div>
     </div>
   );

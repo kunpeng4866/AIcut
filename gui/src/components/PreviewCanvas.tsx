@@ -24,6 +24,33 @@ const formatTC = (sec: number): string => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 };
 
+// 速度曲线积分：srcT = srcStart + ∫₀^off speed(τ) dτ（speed 按 play 分段线性，trapezoid 积分）
+// 与后端 strategy.rs::speed_integral 保持一致。speed>0 时 srcT 单调推进，绝不静止。
+function speedIntegral(curve: SpeedPointConfig[], off: number, srcStart: number): number {
+  if (!curve || curve.length === 0) return srcStart;
+  const pts = [...curve].sort((a, b) => a.play - b.play);
+  if (off <= pts[0].play) return srcStart + Math.max(off, 0) * pts[0].speed;
+  let acc = pts[0].play * pts[0].speed; // 段 [0, 首点.play] 以首点速度恒定
+  let lastPlay = pts[0].play;
+  let lastSpeed = pts[0].speed;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const span = b.play - a.play;
+    if (off <= b.play) {
+      const frac = span < 1e-12 ? 0 : (off - a.play) / span;
+      const speedOff = a.speed + (b.speed - a.speed) * frac;
+      acc += (a.speed + speedOff) / 2 * (off - a.play);
+      return srcStart + acc;
+    }
+    acc += (a.speed + b.speed) / 2 * span;
+    lastPlay = b.play;
+    lastSpeed = b.speed;
+  }
+  acc += (off - lastPlay) * lastSpeed; // 超出末点：以末点速度外延
+  return srcStart + acc;
+}
+
 // 统一时间重映射：与后端 Rust clip_source_time 逐字节一致的纯函数
 // 给定全局时间线时间 t 与 clip，返回素材源时间 srcT 及是否处于冻结帧
 function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: boolean } {
@@ -32,20 +59,7 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
   const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const clamp = (x: number) => Math.max(clip.src_range.start, Math.min(clip.src_range.end, x));
   if (remap.curve && remap.curve.length > 0) {
-    const pts = [...remap.curve].sort((a, b) => a.play - b.play);
-    let srcT: number;
-    if (off <= pts[0].play) srcT = pts[0].src;
-    else if (off >= pts[pts.length - 1].play) srcT = pts[pts.length - 1].src;
-    else {
-      for (let i = 0; i < pts.length - 1; i++) {
-        if (off >= pts[i].play && off < pts[i + 1].play) {
-          const r = (off - pts[i].play) / (pts[i + 1].play - pts[i].play || 1);
-          srcT = pts[i].src + r * (pts[i + 1].src - pts[i].src);
-          break;
-        }
-      }
-      srcT = pts[pts.length - 1].src; // 兜底（不应到达）
-    }
+    const srcT = speedIntegral(remap.curve, off, clip.src_range.start);
     return { srcT: clamp(srcT), frozen: false };
   }
   let frozen = false; let srcT: number;
