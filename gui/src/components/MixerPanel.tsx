@@ -1,5 +1,6 @@
 // 混音器面板 — 轨道级音量 / 声相 / 静音 / 独奏控制
 // 数据直接写入 TrackConfig.volume / pan（与后端导出混音管线对应）
+import { useRef } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import type { TrackConfig } from '../types';
 
@@ -32,10 +33,15 @@ function panLabel(pan: number): string {
 
 export default function MixerPanel() {
   const tracks = useProjectStore((s) => s.project.tracks);
-  const updateTrackVolume = useProjectStore((s) => s.updateTrackVolume);
-  const updateTrackPan = useProjectStore((s) => s.updateTrackPan);
+  const updateTrackVolumeLive = useProjectStore((s) => s.updateTrackVolumeLive);
+  const updateTrackPanLive = useProjectStore((s) => s.updateTrackPanLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const toggleTrackMute = useProjectStore((s) => s.toggleTrackMute);
   const toggleTrackSolo = useProjectStore((s) => s.toggleTrackSolo);
+  // 连续拖动轨道音量/声相：拖前压一次快照，拖中走 live（不每帧深拷贝整工程，避免黑屏）
+  const draggingRef = useRef(false);
+  const beginDrag = () => { if (!draggingRef.current) { draggingRef.current = true; pushHistorySnapshot(); } };
+  const endDrag = () => { draggingRef.current = false; };
 
   // 仅显示可能发声的轨道
   const audioTracks = tracks.filter((t) => t.type === 'audio' || t.type === 'video' || t.type === 'effect');
@@ -67,14 +73,16 @@ export default function MixerPanel() {
               <div style={S.row2}>
                 <span style={S.label}>音量</span>
                 <input type="range" min={0} max={2} step={0.01} value={vol}
-                  onChange={(e) => updateTrackVolume(t.id, parseFloat(e.target.value))}
+                  onPointerDown={beginDrag} onPointerUp={endDrag}
+                  onChange={(e) => { beginDrag(); updateTrackVolumeLive(t.id, parseFloat(e.target.value)); }}
                   style={{ flex: 1, accentColor: '#e94560' }} />
                 <span style={{ color: '#eee', fontSize: 11, width: 38, textAlign: 'right' }}>{Math.round(vol * 100)}%</span>
               </div>
               <div style={S.row2}>
                 <span style={S.label}>声相</span>
                 <input type="range" min={-1} max={1} step={0.01} value={pan}
-                  onChange={(e) => updateTrackPan(t.id, parseFloat(e.target.value))}
+                  onPointerDown={beginDrag} onPointerUp={endDrag}
+                  onChange={(e) => { beginDrag(); updateTrackPanLive(t.id, parseFloat(e.target.value)); }}
                   style={{ flex: 1, accentColor: '#e94560' }} />
                 <span style={S.panVal}>{panLabel(pan)}</span>
               </div>

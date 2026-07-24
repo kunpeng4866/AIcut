@@ -12,6 +12,7 @@ import AudioPanel from './components/panels/AudioPanel';
 import StickerPanel from './components/panels/StickerPanel';
 import EffectsPanel from './components/panels/EffectsPanel';
 import PreviewCanvas from './components/PreviewCanvas';
+import ErrorBoundary from './components/ErrorBoundary';
 import PropertiesPanel from './components/PropertiesPanel';
 import MixerPanel from './components/MixerPanel';
 import { AIPanel } from './components/AIPanel';
@@ -127,7 +128,9 @@ export default function App() {
 
         {/* 预览画布 */}
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-          <PreviewCanvas />
+          <ErrorBoundary fallbackTitle="预览画布发生异常">
+            <PreviewCanvas />
+          </ErrorBoundary>
         </main>
 
         {/* 预览/右 分隔条 */}

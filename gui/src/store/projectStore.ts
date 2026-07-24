@@ -85,6 +85,9 @@ interface ProjectState {
   toggleTrackSolo: (id: string) => void;
   updateTrackVolume: (id: string, volume: number) => void;
   updateTrackPan: (id: string, pan: number) => void;
+  // 轨道音量/声相连续拖动实时版（不深拷贝、不压快照）；拖前用 pushHistorySnapshot 存一份
+  updateTrackVolumeLive: (id: string, volume: number) => void;
+  updateTrackPanLive: (id: string, pan: number) => void;
   addClip: (trackId: string, clip: ClipConfig) => void;
   removeClip: (trackId: string, clipId: string) => void;
   updateClip: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
@@ -101,6 +104,18 @@ interface ProjectState {
   moveClip: (trackId: string, clipId: string, newTimelineIn: number, skipRealign?: boolean) => void;
   moveClipToTrack: (srcTrackId: string, clipId: string, destTrackId: string, newTimelineIn: number) => void;
   updateTransform: (trackId: string, clipId: string, key: keyof TransformConfig, value: number) => void;
+  // —— 以下为「连续拖动」专用实时方法：不深拷贝整个工程、不压历史快照、不做磁吸重排，
+  // 避免每帧 O(整工程) 深拷贝导致主线程卡死、WebGPU 渲染循环饿死而黑屏。
+  // 配合 pushHistorySnapshot（拖前存一份）+ realignProject（拖后一次重排）实现「一次拖动=一次撤销」。
+  updateClipLive: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
+  updateTransformLive: (trackId: string, clipId: string, key: keyof TransformConfig, value: number) => void;
+  setSpeedLive: (trackId: string, clipId: string, speed: number) => void;
+  moveClipLive: (trackId: string, clipId: string, newTimelineIn: number) => void;
+  moveClipToTrackLive: (srcTrackId: string, clipId: string, destTrackId: string, newTimelineIn: number) => void;
+  // 拖前调用一次：把当前工程压入历史快照（用于撤销），拖中实时更新不重复压。
+  pushHistorySnapshot: () => void;
+  // 拖后调用一次：按磁吸规则把主轨重排（连续拖动过程不做重排，避免抖动与开销）。
+  realignProject: () => void;
   getMainVideoTrack: () => TrackConfig | undefined;
 }
 
@@ -204,6 +219,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     toggleTrackSolo: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, solo: !t.solo } : t) })),
     updateTrackVolume: (id, volume) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, volume } : t) })),
     updateTrackPan: (id, pan) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, pan } : t) })),
+    updateTrackVolumeLive: (id, volume) => set((state) => ({ project: { ...state.project, tracks: state.project.tracks.map((t) => t.id === id ? { ...t, volume } : t) }, isDirty: true })),
+    updateTrackPanLive: (id, pan) => set((state) => ({ project: { ...state.project, tracks: state.project.tracks.map((t) => t.id === id ? { ...t, pan } : t) }, isDirty: true })),
     addClip: (trackId, clip) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => [...clips, clip]));
@@ -363,6 +380,83 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return mapTrackClips(p, trackId, (clips) => clips.map((c) => c.id === clipId ? { ...c, transform: { ...c.transform, [key]: value } } : c));
     }),
+    // —— 连续拖动实时方法（不深拷贝、不压快照、不磁吸重排）——
+    updateClipLive: (trackId, clipId, updates) => set((state) => {
+      if (state.project.tracks.find(t => t.id === trackId)?.locked) return state;
+      const tracks = state.project.tracks.map((t) => t.id === trackId
+        ? { ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, ...updates } : c) }
+        : t);
+      return { project: { ...state.project, tracks }, isDirty: true };
+    }),
+    updateTransformLive: (trackId, clipId, key, value) => set((state) => {
+      if (state.project.tracks.find(t => t.id === trackId)?.locked) return state;
+      const tracks = state.project.tracks.map((t) => t.id === trackId
+        ? { ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, transform: { ...c.transform, [key]: value } } : c) }
+        : t);
+      return { project: { ...state.project, tracks }, isDirty: true };
+    }),
+    setSpeedLive: (trackId, clipId, speed) => set((state) => {
+      if (state.project.tracks.find(t => t.id === trackId)?.locked) return state;
+      const sp = Math.max(0.1, Math.min(8, speed));
+      const p = state.project;
+      const updated = mapTrackClips(p, trackId, (clips) => {
+        const target = clips.find((c) => c.id === clipId);
+        if (!target) return clips;
+        const remap = target.time_remap;
+        const hasCurve = !!(remap && remap.curve && remap.curve.length >= 2);
+        const srcDur = target.src_range.end - target.src_range.start;
+        const oldDur = target.timelineOut - target.timelineIn;
+        if (hasCurve) {
+          const oldSp = Math.max(0.001, target.speed ?? 1);
+          const ratio = sp / oldSp;
+          const scaled = remap!.curve!.map((pt) => ({ ...pt, speed: pt.speed * ratio }));
+          const f1 = rawSpeedIntegral(scaled, 1);
+          const newDur = f1 > 1e-9 ? srcDur / f1 : oldDur;
+          const delta = newDur - oldDur;
+          return clips.map((cl) => {
+            if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur, time_remap: { ...cl.time_remap, curve: scaled } };
+            if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
+            return cl;
+          });
+        }
+        const freezeDur = target.time_remap?.freeze ? target.time_remap.freeze.duration : 0;
+        const newDur = srcDur / sp + freezeDur;
+        const delta = newDur - oldDur;
+        return clips.map((cl) => {
+          if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur };
+          if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
+          return cl;
+        });
+      });
+      return { project: withMainTrackRealign(updated), isDirty: true };
+    }),
+    // 连续拖动「移动」：仅改本片段 timelineIn/Out，不磁吸重排（重排在拖后 realignProject 一次完成）
+    moveClipLive: (trackId, clipId, newTimelineIn) => set((state) => {
+      if (state.project.tracks.find(t => t.id === trackId)?.locked) return state;
+      const updated = mapTrackClips(state.project, trackId, (clips) => clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const dur = c.timelineOut - c.timelineIn;
+        return { ...c, timelineIn: Math.max(0, newTimelineIn), timelineOut: Math.max(0, newTimelineIn) + dur };
+      }));
+      return { project: updated, isDirty: true };
+    }),
+    moveClipToTrackLive: (srcTrackId, clipId, destTrackId, newTimelineIn) => set((state) => {
+      const srcTrack = state.project.tracks.find((t) => t.id === srcTrackId);
+      const destTrack = state.project.tracks.find((t) => t.id === destTrackId);
+      if (!srcTrack || !destTrack || srcTrack.locked || destTrack.locked) return state;
+      const clip = srcTrack.clips.find((c) => c.id === clipId);
+      if (!clip) return state;
+      const dur = clip.timelineOut - clip.timelineIn;
+      const movedClip = { ...clip, timelineIn: Math.max(0, newTimelineIn), timelineOut: Math.max(0, newTimelineIn) + dur };
+      const tracks = state.project.tracks.map((t) => {
+        if (t.id === srcTrackId) return { ...t, clips: t.clips.filter((c) => c.id !== clipId) };
+        if (t.id === destTrackId) return { ...t, clips: [...t.clips, movedClip] };
+        return t;
+      });
+      return { project: { ...state.project, tracks }, isDirty: true };
+    }),
+    pushHistorySnapshot: () => useHistoryStore.getState().pushSnapshot(clone(get().project)),
+    realignProject: () => set((state) => ({ project: withMainTrackRealign(state.project), isDirty: true })),
     getMainVideoTrack: () => {
       const tracks = get().project.tracks;
       return tracks.find(t => t.type === 'video' && t.isMain) ?? tracks.find(t => t.type === 'video');

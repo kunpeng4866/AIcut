@@ -1,5 +1,5 @@
 // 属性面板 — 右侧面板，含变换/滤镜/特效/音频/关键帧 5 个标签页
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
@@ -66,25 +66,33 @@ const S = {
 };
 
 // 可复用参数滑块；editable=true 时右侧显示可编辑数值输入框
-function ParamSlider({ label, value, min, max, step, unit, editable, onChange }: {
+// onEditStart/onEditEnd：连续拖动的生命周期回调（用于拖前压一次历史快照、拖后收尾）。
+// 用 ref 保证一次拖动只触发一次 onEditStart/onEditEnd（避免每帧 onChange 重复触发）。
+function ParamSlider({ label, value, min, max, step, unit, editable, onChange, onEditStart, onEditEnd }: {
   label: string; value: number; min: number; max: number; step: number;
   unit?: string; editable?: boolean; onChange: (v: number) => void;
+  onEditStart?: () => void; onEditEnd?: () => void;
 }) {
   const fmt = (v: number) => unit === '%' ? `${Math.round(v * 100)}%` : unit === '°' ? `${Math.round(v)}°` : v.toFixed(2);
+  const editingRef = useRef(false);
+  const begin = () => { if (!editingRef.current) { editingRef.current = true; onEditStart?.(); } };
+  const end = () => { if (editingRef.current) { editingRef.current = false; onEditEnd?.(); } };
   return (
     <div style={{ marginBottom: 8 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, alignItems: 'center' }}>
         <span style={{ color: '#aaa', fontSize: 11 }}>{label}</span>
         {editable ? (
           <input type="number" value={value} min={min} max={max} step={step}
-            onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+            onFocus={begin} onBlur={end}
+            onChange={(e) => { begin(); onChange(parseFloat(e.target.value) || 0); }}
             style={{ width: 64, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: '2px 4px', fontSize: 11 }} />
         ) : (
           <span style={{ color: '#eee', fontSize: 11 }}>{fmt(value)}</span>
         )}
       </div>
       <input type="range" min={min} max={max} step={step} value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onPointerDown={begin} onPointerUp={end} onBlur={end}
+        onChange={(e) => { begin(); onChange(parseFloat(e.target.value)); }}
         style={{ width: '100%', accentColor: '#e94560' }} />
     </div>
   );
@@ -111,11 +119,12 @@ function useSelectedClip(): { clip: ClipConfig; trackId: string } | null {
 
 // 变换标签页
 function TransformTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
-  const updateTransform = useProjectStore((s) => s.updateTransform);
+  const updateTransformLive = useProjectStore((s) => s.updateTransformLive);
   const updateClip = useProjectStore((s) => s.updateClip);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const t = (clip.transform || {}) as TransformExt;
   const [lockScale, setLockScale] = useState(true);
-  const set = (k: keyof TransformConfig, v: number) => updateTransform(trackId, clip.id, k, v);
+  const set = (k: keyof TransformConfig, v: number) => updateTransformLive(trackId, clip.id, k, v);
   const setScale = (axis: 'scale_x' | 'scale_y', v: number) => {
     set(axis, v);
     if (lockScale) set(axis === 'scale_x' ? 'scale_y' : 'scale_x', v);
@@ -126,16 +135,16 @@ function TransformTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
   };
   return (
     <div>
-      <ParamSlider label="位置 X" value={t.x ?? 0} min={0} max={1} step={0.01} editable onChange={(v) => set('x', v)} />
-      <ParamSlider label="位置 Y" value={t.y ?? 0} min={0} max={1} step={0.01} editable onChange={(v) => set('y', v)} />
-      <ParamSlider label="缩放 X" value={t.scale_x ?? 1} min={0.1} max={5} step={0.01} onChange={(v) => setScale('scale_x', v)} />
-      <ParamSlider label="缩放 Y" value={t.scale_y ?? 1} min={0.1} max={5} step={0.01} onChange={(v) => setScale('scale_y', v)} />
+      <ParamSlider label="位置 X" value={t.x ?? 0} min={0} max={1} step={0.01} editable onChange={(v) => set('x', v)} onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="位置 Y" value={t.y ?? 0} min={0} max={1} step={0.01} editable onChange={(v) => set('y', v)} onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="缩放 X" value={t.scale_x ?? 1} min={0.1} max={5} step={0.01} onChange={(v) => setScale('scale_x', v)} onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="缩放 Y" value={t.scale_y ?? 1} min={0.1} max={5} step={0.01} onChange={(v) => setScale('scale_y', v)} onEditStart={pushHistorySnapshot} />
       <div style={S.row}>
         <ToggleBtn active={lockScale} onClick={() => setLockScale(!lockScale)}>锁比</ToggleBtn>
         <span style={{ color: '#aaa', fontSize: 11 }}>等比缩放</span>
       </div>
-      <ParamSlider label="旋转" value={t.rotation ?? 0} min={0} max={360} step={1} unit="°" onChange={(v) => set('rotation', v)} />
-      <ParamSlider label="不透明度" value={t.opacity ?? 1} min={0} max={1} step={0.01} unit="%" onChange={(v) => set('opacity', v)} />
+      <ParamSlider label="旋转" value={t.rotation ?? 0} min={0} max={360} step={1} unit="°" onChange={(v) => set('rotation', v)} onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="不透明度" value={t.opacity ?? 1} min={0} max={1} step={0.01} unit="%" onChange={(v) => set('opacity', v)} onEditStart={pushHistorySnapshot} />
       <div style={S.divider} />
       <div style={S.row}>
         <span style={S.label}>镜像</span>
@@ -150,6 +159,8 @@ function TransformTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
 // 预览（HTML5 css_filter / WebGPU shader）与导出（filter_spec）均读取 clip.filters，故统一写入此字段。
 function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; kind: 'filters' | 'effects' }) {
   const updateClip = useProjectStore((s) => s.updateClip);
+  const updateClipLive = useProjectStore((s) => s.updateClipLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [showMenu, setShowMenu] = useState(false);
   useEffect(() => {
@@ -190,7 +201,7 @@ function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; 
   };
   const setParam = (i: number, k: string, v: number) => {
     const target = items[i];
-    updateClip(trackId, clip.id, { filters: filters.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, params: { ...it.params, [k]: v } } : it)) } as Partial<ClipConfig>);
+    updateClipLive(trackId, clip.id, { filters: filters.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, params: { ...it.params, [k]: v } } : it)) } as Partial<ClipConfig>);
   };
 
   return (
@@ -224,7 +235,7 @@ function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; 
             {it.enabled && pm && pm.parameters.map((pd: any) => (
               <ParamSlider key={pd.key} label={pd.label} value={Number(it.params?.[pd.key] ?? pd.default)}
                 min={pd.min} max={pd.max} step={pd.step || 0.01}
-                onChange={(nv) => setParam(i, pd.key, nv)} />
+                onChange={(nv) => setParam(i, pd.key, nv)} onEditStart={pushHistorySnapshot} />
             ))}
           </div>
         );
@@ -236,6 +247,8 @@ function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; 
 // 插件标签页：浏览已发现插件并应用到当前片段
 function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
+  const updateClipLive = useProjectStore((s) => s.updateClipLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -277,7 +290,7 @@ function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const toggle = (i: number) => updateClip(trackId, clip.id, { filters: items.map((it) => (it.kind === pluginItems[i].kind && it.name === pluginItems[i].name ? { ...it, enabled: !it.enabled } : it)) } as Partial<ClipConfig>);
   const setParam = (i: number, k: string, v: number) => {
     const target = pluginItems[i];
-    updateClip(trackId, clip.id, { filters: items.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, params: { ...it.params, [k]: v } } : it)) } as Partial<ClipConfig>);
+    updateClipLive(trackId, clip.id, { filters: items.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, params: { ...it.params, [k]: v } } : it)) } as Partial<ClipConfig>);
   };
 
   // Color 约定：以 0xRRGGBB 整数（f64）存入 params；下面做 f64<->hex 转换
@@ -326,7 +339,7 @@ function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
               if (pd.param_type === 'Slider') {
                 return (
                   <ParamSlider key={pd.key} label={pd.label} value={value} min={pd.min} max={pd.max}
-                    step={pd.step ?? 0.01} editable onChange={(v) => setParam(i, pd.key, v)} />
+                    step={pd.step ?? 0.01} editable onChange={(v) => setParam(i, pd.key, v)} onEditStart={pushHistorySnapshot} />
                 );
               } else if (pd.param_type === 'Toggle') {
                 return (
@@ -366,29 +379,31 @@ function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
 // 音频标签页
 function AudioTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
+  const updateClipLive = useProjectStore((s) => s.updateClipLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const audio: any = (clip as any).audio || { pan: 0, denoise: false, voice: '无' };
   const dur = Math.max(0, clip.timelineOut - clip.timelineIn);
-  const set = (k: string, v: any) => updateClip(trackId, clip.id, { audio: { ...audio, [k]: v } } as Partial<ClipConfig>);
+  const set = (k: string, v: any) => updateClipLive(trackId, clip.id, { audio: { ...audio, [k]: v } } as Partial<ClipConfig>);
   // 淡入/淡出绑定到顶层 audioFadeIn/audioFadeOut（与 Timeline 控制点、预览、导出同一真相源），并夹在 [0, 片段时长]
   const setFade = (key: 'audioFadeIn' | 'audioFadeOut', raw: number) => {
     const v = isNaN(raw) ? 0 : Math.min(Math.max(0, raw), dur);
-    updateClip(trackId, clip.id, { [key]: v } as Partial<ClipConfig>);
+    updateClipLive(trackId, clip.id, { [key]: v } as Partial<ClipConfig>);
   };
   return (
     <div>
-      {/* 片段音量：直接映射到后端 clip.volume（导出混音使用） */}
-      <ParamSlider label="音量" value={clip.volume ?? 1} min={0} max={2} step={0.01} unit="%" onChange={(v) => updateClip(trackId, clip.id, { volume: v })} />
-      <ParamSlider label="声相" value={audio.pan ?? 0} min={-1} max={1} step={0.01} onChange={(v) => set('pan', v)} />
+      {/* 片段音量：直接映射到后端 clip.volume（导出混音使用）。拖动走 live（不每帧深拷贝），拖前压一次快照 */}
+      <ParamSlider label="音量" value={clip.volume ?? 1} min={0} max={2} step={0.01} unit="%" onChange={(v) => updateClipLive(trackId, clip.id, { volume: v })} onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="声相" value={audio.pan ?? 0} min={-1} max={1} step={0.01} onChange={(v) => set('pan', v)} onEditStart={pushHistorySnapshot} />
       <div style={S.row}>
         <span style={S.label}>淡入</span>
         <input type="number" style={S.input} value={clip.audioFadeIn ?? 0} step={0.1} min={0} max={dur}
-          onChange={(e) => setFade('audioFadeIn', parseFloat(e.target.value))} />
+          onFocus={pushHistorySnapshot} onChange={(e) => setFade('audioFadeIn', parseFloat(e.target.value))} />
         <span style={{ color: '#aaa', fontSize: 11 }}>秒</span>
       </div>
       <div style={S.row}>
         <span style={S.label}>淡出</span>
         <input type="number" style={S.input} value={clip.audioFadeOut ?? 0} step={0.1} min={0} max={dur}
-          onChange={(e) => setFade('audioFadeOut', parseFloat(e.target.value))} />
+          onFocus={pushHistorySnapshot} onChange={(e) => setFade('audioFadeOut', parseFloat(e.target.value))} />
         <span style={{ color: '#aaa', fontSize: 11 }}>秒</span>
       </div>
       <div style={S.row}>
@@ -532,14 +547,15 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
 // 变速标签页（含倒放 / 冻结帧 / 时间重映射曲线）
 function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
-  const setSpeedAction = useProjectStore((s) => s.setSpeed);
+  const setSpeedLive = useProjectStore((s) => s.setSpeedLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const setCurveLive = useProjectStore((s) => s.setCurveLive);
   const setCurveCommit = useProjectStore((s) => s.setCurveCommit);
   const setFreezeCommit = useProjectStore((s) => s.setFreezeCommit);
   const speed = clip.speed ?? 1;
   const dur = clip.timelineOut - clip.timelineIn;
   const srcDur = clip.src_range.end - clip.src_range.start;
-  const setSpeed = (v: number) => setSpeedAction(trackId, clip.id, v);
+  const setSpeed = (v: number) => setSpeedLive(trackId, clip.id, v);
 
   const remap: TimeRemapConfig = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const reverse = remap.reverse ?? false;
@@ -576,7 +592,7 @@ function SpeedTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
 
   return (
     <div>
-      <ParamSlider label="播放速度" value={speed} min={0.25} max={4} step={0.05} unit="x" editable onChange={setSpeed} />
+      <ParamSlider label="播放速度" value={speed} min={0.25} max={4} step={0.05} unit="x" editable onChange={setSpeed} onEditStart={pushHistorySnapshot} />
       <div style={{ color: '#aaa', fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
         速度作用于时间线→素材映射：&gt;1 快放（片段变短），&lt;1 慢放（片段变长）。当前片段时长 {dur.toFixed(2)}s，源时长 {srcDur.toFixed(2)}s。
       </div>
@@ -665,10 +681,12 @@ const TRANSITION_PRESETS: { key: string; label: string; type: TransitionType; du
 ];
 function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
+  const updateClipLive = useProjectStore((s) => s.updateClipLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const project = useProjectStore((s) => s.project);
   const tr: TransitionConfig = clip.transition || { transitionType: 'none', duration: 0.5 };
   const setType = (t: TransitionType) => updateClip(trackId, clip.id, { transition: { ...tr, transitionType: t } });
-  const setDur = (d: number) => updateClip(trackId, clip.id, { transition: { ...tr, duration: d } });
+  const setDur = (d: number) => updateClipLive(trackId, clip.id, { transition: { ...tr, duration: d } });
   const setDir = (d: WipeDirection) => updateClip(trackId, clip.id, { transition: { ...tr, direction: d } });
   const applyToAll = () => {
     for (const track of project.tracks.filter((t) => t.type === 'video' || t.type === 'audio')) {
@@ -686,7 +704,7 @@ function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string })
           {TRANSITION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
       </div>
-      <ParamSlider label="时长" value={tr.duration ?? 0.5} min={0.1} max={3} step={0.1} unit="s" editable onChange={setDur} />
+      <ParamSlider label="时长" value={tr.duration ?? 0.5} min={0.1} max={3} step={0.1} unit="s" editable onChange={setDur} onEditStart={pushHistorySnapshot} />
       {tr.transitionType === 'wipe' && (
         <div style={S.row}>
           <span style={S.label}>方向</span>

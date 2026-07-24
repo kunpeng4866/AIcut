@@ -170,10 +170,12 @@ function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
     if (track.locked) return; // locked tracks can't be edited
     const startX = e.clientX;
     const startDur = dur;
+    let started = false;
     const onMove = (ev: MouseEvent) => {
+      if (!started) { useProjectStore.getState().pushHistorySnapshot(); started = true; }
       const dsec = (ev.clientX - startX) / zoom;
       const nd = Math.min(3, Math.max(0.1, Math.round((startDur + dsec) * 10) / 10));
-      useProjectStore.getState().updateClip(track.id, clip.id, { transition: { ...tr, duration: nd } });
+      useProjectStore.getState().updateClipLive(track.id, clip.id, { transition: { ...tr, duration: nd } });
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -229,9 +231,11 @@ function FadeHandles({ clip, track, zoom, width }: {
     if (track.locked) return;
     const startX = e.clientX;
     const startFi = clip.audioFadeIn ?? 0;
+    let started = false;
     const onMove = (ev: MouseEvent) => {
+      if (!started) { useProjectStore.getState().pushHistorySnapshot(); started = true; }
       const next = clamp(startFi + (ev.clientX - startX) / zoom, 0, dur - fo);
-      useProjectStore.getState().updateClip(track.id, clip.id, { audioFadeIn: next });
+      useProjectStore.getState().updateClipLive(track.id, clip.id, { audioFadeIn: next });
     };
     const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
     window.addEventListener('mousemove', onMove);
@@ -244,9 +248,11 @@ function FadeHandles({ clip, track, zoom, width }: {
     if (track.locked) return;
     const startX = e.clientX;
     const startFo = clip.audioFadeOut ?? 0;
+    let started = false;
     const onMove = (ev: MouseEvent) => {
+      if (!started) { useProjectStore.getState().pushHistorySnapshot(); started = true; }
       const next = clamp(startFo - (ev.clientX - startX) / zoom, 0, dur - fi);
-      useProjectStore.getState().updateClip(track.id, clip.id, { audioFadeOut: next });
+      useProjectStore.getState().updateClipLive(track.id, clip.id, { audioFadeOut: next });
     };
     const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
     window.addEventListener('mousemove', onMove);
@@ -314,8 +320,10 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
     let startX = e.clientX;
     let startIn = clip.timelineIn;
     const startOut = clip.timelineOut;
+    let started = false; // 首次移动才压一次历史快照（一次拖动=一次撤销），避免每帧克隆整工程
 
     const onMove2 = (ev: MouseEvent) => {
+      if (!started) { useProjectStore.getState().pushHistorySnapshot(); started = true; }
       const dt = (ev.clientX - startX) / zoom;
       if (mode === 'move') {
         const newIn = Math.max(0, startIn + dt);
@@ -352,20 +360,20 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
       setDragTrackId(null);
       // After a move, realign the main track / snap on the destination track.
       if (mode === 'move') {
-        const { project, moveClip } = useProjectStore.getState();
+        const { project, realignProject } = useProjectStore.getState();
         const clipTrack = project.tracks.find(t => t.clips.some(c => c.id === clip.id));
         if (clipTrack) {
           const c = clipTrack.clips.find(c => c.id === clip.id);
           if (c) {
             if (clipTrack.isMain) {
-              // Main track: moveClip without realign already keeps things tidy.
-              moveClip(clipTrack.id, clip.id, c.timelineIn);
+              // 主轨：拖后一次性磁吸重排（拖动过程不重排，避免主轨被吸附抖动）
+              realignProject();
             } else if (clipTrack.type === 'video') {
-              // Video (non-main): snap to 0.5s grid after drop.
-              const dur = c.timelineOut - c.timelineIn;
-              const snapped = snapTime(c.timelineIn, dur, clipTrack.clips, clip.id, playhead, clipSnap);
+              // Video (non-main): 拖后吸附到 0.5s 网格
+              const cdur = c.timelineOut - c.timelineIn;
+              const snapped = snapTime(c.timelineIn, cdur, clipTrack.clips, clip.id, playhead, clipSnap);
               if (Math.abs(snapped - c.timelineIn) > 0.001) {
-                moveClip(clipTrack.id, clip.id, snapped);
+                useProjectStore.getState().updateClipLive(clipTrack.id, clip.id, { timelineIn: snapped, timelineOut: snapped + cdur });
               }
             }
           }
@@ -450,7 +458,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 }
 
 export default function Timeline() {
-  const { project, addTrack, insertTrackAt, addClip, removeClip, splitClip, moveClip, moveClipToTrack, updateClip, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
+  const { project, addTrack, insertTrackAt, addClip, removeClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
   const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; clipId: string } | null>(null);
@@ -805,9 +813,9 @@ export default function Timeline() {
                         sameTypeTrackIds={sameTypeTrackIds}
                         onSelect={() => selectClip(track.id, clip.id)}
                         onSplit={() => splitClip(track.id, clip.id, currentTime)}
-                        onMove={(newIn) => moveClip(track.id, clip.id, newIn, true)}
-                        onMoveToTrack={(destTrackId, newIn) => moveClipToTrack(track.id, clip.id, destTrackId, newIn)}
-                        onResize={(newIn, newOut) => updateClip(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut })}
+                        onMove={(newIn) => moveClipLive(track.id, clip.id, newIn)}
+                        onMoveToTrack={(destTrackId, newIn) => moveClipToTrackLive(track.id, clip.id, destTrackId, newIn)}
+                        onResize={(newIn, newOut) => updateClipLive(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut })}
                         onContext={(e) => onClipContext(e, track.id, clip.id)} />
                       {clip.transition && (clip.transition.transitionType ?? 'none') !== 'none' && (clip.transition.duration ?? 0) > 0 && (
                         <TransitionMarker
