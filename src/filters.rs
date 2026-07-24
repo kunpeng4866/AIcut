@@ -3,10 +3,14 @@
 
 use crate::ffmpeg;
 use crate::keyframe::apply_easing;
+use crate::plugin::PluginManager;
 use crate::project::{Clip, Project, Track};
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 // ════════════════════ 滤镜参数 ════════════════════
 
@@ -388,11 +392,30 @@ pub fn build_mask_spec(mask: &Mask) -> Option<String> {
     }
 }
 
+/// 进程级插件管理器（懒加载，读 AICUT_PLUGIN_DIR，回退 cwd/plugins）。
+fn plugin_manager() -> &'static PluginManager {
+    static MGR: OnceLock<PluginManager> = OnceLock::new();
+    MGR.get_or_init(|| {
+        let dir = PathBuf::from(env::var("AICUT_PLUGIN_DIR").unwrap_or_else(|_| "plugins".into()));
+        let mut mgr = PluginManager::new(dir);
+        let _ = mgr.scan();
+        mgr
+    })
+}
+
 /// 合并片段上所有启用滤镜为一个滤镜串（以 `,` 连接）
 pub fn build_clip_filters(clip: &Clip) -> Option<String> {
     let mut specs = Vec::new();
     for f in &clip.filters {
         if !f.enabled {
+            continue;
+        }
+        if plugin_manager().get(&f.kind).is_some() {
+            if let Ok(s) = plugin_manager().build_filter(&f.kind, &f.params) {
+                if !s.is_empty() {
+                    specs.push(s);
+                }
+            }
             continue;
         }
         if let Some(s) = build_filter_spec(&f.kind, &f.params) {
@@ -401,6 +424,14 @@ pub fn build_clip_filters(clip: &Clip) -> Option<String> {
     }
     for e in &clip.effects {
         if !e.enabled {
+            continue;
+        }
+        if plugin_manager().get(&e.kind).is_some() {
+            if let Ok(s) = plugin_manager().build_filter(&e.kind, &e.params) {
+                if !s.is_empty() {
+                    specs.push(s);
+                }
+            }
             continue;
         }
         if let Some(s) = build_filter_spec(&e.kind, &e.params) {

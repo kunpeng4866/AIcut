@@ -824,3 +824,55 @@ fn test_mcp_tools_list_has_seven() {
     assert!(names.contains(&"transcribe_audio"));
     assert!(names.contains(&"generate_script"));
 }
+
+/// 构造含插件滤镜的工程 JSON（filter.brightness 由 plugins/example_brightness 提供）
+fn plugin_filter_project_json() -> String {
+    r#"{
+        "version": "1.0",
+        "canvas": { "width": 1920, "height": 1080, "fps": 30, "sample_rate": 48000 },
+        "assets": [
+            { "id": "a1", "type": "video", "path": "input.mp4", "duration": 5.0, "width": 1920, "height": 1080, "codec": "h264" }
+        ],
+        "tracks": [
+            {
+                "id": "v1", "type": "video", "order": 0,
+                "clips": [
+                    {
+                        "id": "c1",
+                        "assetId": "a1",
+                        "src_range": { "start": 0.0, "end": 5.0 },
+                        "timelineIn": 0.0,
+                        "timelineOut": 5.0,
+                        "transform": { "x": 0.5, "y": 0.5, "scale_x": 1.0, "scale_y": 1.0, "rotation": 0.0, "opacity": 1.0 },
+                        "volume": 1.0, "speed": 1.0,
+                        "effects": [],
+                        "masks": [],
+                        "filters": [
+                            { "kind": "filter.brightness", "params": { "brightness": 0.1, "contrast": 1.2 }, "enabled": true }
+                        ],
+                        "keyframes": {}
+                    }
+                ]
+            }
+        ]
+    }"#
+    .to_string()
+}
+
+#[test]
+fn test_render_with_plugin_filter() {
+    let json = plugin_filter_project_json();
+    let cmd = render(&json).expect("含插件滤镜的工程不应 panic / 返回 Err");
+
+    assert!(!cmd.is_empty(), "含插件滤镜的工程命令不应为空");
+    assert!(
+        cmd.contains("eq=brightness=0.1"),
+        "插件 filter.brightness 应映射为 eq=brightness=0.1，实际命令: {}",
+        cmd
+    );
+    assert!(
+        cmd.contains("eq="),
+        "插件滤镜应产生 eq= 滤镜串，实际命令: {}",
+        cmd
+    );
+}

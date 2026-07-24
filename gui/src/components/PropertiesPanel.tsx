@@ -1,11 +1,23 @@
 // 属性面板 — 右侧面板，含变换/滤镜/特效/音频/关键帧 5 个标签页
-import { useState, type ReactNode } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 
-type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition';
+type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins';
+
+// 插件 manifest 类型（仅前端 UI 使用，不依赖 engine 包）
+interface ParameterDef {
+  key: string; label: string; param_type: 'Slider' | 'Toggle' | 'Color' | 'Select';
+  default: number; min: number; max: number; step?: number; options?: string[];
+}
+interface PluginManifest {
+  id: string; name: string; version: string; author: string; description: string;
+  plugin_type: 'Filter' | 'Effect' | 'Transition' | 'TextTemplate' | 'Sticker';
+  min_app_version: string; parameters: ParameterDef[];
+  filter_spec?: string; shader?: string; thumbnail?: string;
+}
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'transform', label: '变换' },
@@ -17,6 +29,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'text', label: '文字' },
   { key: 'subtitle', label: '字幕' },
   { key: 'keyframes', label: '关键帧' },
+  { key: 'plugins', label: '插件' },
 ];
 
 // 滤镜预设
@@ -156,7 +169,7 @@ function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; 
   const [showMenu, setShowMenu] = useState(false);
   const zh = kind === 'filters' ? '滤镜' : '特效';
   const add = (preset: any) => {
-    updateClip(trackId, clip.id, { [kind]: [...items, { type: preset.type, name: preset.label, enabled: true, params: { ...preset.params } }] } as Partial<ClipConfig>);
+    updateClip(trackId, clip.id, { [kind]: [...items, { kind: preset.type, name: preset.label, enabled: true, params: { ...preset.params } }] } as Partial<ClipConfig>);
     setShowMenu(false);
   };
   const remove = (i: number) => updateClip(trackId, clip.id, { [kind]: items.filter((_, idx) => idx !== i) } as Partial<ClipConfig>);
@@ -192,6 +205,126 @@ function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; 
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+
+// 插件标签页：浏览已发现插件并应用到当前片段
+function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
+  const updateClip = useProjectStore((s) => s.updateClip);
+  const [plugins, setPlugins] = useState<PluginManifest[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await (window as any).aicut?.listPlugins();
+        const list: PluginManifest[] = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        setPlugins(Array.isArray(list) ? list : []);
+      } catch { setPlugins([]); }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  const items: any[] = (clip.filters as any[]) || [];
+  // 仅展示由插件产生的 filters（依据 manifest.id 匹配 kind）
+  const pluginItems = items.filter((it) => plugins.some((p) => p.id === it.kind));
+  const installedIds = new Set(pluginItems.map((it) => it.kind));
+  const available = plugins.filter((p) => !installedIds.has(p.id));
+
+  const [showMenu, setShowMenu] = useState(false);
+
+  const addPlugin = (p: PluginManifest) => {
+    const params: Record<string, number> = {};
+    for (const pd of p.parameters) params[pd.key] = pd.default;
+    updateClip(trackId, clip.id, { filters: [...items, { kind: p.id, name: p.name, enabled: true, params }] } as Partial<ClipConfig>);
+    setShowMenu(false);
+  };
+  // 用 kind+name 精确匹配目标实例，避免重排导致的索引错位
+  const remove = (i: number) => updateClip(trackId, clip.id, { filters: pluginItems.filter((_, idx) => idx !== i) } as Partial<ClipConfig>);
+  const toggle = (i: number) => updateClip(trackId, clip.id, { filters: items.map((it) => (it.kind === pluginItems[i].kind && it.name === pluginItems[i].name ? { ...it, enabled: !it.enabled } : it)) } as Partial<ClipConfig>);
+  const setParam = (i: number, k: string, v: number) => {
+    const target = pluginItems[i];
+    updateClip(trackId, clip.id, { filters: items.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, params: { ...it.params, [k]: v } } : it)) } as Partial<ClipConfig>);
+  };
+
+  // Color 约定：以 0xRRGGBB 整数（f64）存入 params；下面做 f64<->hex 转换
+  const f64ToHex = (v: number) => '#' + ((Math.round(v) & 0xffffff).toString(16).padStart(6, '0'));
+  const hexToF64 = (hex: string) => parseInt(hex.slice(1), 16);
+
+  return (
+    <div>
+      <div style={{ position: 'relative', marginBottom: 8 }}>
+        <button style={S.btn} onClick={() => setShowMenu(!showMenu)}>+ 添加插件</button>
+        {showMenu && (
+          <div style={{ position: 'absolute', top: '100%', left: 0, background: '#1a1a2e', border: '1px solid #0f3460', borderRadius: 4, zIndex: 10, minWidth: 160, maxHeight: 240, overflow: 'auto' }}>
+            {available.length === 0
+              ? <div style={{ padding: '6px 10px', fontSize: 11, color: '#aaa' }}>没有可添加的插件</div>
+              : available.map((p) => (
+                <div key={p.id} style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 11, color: '#eee' }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = '#0f3460')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                  onClick={() => addPlugin(p)}>{p.name}</div>
+              ))}
+          </div>
+        )}
+      </div>
+
+      {loading && <div style={{ color: '#aaa', fontSize: 11, padding: 8 }}>加载插件…</div>}
+      {!loading && pluginItems.length === 0 && (
+        <div style={{ color: '#aaa', fontSize: 11, textAlign: 'center', padding: 20 }}>暂无插件（在 plugins/ 目录放置 manifest.json 即可）</div>
+      )}
+
+      {pluginItems.map((it, i) => {
+        const p = plugins.find((pp) => pp.id === it.kind);
+        if (!p) return null; // 不是插件实例
+        const params: Record<string, number> = it.params || {};
+        return (
+          <div key={i} style={S.item}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span style={{ fontSize: 11, color: '#eee' }}>{it.name}</span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <ToggleBtn active={!!it.enabled} onClick={() => toggle(i)}>{it.enabled ? '开' : '关'}</ToggleBtn>
+                <button style={S.btn} onClick={() => remove(i)}>×</button>
+              </div>
+            </div>
+            {it.enabled && p.parameters.map((pd) => {
+              const value = Number(params[pd.key] ?? pd.default);
+              if (pd.param_type === 'Slider') {
+                return (
+                  <ParamSlider key={pd.key} label={pd.label} value={value} min={pd.min} max={pd.max}
+                    step={pd.step ?? 0.01} editable onChange={(v) => setParam(i, pd.key, v)} />
+                );
+              } else if (pd.param_type === 'Toggle') {
+                return (
+                  <div key={pd.key} style={S.row}>
+                    <span style={S.label}>{pd.label}</span>
+                    <ToggleBtn active={!!value} onClick={() => setParam(i, pd.key, value ? 0 : 1)}>{value ? '开' : '关'}</ToggleBtn>
+                  </div>
+                );
+              } else if (pd.param_type === 'Color') {
+                return (
+                  <div key={pd.key} style={S.row}>
+                    <span style={S.label}>{pd.label}</span>
+                    <input type="color" value={f64ToHex(value)}
+                      onChange={(e) => setParam(i, pd.key, hexToF64(e.target.value))}
+                      style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+                  </div>
+                );
+              } else { // Select：value 为选项索引（f64）
+                const opts = pd.options ?? [];
+                return (
+                  <div key={pd.key} style={S.row}>
+                    <span style={S.label}>{pd.label}</span>
+                    <select style={S.input} value={Math.round(value)} onChange={(e) => setParam(i, pd.key, parseInt(e.target.value, 10) || 0)}>
+                      {opts.map((o, oi) => <option key={oi} value={oi}>{o}</option>)}
+                    </select>
+                  </div>
+                );
+              }
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -539,6 +672,7 @@ export default function PropertiesPanel() {
           activeTab === 'transition' ? <TransitionTab clip={sel.clip} trackId={sel.trackId} /> :
           activeTab === 'text' ? <TextTab clip={sel.clip} trackId={sel.trackId} /> :
           activeTab === 'subtitle' ? <SubtitleTab clip={sel.clip} trackId={sel.trackId} /> :
+          activeTab === 'plugins' ? <PluginsTab clip={sel.clip} trackId={sel.trackId} /> :
           <KeyframesTab clip={sel.clip} trackId={sel.trackId} />
         )}
       </div>

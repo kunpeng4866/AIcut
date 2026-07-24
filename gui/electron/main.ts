@@ -10,6 +10,10 @@ import { pathToFileURL } from 'url';
 let mainWindow: BrowserWindow | null = null;
 const ENGINE_BIN = join(__dirname, '../../target/debug/aicut-engine.exe');
 
+// 让引擎 CLI（plugin:list / render 子进程）能定位插件目录（仓库根/plugins）。
+// render 子进程继承此环境变量，因而应用插件也会在导出时生效。
+try { process.env.AICUT_PLUGIN_DIR = join(__dirname, '../../plugins'); } catch { /* dev 兜底 */ }
+
 // ── 路径常量 ──
 function getConfigPath() { return join(app.getPath('userData'), 'config.json'); }
 function getDraftsDir() { return join(app.getPath('userData'), 'drafts'); }

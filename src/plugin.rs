@@ -54,6 +54,9 @@ pub struct ParameterDef {
     pub min: f64,
     pub max: f64,
     pub step: Option<f64>,
+    /// Select 类型的选项标签（下拉项），其他类型可为 null
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
 }
 
 /// 插件清单（manifest.json 反序列化目标）
