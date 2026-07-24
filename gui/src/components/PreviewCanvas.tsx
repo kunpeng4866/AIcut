@@ -259,6 +259,41 @@ export default function PreviewCanvas() {
     return result;
   })();
 
+  // 查找当前贴纸（sticker 轨）图片叠加层：跨 WebGPU/HTML5 通用（DOM <img> 模式无关）
+  const activeStickerOverlays: { src: string; style: React.CSSProperties }[] = (() => {
+    const result: { src: string; style: React.CSSProperties }[] = [];
+    const stageW = project.canvas?.width || 1920;
+    for (const track of project.tracks) {
+      if (track.type !== 'sticker') continue;
+      for (const clip of track.clips) {
+        if (!(currentTime >= clip.timelineIn && currentTime < clip.timelineOut)) continue;
+        const asset = project.assets.find((a) => a.id === clip.assetId);
+        if (!asset) continue;
+        const t = clip.transform || {};
+        const x = t.x ?? 0.5;
+        const y = t.y ?? 0.5;
+        const scale = t.scale_x ?? 1;
+        const wPct = Math.min(80, ((asset.width || 300) / stageW) * 100) * scale;
+        result.push({
+          src: pathToUrl(asset.path),
+          style: {
+            position: 'absolute',
+            left: `${x * 100}%`,
+            top: `${y * 100}%`,
+            transform: `translate(-50%, -50%) rotate(${(((t.rotation ?? 0) * Math.PI) / 180)}rad) scale(${scale})`,
+            width: `${wPct}%`,
+            height: 'auto',
+            opacity: t.opacity ?? 1,
+            objectFit: 'contain',
+            pointerEvents: 'none',
+            zIndex: 99,
+          },
+        });
+      }
+    }
+    return result;
+  })();
+
   const hasContent = activeVideoClips.length > 0 || activeAudioClips.length > 0;
 
   // 插件清单（含预览用 shader），供 WebGPU 预览应用滤镜。仅 WebGPU 路径使用；
@@ -575,6 +610,11 @@ export default function PreviewCanvas() {
         {/* 文字/字幕叠加层 */}
         {activeTextOverlays.map((item, idx) => (
           <div key={idx} style={item.style}>{item.text}</div>
+        ))}
+
+        {/* 贴纸图片叠加层（DOM <img>，跨 WebGPU/HTML5 通用） */}
+        {activeStickerOverlays.map((item, idx) => (
+          <img key={idx} src={item.src} style={item.style} alt="" />
         ))}
 
         {/* 隐藏 audio：每个活跃音频 clip 一个 */}

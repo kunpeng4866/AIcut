@@ -7,6 +7,10 @@ import { isAIConfigured } from './config/ai_config';
 import ConfigWizard from './config/ConfigWizard';
 import Header from './components/Header';
 import MediaPanel from './components/MediaPanel';
+import TextPanel from './components/panels/TextPanel';
+import AudioPanel from './components/panels/AudioPanel';
+import StickerPanel from './components/panels/StickerPanel';
+import EffectsPanel from './components/panels/EffectsPanel';
 import PreviewCanvas from './components/PreviewCanvas';
 import PropertiesPanel from './components/PropertiesPanel';
 import MixerPanel from './components/MixerPanel';
@@ -109,12 +113,12 @@ export default function App() {
             ))}
           </div>
           {/* 面板内容 */}
-          <div style={{ flex: 1, minHeight: 0 }}>
-            {activeLeftPanel === 'media' ? <MediaPanel /> : (
-              <div style={{ padding: 24, color: C.textSub, fontSize: 13, textAlign: 'center' }}>
-                {LEFT_TABS.find((t) => t.key === activeLeftPanel)?.label}面板（开发中）
-              </div>
-            )}
+          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            {activeLeftPanel === 'media' && <MediaPanel />}
+            {activeLeftPanel === 'effects' && <EffectsPanel />}
+            {activeLeftPanel === 'text' && <TextPanel />}
+            {activeLeftPanel === 'audio' && <AudioPanel />}
+            {activeLeftPanel === 'stickers' && <StickerPanel />}
           </div>
         </aside>
 

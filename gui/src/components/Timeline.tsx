@@ -34,21 +34,6 @@ const RULER_HEIGHT = 28;
 const SNAP_THRESHOLD_CLIP = 0.5; // clip-to-clip snap threshold in seconds
 const BOUNDARY_THRESHOLD = 10; // px from track edge that triggers insert
 
-// Parse an SRT string into timed subtitle entries.
-function parseSRT(srt: string): { start: number; end: number; text: string }[] {
-  const blocks = srt.trim().split(/\n\n+/);
-  return blocks.map(block => {
-    const lines = block.trim().split('\n');
-    const timeLine = lines.find(l => /-->/.test(l));
-    if (!timeLine) return null;
-    const textLines = lines.filter(l => !/^\d+$/.test(l) && !/-->/.test(l)).filter(Boolean);
-    const m = timeLine.match(/(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/);
-    if (!m) return null;
-    const toSec = (a: number, b: number, c: number, d: number) => a * 3600 + b * 60 + c + d / 1000;
-    return { start: toSec(+m[1], +m[2], +m[3], +m[4]), end: toSec(+m[5], +m[6], +m[7], +m[8]), text: textLines.join('\n').trim() };
-  }).filter((x): x is NonNullable<typeof x> => x != null);
-}
-
 // Format seconds as M:SS.
 const fmt = (sec: number): string => {
   const m = Math.floor(sec / 60);
@@ -545,58 +530,6 @@ export default function Timeline() {
     });
   };
 
-  // Add a new text clip (creating a text track if needed).
-  const handleAddText = () => {
-    const p = useProjectStore.getState();
-    let textTrack = p.project.tracks.find((t: TrackConfig) => t.type === 'text');
-    if (!textTrack) {
-      const newId = p.addTrack('text');
-      textTrack = useProjectStore.getState().project.tracks.find(t => t.id === newId);
-      if (!textTrack) return;
-    }
-    const lastEnd = textTrack.clips.length > 0
-      ? Math.max(...textTrack.clips.map((c: ClipConfig) => c.timelineOut))
-      : 0;
-    const clipId = `clip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-    p.addClip(textTrack.id, {
-      id: clipId, assetId: '_text',
-      src_range: { start: 0, end: 5 },
-      timelineIn: lastEnd, timelineOut: lastEnd + 5,
-      text: { content: '双击编辑文字', fontSize: 48, color: '#ffffff', textAlign: 'center' as const, x: 0.5, y: 0.5 },
-    });
-    selectClip(textTrack.id, clipId);
-  };
-
-  // Import an SRT/ASS/VTT subtitle file into a subtitle track.
-  const handleImportSubtitle = () => {
-    const input = document.createElement('input');
-    input.type = 'file'; input.accept = '.srt,.ass,.vtt';
-    input.onchange = async (e: Event) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-      const text = await file.text();
-      const items = parseSRT(text);
-      if (items.length === 0) return;
-      const p = useProjectStore.getState();
-      let subTrack = p.project.tracks.find((t: { type: string }) => t.type === 'subtitle');
-      if (!subTrack) {
-        const newId = p.addTrack('subtitle');
-        subTrack = useProjectStore.getState().project.tracks.find((t: TrackConfig) => t.id === newId);
-        if (!subTrack) return;
-      }
-      const totalDuration = items[items.length - 1].end;
-      const clipId = `clip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-      p.addClip(subTrack.id, {
-        id: clipId, assetId: '_subtitle',
-        src_range: { start: 0, end: totalDuration },
-        timelineIn: 0, timelineOut: totalDuration,
-        subtitle: { items, fontSize: 24, color: '#ffffff', position: 'bottom' as const },
-      });
-      selectClip(subTrack.id, clipId);
-    };
-    input.click();
-  };
-
   // Whether any track is in solo mode (used for the indicator badge).
   const hasSoloTrack = project.tracks.some(t => t.solo);
 
@@ -636,9 +569,6 @@ export default function Timeline() {
         }} title="片段吸附：靠近其他片段边缘时吸附 (0.5s)">
           片段吸附 {clipSnap ? 'ON' : 'OFF'}
         </button>
-        <div style={{ width: 1, height: 20, background: '#0f3460', margin: '0 4px' }} />
-        <button onClick={handleAddText} style={{ ...btnStyle, background: '#3d2b1b' }} title="添加文字/标题片段到文字轨">文字</button>
-        <button onClick={handleImportSubtitle} style={{ ...btnStyle, background: '#1b3d3d' }}>CC 字幕</button>
         {hasSoloTrack && (
           <span style={{ color: '#ff9800', fontSize: 11, fontWeight: 600 }}>独奏已启用</span>
         )}
