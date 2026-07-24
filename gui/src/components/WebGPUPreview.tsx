@@ -84,6 +84,8 @@ interface UseWebGPUPreviewOptions {
   canvasHeight: number;
   clips: ActiveVideoClip[];
   enabled: boolean;
+  /** 插件清单（含预览用 shader: string 内联 WGSL），按 id 索引。供滤镜离屏 pass 使用。 */
+  pluginManifests?: Record<string, any>;
 }
 
 /**
@@ -93,7 +95,7 @@ interface UseWebGPUPreviewOptions {
  * 卸载或禁用时销毁所有 GPU 资源。
  */
 export function useWebGPUPreview({
-  canvasRef, videoRefs, bitmapSources, canvasWidth, canvasHeight, clips, enabled,
+  canvasRef, videoRefs, bitmapSources, canvasWidth, canvasHeight, clips, enabled, pluginManifests,
 }: UseWebGPUPreviewOptions) {
   const deviceRef = useRef<GPUDevice | null>(null);
   const pipelineRef = useRef<GPURenderPipeline | null>(null);
@@ -101,11 +103,41 @@ export function useWebGPUPreview({
   const samplerRef = useRef<GPUSampler | null>(null);
   const rafRef = useRef<number | null>(null);
   const clipsRef = useRef<ActiveVideoClip[]>(clips);
+  // 插件滤镜：清单（按 id 索引，含内联 WGSL shader）、管线缓存、编译失败集合
+  const pluginManifestsRef = useRef<Record<string, any>>({});
+  const filterPipelinesRef = useRef<Map<string, GPURenderPipeline>>(new Map());
+  const filterFailedRef = useRef<Set<string>>(new Set());
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // 保存最新 clips 到 ref，避免每帧重建渲染循环
   useEffect(() => { clipsRef.current = clips; }, [clips]);
+
+  // 保存最新插件清单到 ref，供渲染循环读取（避免每帧重建）
+  useEffect(() => { pluginManifestsRef.current = pluginManifests ?? {}; }, [pluginManifests]);
+
+  // 编译并缓存插件滤镜渲染管线（按 kind）。编译失败则标记 failed，后续跳过该滤镜（降级为原图）。
+  // 插件 shader 绑定契约（硬约束）：@group(0) @binding(0)=uniform, 1=texture_2d<f32>, 2=sampler。
+  const getFilterPipeline = (device: any, kind: string, shaderSrc: string): GPURenderPipeline | null => {
+    if (filterFailedRef.current.has(kind)) return null;
+    const cached = filterPipelinesRef.current.get(kind);
+    if (cached) return cached;
+    try {
+      const module = device.createShaderModule({ code: shaderSrc });
+      const p = device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs_main' },
+        fragment: { module, entryPoint: 'fs_main', targets: [{ format: 'rgba8unorm' }] },
+        primitive: { topology: 'triangle-strip' },
+      });
+      filterPipelinesRef.current.set(kind, p);
+      return p;
+    } catch (e: any) {
+      console.error('[WebGPU] 插件 shader 编译失败，预览跳过该滤镜:', kind, e?.message || e);
+      filterFailedRef.current.add(kind);
+      return null;
+    }
+  };
 
   // ── 初始化设备 + 管线 + canvas 配置 ──
   useEffect(() => {
@@ -217,6 +249,10 @@ export function useWebGPUPreview({
         const cmd = device.createCommandEncoder();
         const view = ctx.getCurrentTexture().createView();
 
+        // 每帧创建的离屏纹理 / 滤镜 uniform，提交后统一销毁（源纹理已在循环内各自 destroy）
+        const frameTextures: any[] = [];
+        const frameBufs: any[] = [];
+
         // 多 pass 渲染：从底到顶依次 Over 合成
         // Pass 0: clear 黑色背景；Pass 1-N: load 保留前一 pass 结果
         items.forEach((item, idx) => {
@@ -233,6 +269,77 @@ export function useWebGPUPreview({
             { texture },
             [vw, vh],
           );
+
+          // ── 插件滤镜离屏 pass：对每个 enabled 且有 shader 的滤镜，依次渲染到离屏纹理 ──
+          // 输入 = 源纹理（或上一滤镜的离屏结果），uniform = 插件参数；最终离屏结果再喂给 Over pass。
+          // 这样插件 shader 只需实现"输入纹理 → 输出纹理"，无需理解 transform/opacity/合成（职责分离）。
+          let srcView = texture.createView();
+          const manifestMap = pluginManifestsRef.current;
+          const enabledFilters = (clip.filters || []).filter(
+            (f: any) => f && f.enabled && f.kind && manifestMap[f.kind] && manifestMap[f.kind].shader
+          );
+          if (enabledFilters.length > 0) {
+            let inputView = srcView;
+            for (const f of enabledFilters) {
+              const manifest = manifestMap[f.kind];
+              const fpipeline = getFilterPipeline(device, f.kind, manifest.shader);
+              if (!fpipeline) continue;
+              const offTex = device.createTexture({
+                size: [vw, vh],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+              });
+              frameTextures.push(offTex);
+              // FilterUniforms: resolution(vec2f) + opacity(f32) + time(f32) + params: array<vec4f,16> = 272 字节
+              // 参数按 manifest.parameters 顺序映射到 params[k]，Slider/Toggle/Select 取 .x，Color 取 .xyz
+              const fdata = new Float32Array(68);
+              fdata[0] = vw; fdata[1] = vh;
+              fdata[2] = clip.transform?.opacity ?? 1.0;
+              fdata[3] = 0.0; // time（预留动画类滤镜）
+              (manifest.parameters || []).forEach((p: any, k: number) => {
+                if (k >= 16) return;
+                const raw = f.params ? f.params[p.key] : undefined;
+                let val = (raw === undefined || raw === null) ? (p.default ?? 0) : raw;
+                if (p.param_type === 'Slider') {
+                  val = Math.max(p.min ?? val, Math.min(p.max ?? val, val));
+                }
+                if (p.param_type === 'Color') {
+                  // f64 0xRRGGBB → 归一化 r,g,b，写入 params[k].xyz（单 vec4f 槽位容纳）
+                  const int = Math.max(0, Math.min(0xffffff, Math.round(val))) | 0;
+                  fdata[4 + k * 4 + 0] = ((int >> 16) & 0xff) / 255;
+                  fdata[4 + k * 4 + 1] = ((int >> 8) & 0xff) / 255;
+                  fdata[4 + k * 4 + 2] = (int & 0xff) / 255;
+                } else {
+                  fdata[4 + k * 4 + 0] = val;
+                }
+              });
+              const fbuf = device.createBuffer({ size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+              frameBufs.push(fbuf);
+              device.queue.writeBuffer(fbuf, 0, fdata);
+              const fbg = device.createBindGroup({
+                layout: fpipeline.getBindGroupLayout(0),
+                entries: [
+                  { binding: 0, resource: { buffer: fbuf } },
+                  { binding: 1, resource: inputView },
+                  { binding: 2, resource: sampler },
+                ],
+              });
+              const fpass = cmd.beginRenderPass({
+                colorAttachments: [{
+                  view: offTex.createView(),
+                  clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                  loadOp: 'clear',
+                  storeOp: 'store',
+                }],
+              });
+              fpass.setPipeline(fpipeline);
+              fpass.setBindGroup(0, fbg);
+              fpass.draw(4, 1, 0, 0);
+              fpass.end();
+              inputView = offTex.createView();
+            }
+            srcView = inputView;
+          }
 
           // 更新 uniform：transform + params
           const t = clip.transform || {};
@@ -254,7 +361,7 @@ export function useWebGPUPreview({
             layout: pipeline.getBindGroupLayout(0),
             entries: [
               { binding: 0, resource: { buffer: uniformBuf } },
-              { binding: 1, resource: texture.createView() },
+              { binding: 1, resource: srcView },
               { binding: 2, resource: sampler },
             ],
           });
@@ -275,6 +382,9 @@ export function useWebGPUPreview({
         });
 
         device.queue.submit([cmd.finish()]);
+        // 提交后销毁本帧离屏纹理 / 滤镜 uniform（源纹理已在循环内各自 destroy）
+        frameTextures.forEach((tx: any) => tx.destroy());
+        frameBufs.forEach((b: any) => b.destroy());
       } catch (e: any) {
         failed = true;
         if (rafRef.current) cancelAnimationFrame(rafRef.current);

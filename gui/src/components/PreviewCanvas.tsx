@@ -261,6 +261,28 @@ export default function PreviewCanvas() {
 
   const hasContent = activeVideoClips.length > 0 || activeAudioClips.length > 0;
 
+  // 插件清单（含预览用 shader），供 WebGPU 预览应用滤镜。仅 WebGPU 路径使用；
+  // HTML5 回退无法跑 WGSL，天然不显示插件滤镜（导出仍走 filter_spec 生效）。
+  const [pluginManifests, setPluginManifests] = useState<Record<string, any>>({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const api = (window as any).aicut;
+        if (!api || typeof api.listPlugins !== 'function') return;
+        const raw = api.listPlugins();
+        const list: any = raw instanceof Promise ? await raw : raw;
+        const arr: any[] = typeof list === 'string' ? JSON.parse(list) : (Array.isArray(list) ? list : []);
+        const map: Record<string, any> = {};
+        for (const m of arr) if (m && m.id) map[m.id] = m;
+        if (!cancelled) setPluginManifests(map);
+      } catch {
+        /* 预览无滤镜而已，忽略 */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // WebGPU 渲染 hook
   const { ready: gpuReady, error: gpuError } = useWebGPUPreview({
     canvasRef,
@@ -270,6 +292,7 @@ export default function PreviewCanvas() {
     canvasHeight: project.canvas.height,
     clips: activeVideoClips,
     enabled: webgpuAvailable && activeVideoClips.length > 0,
+    pluginManifests,
   });
 
   // 是否有手动驱动片段正在后台预解码（用于"解码中"提示）
