@@ -105,8 +105,13 @@ export function useWebGPUPreview({
   const clipsRef = useRef<ActiveVideoClip[]>(clips);
   // 插件滤镜：清单（按 id 索引，含内联 WGSL shader）、管线缓存、编译失败集合
   const pluginManifestsRef = useRef<Record<string, any>>({});
-  const filterPipelinesRef = useRef<Map<string, GPURenderPipeline>>(new Map());
+  // 缓存 {pipeline, device}：必须记录所属 device。device 重建后旧管线属旧 device，
+  // 若直接复用会触发 "Invalid BindGroupLayout is associated with [Device] ... and cannot be used with [Device]"（跨 device 错误 → 整会话退回 HTML5）。
+  const filterPipelinesRef = useRef<Map<string, { pipeline: GPURenderPipeline; device: any }>>(new Map());
   const filterFailedRef = useRef<Set<string>>(new Set());
+  // 正在异步验证（createRenderPipeline 的 shader 编译/验证可能异步完成）的 kind 集合：
+  // 验证完成前本帧先跳过该滤镜（降级为原图），避免用到一个尚未确定有效的管线（1 帧窗口）。
+  const filterValidatingRef = useRef<Set<string>>(new Set());
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -121,22 +126,42 @@ export function useWebGPUPreview({
   const getFilterPipeline = (device: any, kind: string, shaderSrc: string): GPURenderPipeline | null => {
     if (filterFailedRef.current.has(kind)) return null;
     const cached = filterPipelinesRef.current.get(kind);
-    if (cached) return cached;
+    if (cached) {
+      // device 重建后旧管线属旧 device → 丢弃并重建，杜绝跨 device 的 Invalid BindGroupLayout
+      if (cached.device === device) return cached.pipeline;
+      filterPipelinesRef.current.delete(kind);
+    }
+    // 正在异步验证该滤镜管线时，本帧先跳过（降级为原图），避免用未确定有效的管线（1 帧窗口）
+    if (filterValidatingRef.current.has(kind)) return null;
+    // 用 error scope 隔离插件 shader 的验证错误：失败时仅跳过该滤镜（降级为原图），
+    // 不污染全局 uncapturederror，避免单坏插件拖垮整个 WebGPU 会话。
+    device.pushErrorScope('validation');
+    let module: any, p: any;
     try {
-      const module = device.createShaderModule({ code: shaderSrc });
-      const p = device.createRenderPipeline({
+      module = device.createShaderModule({ code: shaderSrc });
+      p = device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs_main' },
         fragment: { module, entryPoint: 'fs_main', targets: [{ format: 'rgba8unorm' }] },
         primitive: { topology: 'triangle-strip' },
       });
-      filterPipelinesRef.current.set(kind, p);
-      return p;
     } catch (e: any) {
-      console.error('[WebGPU] 插件 shader 编译失败，预览跳过该滤镜:', kind, e?.message || e);
+      device.popErrorScope();
+      console.error('[WebGPU] 插件 shader 创建失败，预览跳过该滤镜:', kind, e?.message || e);
       filterFailedRef.current.add(kind);
       return null;
     }
+    filterPipelinesRef.current.set(kind, { pipeline: p, device });
+    filterValidatingRef.current.add(kind);
+    device.popErrorScope().then((err: any) => {
+      filterValidatingRef.current.delete(kind);
+      if (err) {
+        console.error('[WebGPU] 插件 shader 验证失败，预览跳过该滤镜:', kind, err?.message || err);
+        filterFailedRef.current.add(kind);
+        filterPipelinesRef.current.delete(kind);
+      }
+    });
+    return p;
   };
 
   // ── 初始化设备 + 管线 + canvas 配置 ──
@@ -154,9 +179,10 @@ export function useWebGPUPreview({
         deviceRef.current = device;
 
         // 捕获 WebGPU 验证错误（validation error 不抛 JS 异常，需监听 uncapturederror）
+        // 注意：此处仅记录，不在此直接回退。单帧验证错误由渲染循环的 error scope 捕获并决定是否回退，
+        // 避免偶发/良性 uncaptured error 误杀整个 WebGPU 会话（会导致"第一次能播、后来整段退回 HTML5"）。
         device.addEventListener('uncapturederror', (e: any) => {
-          console.error('[WebGPU] uncaptured error:', e.error.message);
-          setError(e.error.message || 'WebGPU 验证错误');
+          console.error('[WebGPU] uncaptured error:', e.error?.message || e.error);
         });
 
         const canvas = canvasRef.current;
@@ -205,6 +231,10 @@ export function useWebGPUPreview({
       uniformBufsRef.current = [];
       samplerRef.current = null;
       pipelineRef.current = null;
+      // device 即将销毁：清空滤镜管线缓存（它们隶属于本 device，不能留给重建后的新 device，否则跨 device 报错）
+      filterPipelinesRef.current.clear();
+      filterFailedRef.current.clear();
+      filterValidatingRef.current.clear();
       deviceRef.current?.destroy();
       deviceRef.current = null;
       setReady(false);
@@ -219,37 +249,44 @@ export function useWebGPUPreview({
     const render = () => {
       if (failed) return;
       rafRef.current = requestAnimationFrame(render);
+      const device = deviceRef.current;
+      const pipeline = pipelineRef.current;
+      const canvas = canvasRef.current;
+      const sampler = samplerRef.current;
+      if (!device || !pipeline || !canvas || !sampler) return;
+
+      const activeClips = clipsRef.current;
+      if (activeClips.length === 0) return;
+
+      // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
+      // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
+      // 否则回退采视频元素（现有 seek 路径）。
+      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number }[] = [];
+      for (const { clip } of activeClips) {
+        const video = videoRefs.current.get(clip.id);
+        if (!video || video.readyState < 2) continue;
+        const bmp = bitmapSources?.current.get(clip.id) || null;
+        const source: HTMLVideoElement | ImageBitmap = bmp || video;
+        const vw = bmp ? bmp.width : (video.videoWidth || canvasWidth);
+        const vh = bmp ? bmp.height : (video.videoHeight || canvasHeight);
+        items.push({ source, clip, vw, vh });
+      }
+      if (items.length === 0) return;
+
+      // 用 error scope 捕获本帧所有 WebGPU 验证错误，精准拿到报错文本并决定是否回退，
+      // 避免依赖全局 uncapturederror（可能含偶发良性错误而误杀整个会话）
+      device.pushErrorScope('validation');
       try {
-        const device = deviceRef.current;
-        const pipeline = pipelineRef.current;
-        const canvas = canvasRef.current;
-        const sampler = samplerRef.current;
-        if (!device || !pipeline || !canvas || !sampler) return;
-
-        const activeClips = clipsRef.current;
-        if (activeClips.length === 0) return;
-
-        // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
-        // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
-        // 否则回退采视频元素（现有 seek 路径）。
-        const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number }[] = [];
-        for (const { clip } of activeClips) {
-          const video = videoRefs.current.get(clip.id);
-          if (!video || video.readyState < 2) continue;
-          const bmp = bitmapSources?.current.get(clip.id) || null;
-          const source: HTMLVideoElement | ImageBitmap = bmp || video;
-          const vw = bmp ? bmp.width : (video.videoWidth || canvasWidth);
-          const vh = bmp ? bmp.height : (video.videoHeight || canvasHeight);
-          items.push({ source, clip, vw, vh });
-        }
-        if (items.length === 0) return;
-
         const canvasAspect = canvasWidth / canvasHeight;
         const ctx = canvas.getContext('webgpu')!;
         const cmd = device.createCommandEncoder();
         const view = ctx.getCurrentTexture().createView();
 
-        // 每帧创建的离屏纹理 / 滤镜 uniform，提交后统一销毁（源纹理已在循环内各自 destroy）
+        // 每帧创建的 GPU 资源（源纹理 / 离屏纹理 / 滤镜 uniform）。
+        // 关键：这些纹理仍被本帧命令引用，submit 是异步的，GPU 还没读完时不能立刻 destroy，
+        // 否则报 "Destroyed texture while calling [Queue].Submit" → 整会话退回 HTML5。
+        // 因此统一收集，待 queue.onSubmittedWorkDone()（本帧真正跑完）后再销毁。
+        const sourceTextures: any[] = [];
         const frameTextures: any[] = [];
         const frameBufs: any[] = [];
 
@@ -378,20 +415,38 @@ export function useWebGPUPreview({
           pass.setBindGroup(0, bindGroup);
           pass.draw(4, 1, 0, 0);
           pass.end();
-          texture.destroy();
+          // 注意：源纹理仍被本帧命令引用，不能直接 destroy！收集起来，待 submit 跑完后统一销毁（见下方 onSubmittedWorkDone）。
+          sourceTextures.push(texture);
         });
 
         device.queue.submit([cmd.finish()]);
-        // 提交后销毁本帧离屏纹理 / 滤镜 uniform（源纹理已在循环内各自 destroy）
-        frameTextures.forEach((tx: any) => tx.destroy());
-        frameBufs.forEach((b: any) => b.destroy());
+        // 关键修复：submit 是异步的，GPU 仍在读取这些纹理/uniform。必须等本帧命令真正跑完
+        // （onSubmittedWorkDone）后再销毁，否则报 "Destroyed texture while calling [Queue].Submit"
+        // 并导致整会话永久退回 HTML5。原代码在 submit 之后立刻 destroy 正是此 bug 根因。
+        const toDestroyTex = [...sourceTextures, ...frameTextures];
+        const toDestroyBuf = frameBufs;
+        device.queue.onSubmittedWorkDone().then(() => {
+          toDestroyTex.forEach((tx: any) => { try { tx.destroy(); } catch (_) {} });
+          toDestroyBuf.forEach((b: any) => { try { b.destroy(); } catch (_) {} });
+        });
       } catch (e: any) {
+        device.popErrorScope().catch(() => {});
         failed = true;
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
         setError(e.message || String(e));
         console.error('[WebGPU] 渲染失败，将回退到 HTML5 video:', e);
+        return;
       }
+      device.popErrorScope().then((err: any) => {
+        if (err) {
+          failed = true;
+          if (rafRef.current) cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+          setError(err.message || 'WebGPU 验证错误');
+          console.error('[WebGPU] 渲染验证失败，将回退到 HTML5 video:', err);
+        }
+      });
     };
 
     rafRef.current = requestAnimationFrame(render);

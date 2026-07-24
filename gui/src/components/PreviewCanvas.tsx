@@ -598,9 +598,24 @@ export default function PreviewCanvas() {
             border: `1px solid ${engineColor}`,
             fontFamily: 'monospace', whiteSpace: 'nowrap',
             pointerEvents: 'none', zIndex: 10,
-          }}>
+          }}
+          title={gpuError ? `WebGPU 渲染失败已退回 HTML5：${gpuError}` : undefined}
+          >
             {engineLabel}
             {hasSolo && <span style={{ color: '#ff9800', marginLeft: 6 }}>🎤 SOLO</span>}
+          </div>
+        )}
+
+        {/* WebGPU 失败原因（DevTools 默认禁用，直接显示在画面上便于排查） */}
+        {gpuError && (
+          <div style={{
+            position: 'absolute', left: 8, bottom: 56, right: 8,
+            fontSize: 11, color: '#ff6b6b', background: 'rgba(0,0,0,0.82)',
+            border: '1px solid #ff6b6b', borderRadius: 4, padding: '4px 8px',
+            fontFamily: 'monospace', whiteSpace: 'pre-wrap', maxHeight: 96, overflow: 'auto',
+            pointerEvents: 'none', zIndex: 20,
+          }}>
+            WebGPU 渲染失败 → 已退回 HTML5：{gpuError}
           </div>
         )}
 
@@ -648,7 +663,9 @@ export default function PreviewCanvas() {
           background: engineColor === '#4caf50' ? 'rgba(76,175,80,0.15)' : 'rgba(255,152,0,0.15)',
           border: `1px solid ${engineColor}40`,
           fontFamily: 'monospace', whiteSpace: 'nowrap',
-        }}>
+        }}
+        title={gpuError ? `WebGPU 渲染失败已退回 HTML5：${gpuError}` : undefined}
+        >
           {engineLabel}
         </div>
       </div>
