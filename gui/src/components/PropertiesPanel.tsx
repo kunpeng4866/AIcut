@@ -2,7 +2,7 @@
 import { useState, useEffect, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
-import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
+import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 
 type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins';
@@ -645,12 +645,33 @@ const TRANSITION_TYPES: { value: TransitionType; label: string }[] = [
   { value: 'fade', label: '淡入淡出' },
   { value: 'dissolve', label: '交叉溶解' },
   { value: 'slide', label: '滑动' },
+  { value: 'wipe', label: '擦除' },
+];
+const TRANSITION_PRESETS: { key: string; label: string; type: TransitionType; duration: number; direction?: WipeDirection }[] = [
+  { key: 'crossfade', label: '交叉淡化', type: 'fade', duration: 0.5 },
+  { key: 'dissolve', label: '交叉溶解', type: 'dissolve', duration: 0.5 },
+  { key: 'slideR', label: '右滑入', type: 'slide', duration: 0.6 },
+  { key: 'slideL', label: '左滑入', type: 'slide', duration: 0.6, direction: 'left' },
+  { key: 'wipeR', label: '右擦除', type: 'wipe', duration: 0.6, direction: 'right' },
+  { key: 'wipeL', label: '左擦除', type: 'wipe', duration: 0.6, direction: 'left' },
+  { key: 'wipeU', label: '上擦除', type: 'wipe', duration: 0.6, direction: 'up' },
+  { key: 'wipeD', label: '下擦除', type: 'wipe', duration: 0.6, direction: 'down' },
 ];
 function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
+  const project = useProjectStore((s) => s.project);
   const tr: TransitionConfig = clip.transition || { transitionType: 'none', duration: 0.5 };
   const setType = (t: TransitionType) => updateClip(trackId, clip.id, { transition: { ...tr, transitionType: t } });
   const setDur = (d: number) => updateClip(trackId, clip.id, { transition: { ...tr, duration: d } });
+  const setDir = (d: WipeDirection) => updateClip(trackId, clip.id, { transition: { ...tr, direction: d } });
+  const applyToAll = () => {
+    for (const track of project.tracks.filter((t) => t.type === 'video')) {
+      for (const c of track.clips) {
+        const hasNext = track.clips.some((n) => n.id !== c.id && n.timelineIn >= c.timelineOut - 1e-4);
+        if (hasNext) updateClip(track.id, c.id, { transition: { ...tr } });
+      }
+    }
+  };
   return (
     <div>
       <div style={S.row}>
@@ -660,6 +681,31 @@ function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string })
         </select>
       </div>
       <ParamSlider label="时长" value={tr.duration ?? 0.5} min={0.1} max={3} step={0.1} unit="s" editable onChange={setDur} />
+      {tr.transitionType === 'wipe' && (
+        <div style={S.row}>
+          <span style={S.label}>方向</span>
+          <select style={S.input} value={tr.direction ?? 'right'} onChange={(e) => setDir(e.target.value as WipeDirection)}>
+            <option value="right">向右</option>
+            <option value="left">向左</option>
+            <option value="up">向上</option>
+            <option value="down">向下</option>
+          </select>
+        </div>
+      )}
+      <div style={{ margin: '10px 0' }}>
+        <div style={{ fontSize: 11, color: '#aaa', marginBottom: 6 }}>常用预设（点击应用到当前片段）</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {TRANSITION_PRESETS.map((p) => (
+            <button key={p.key} style={{ ...S.btn, fontSize: 11, padding: '4px 8px' }}
+              onClick={() => updateClip(trackId, clip.id, { transition: { transitionType: p.type, duration: p.duration, direction: p.direction } })}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <button style={{ ...S.btn, fontSize: 11, marginTop: 6 }} onClick={applyToAll}>
+        应用到全部相邻片段
+      </button>
       <div style={{ color: '#aaa', fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
         转场作用于本片段结尾与同轨下一片段之间（导出时合成交叉淡化 / 滑动）。
       </div>

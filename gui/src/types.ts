@@ -51,10 +51,12 @@ export interface ClipConfig {
   transition?: TransitionConfig;
 }
 // 转场配置（与后端 Transition 结构对应）
-export type TransitionType = 'none' | 'fade' | 'dissolve' | 'slide';
+export type TransitionType = 'none' | 'fade' | 'dissolve' | 'slide' | 'wipe';
+export type WipeDirection = 'left' | 'right' | 'up' | 'down';
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'
   duration?: number;               // 秒，默认 0.5
+  direction?: WipeDirection;       // wipe 方向，默认 'right'
 }
 export interface TrackConfig {
   id: string; type: string; order?: number; clips: ClipConfig[];

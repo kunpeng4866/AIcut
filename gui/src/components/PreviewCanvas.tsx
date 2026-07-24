@@ -9,7 +9,7 @@ import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
-import { computeOutClipOpacity, getIncomingTransitionLayer, type TransitionPreviewLayer } from '../utils/transitionUtils';
+import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, type TransitionPreviewLayer } from '../utils/transitionUtils';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -221,6 +221,9 @@ export default function PreviewCanvas() {
     clip: layer.clip,
     opacity: layer.opacity,
     offsetX: layer.offsetX,
+    clipPath: layer.clipPath,
+    maskRect: layer.maskRect,
+    direction: layer.direction,
   }));
 
   // 查找 currentTime 下所有 audio 轨道的活跃 clip
@@ -676,7 +679,9 @@ export default function PreviewCanvas() {
               {/* HTML5 回退：渲染所有活跃视频轨道，按层级叠加 */}
               {/* activeVideoClips: index 0 = 底层(主轨)，最后一个 = 顶层 */}
               {/* zIndex 从 0 开始递增，确保顶层覆盖底层 */}
-              {activeVideoClips.map(({ clip, asset }, idx) => (
+              {activeVideoClips.map(({ clip, asset }, idx) => {
+                const outTr = getOutClipTransition(clip, currentTime);
+                return (
                 <video
                   key={clip.id}
                   ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
@@ -687,13 +692,14 @@ export default function PreviewCanvas() {
                     zIndex: idx,  // 底层 idx=0，顶层 idx=最大
                     top: 0, left: 0,
                     // 转场：出片段在转场窗内淡出（与 transform.opacity 相乘）
-                    opacity: (clip.transform?.opacity ?? 1) * computeOutClipOpacity(clip, currentTime),
+                    opacity: (clip.transform?.opacity ?? 1) * outTr.opacity,
+                    ...(outTr.clipPath ? { clipPath: outTr.clipPath } : {}),
                     filter: computeCssFilter(clip),  // HTML5 回退：CSS filter 实时预览插件（WebGPU 走 WGSL）
                   }}
                   onLoadedMetadata={onLoadedMetadataFor(clip)}
                   onClick={handleTogglePlay}
                 />
-              ))}
+              );}) }
               {/* 转场入片段层：转场窗内叠在出片段上方（zIndex 高于出片段） */}
               {activeTransitionLayers.map(({ layer, asset }) => {
                 const stageW = stageRef.current?.clientWidth || project.canvas?.width || 1920;
@@ -706,6 +712,10 @@ export default function PreviewCanvas() {
                 if (layer.offsetX !== 0) {
                   // slide：从右侧外（offsetX*stageWidth）滑入归位（0）
                   tStyle.transform = `translateX(${layer.offsetX * stageW}px)`;
+                }
+                if (layer.clipPath) {
+                  // wipe：入片段按 CSS clip-path 揭示（出片段已裁掉对应区域）
+                  tStyle.clipPath = layer.clipPath;
                 }
                 return (
                   <video

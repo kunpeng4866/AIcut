@@ -233,16 +233,20 @@ pub struct Clip {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transition {
-    /// 类型：none | fade | dissolve | slide
+    /// 类型：none | fade | dissolve | slide | wipe
     #[serde(default = "default_transition_type")]
     pub transition_type: String,
     /// 持续时间（秒）
     #[serde(default = "default_transition_duration")]
     pub duration: f64,
+    /// wipe 方向：left | right | up | down，默认 right
+    #[serde(default = "default_transition_direction")]
+    pub direction: String,
 }
 
 fn default_transition_type() -> String { "none".into() }
 fn default_transition_duration() -> f64 { 0.5 }
+fn default_transition_direction() -> String { "right".into() }
 
 // ---- 默认辅助函数 ----
 fn default_version() -> String { "1.0".into() }

@@ -18,6 +18,8 @@ pub struct CompositeLayer {
     pub frame: VideoFrame,
     /// 该层的变换（位置、缩放、旋转、不透明度）
     pub transform: Transform,
+    /// 转场 wipe 遮罩：画布归一化矩形 (x0,y0,x1,y1)，y-down；仅保留矩形内像素。None = 不裁剪。
+    pub reveal_mask: Option<(f32, f32, f32, f32)>,
 }
 
 // ════════════════════ Compositor ════════════════════
@@ -109,6 +111,7 @@ impl Compositor {
             dst_x,
             dst_y,
             opacity,
+            layer.reveal_mask,
         );
 
         // TODO: 旋转 — 需要 3-pass shear 或矩阵插值，当前预留接口
@@ -167,6 +170,7 @@ impl Compositor {
         dst_x: i64,
         dst_y: i64,
         opacity: f64,
+        mask: Option<(f32, f32, f32, f32)>,
     ) {
         let dst_w = dst_w as i64;
         let dst_h = dst_h as i64;
@@ -187,6 +191,15 @@ impl Compositor {
             let sy = dy - dst_y; // 源帧中的 y 坐标
             for dx in x_start..x_end {
                 let sx = dx - dst_x; // 源帧中的 x 坐标
+
+                // wipe 遮罩：仅保留画布归一化矩形内的像素
+                if let Some((mx0, my0, mx1, my1)) = mask {
+                    let nx = dx as f32 / dst_w as f32;
+                    let ny = dy as f32 / dst_h as f32;
+                    if nx < mx0 || nx > mx1 || ny < my0 || ny > my1 {
+                        continue;
+                    }
+                }
 
                 let src_idx = ((sy * src_w + sx) as usize) * 4;
                 let dst_idx = ((dy * dst_w + dx) as usize) * 4;
@@ -297,7 +310,7 @@ mod tests {
         let src = vec![255, 0, 0, 255, 0, 255, 0, 255,
                        0, 0, 255, 255, 255, 255, 0, 255]; // 2x2 源
 
-        Compositor::over_blit(&mut canvas, 2, 2, &src, 2, 2, 0, 0, 1.0);
+        Compositor::over_blit(&mut canvas, 2, 2, &src, 2, 2, 0, 0, 1.0, None);
 
         // 源不透明 → 画布应完全被覆盖
         assert_eq!(&canvas[0..4], &[255, 0, 0, 255]);
@@ -312,7 +325,7 @@ mod tests {
         let mut canvas = vec![0u8; 4 * 4 * 4];
         let src = [255, 0, 0, 255].repeat(2 * 2); // 红色 2x2
 
-        Compositor::over_blit(&mut canvas, 4, 4, &src, 2, 2, 1, 1, 1.0);
+        Compositor::over_blit(&mut canvas, 4, 4, &src, 2, 2, 1, 1, 1.0, None);
 
         // (0,0) 应透明
         assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
@@ -333,7 +346,7 @@ mod tests {
         let mut canvas = vec![0u8; 4 * 4 * 4];
         let src = [255, 0, 0, 255].repeat(4 * 4); // 4x4 红色
 
-        Compositor::over_blit(&mut canvas, 4, 4, &src, 4, 4, -2, -2, 1.0);
+        Compositor::over_blit(&mut canvas, 4, 4, &src, 4, 4, -2, -2, 1.0, None);
 
         // 只有右下 2x2 区域被覆盖（坐标 0..2）
         let idx = (1 * 4 + 1) * 4;
@@ -351,7 +364,7 @@ mod tests {
         let src = [255, 0, 0, 255].repeat(2 * 2);
 
         // 源完全在画布外
-        Compositor::over_blit(&mut canvas, 4, 4, &src, 2, 2, 10, 10, 1.0);
+        Compositor::over_blit(&mut canvas, 4, 4, &src, 2, 2, 10, 10, 1.0, None);
 
         // 画布应不变
         for chunk in canvas.chunks_exact(4) {
@@ -364,7 +377,7 @@ mod tests {
         let mut canvas = [0, 0, 0, 255].repeat(4 * 4); // 黑色不透明画布
         let src = [255, 255, 255, 255].repeat(2 * 2); // 白色不透明源
 
-        Compositor::over_blit(&mut canvas, 4, 4, &src, 2, 2, 1, 1, 0.5);
+        Compositor::over_blit(&mut canvas, 4, 4, &src, 2, 2, 1, 1, 0.5, None);
 
         // 50% 白色 over 黑色 → 灰色 (128, 128, 128)
         let idx = (1 * 4 + 1) * 4;

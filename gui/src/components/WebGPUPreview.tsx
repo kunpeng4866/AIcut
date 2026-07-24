@@ -3,7 +3,7 @@
 // 负责：设备初始化、WGSL 渲染管线、rAF 渲染循环（多视频帧上传→多 pass Over 合成→渲染）、资源清理
 import { useEffect, useRef, useState } from 'react';
 import type { ClipConfig, AssetConfig } from '../types';
-import { computeOutClipOpacity } from '../utils/transitionUtils';
+import { computeOutClipOpacity, getOutClipTransition } from '../utils/transitionUtils';
 
 // ── WGSL 着色器 ──
 // Uniform 32 字节：transform(vec4f) + params(vec4f)
@@ -13,6 +13,7 @@ const WGSL_SHADER = /* wgsl */ `
 struct Uniforms {
   transform: vec4f,
   params: vec4f,
+  mask: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var videoTexture: texture_2d<f32>;
@@ -65,6 +66,10 @@ struct VSOut {
 
 @fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
   let color = textureSample(videoTexture, videoSampler, in.uv);
+  let nx = in.uv.x;
+  let ny = 1.0 - in.uv.y; // 画布坐标 y-down
+  let m = u.mask;
+  if (nx < m.x || nx > m.z || ny < m.y || ny > m.w) { return vec4f(0.0, 0.0, 0.0, 0.0); }
   return vec4f(color.rgb, color.a * u.params.y);
 }
 `;
@@ -90,7 +95,7 @@ interface UseWebGPUPreviewOptions {
   /** 全局播放头时间（秒），用于 computeOutClipOpacity 计算转场淡出 */
   currentTime?: number;
   /** 转场入片段层：挂在"出片段"上，转场窗内作为附加合成层叠加在出片段之上 */
-  transitionIncoming?: Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number }>;
+  transitionIncoming?: Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: [number, number, number, number] | null; direction: string }>;
 }
 
 /**
@@ -123,7 +128,7 @@ export function useWebGPUPreview({
 
   // 最新播放头时间 / 转场入片段层：渲染循环每帧读取，避免重建渲染循环
   const currentTimeRef = useRef<number>(currentTime ?? 0);
-  const transitionIncomingRef = useRef<Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number }>>(transitionIncoming ?? []);
+  const transitionIncomingRef = useRef<Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: [number, number, number, number] | null; direction: string }>>(transitionIncoming ?? []);
 
   // 保存最新 clips 到 ref，避免每帧重建渲染循环
   useEffect(() => { clipsRef.current = clips; }, [clips]);
@@ -229,7 +234,7 @@ export function useWebGPUPreview({
 
         // 预分配 MAX_CLIPS 个 uniform buffer，避免每帧创建/销毁
         uniformBufsRef.current = Array.from({ length: MAX_CLIPS }, () =>
-          device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+          device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
         );
         samplerRef.current = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 
@@ -277,7 +282,7 @@ export function useWebGPUPreview({
       // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
       // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
       // 否则回退采视频元素（现有 seek 路径）。
-      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number; extraOpacity: number; offsetX: number }[] = [];
+      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number; extraOpacity: number; offsetX: number; maskRect: [number, number, number, number] | null }[] = [];
       for (const { clip } of activeClips) {
         const video = videoRefs.current.get(clip.id);
         if (!video || video.readyState < 2) continue;
@@ -286,8 +291,8 @@ export function useWebGPUPreview({
         const vw = bmp ? bmp.width : (video.videoWidth || canvasWidth);
         const vh = bmp ? bmp.height : (video.videoHeight || canvasHeight);
         // 出片段：转场窗内淡出（computeOutClipOpacity 窗外=1，窗内=1-progress）
-        const outOpacity = computeOutClipOpacity(clip, currentTimeRef.current);
-        items.push({ source, clip, vw, vh, extraOpacity: outOpacity, offsetX: 0 });
+        const outTr = getOutClipTransition(clip, currentTimeRef.current);
+        items.push({ source, clip, vw, vh, extraOpacity: outTr.opacity, offsetX: 0, maskRect: outTr.maskRect ?? null });
 
         // 转场入片段（同轨下一片段）：转场窗内叠在出片段之上，保持出→入顺序以保证层级正确
         const inc = transitionIncomingRef.current.find((t) => t.outClipId === clip.id);
@@ -298,7 +303,7 @@ export function useWebGPUPreview({
             const isource: HTMLVideoElement | ImageBitmap = ibmp || iv;
             const ivw = ibmp ? ibmp.width : (iv.videoWidth || canvasWidth);
             const ivh = ibmp ? ibmp.height : (iv.videoHeight || canvasHeight);
-            items.push({ source: isource, clip: inc.clip, vw: ivw, vh: ivh, extraOpacity: inc.opacity, offsetX: inc.offsetX });
+            items.push({ source: isource, clip: inc.clip, vw: ivw, vh: ivh, extraOpacity: inc.opacity, offsetX: inc.offsetX, maskRect: inc.maskRect ?? null });
           }
         }
       }
@@ -324,7 +329,7 @@ export function useWebGPUPreview({
         // 多 pass 渲染：从底到顶依次 Over 合成
         // Pass 0: clear 黑色背景；Pass 1-N: load 保留前一 pass 结果
         items.forEach((item, idx) => {
-          const { source, clip, vw, vh, extraOpacity, offsetX } = item;
+          const { source, clip, vw, vh, extraOpacity, offsetX, maskRect } = item;
 
           // 上传视频帧到临时纹理
           const texture = device.createTexture({
@@ -422,9 +427,11 @@ export function useWebGPUPreview({
           const videoAspect = vw / vh;
 
           const uniformBuf = uniformBufsRef.current[idx];
-          const data = new Float32Array(8);
+          const data = new Float32Array(12);
           data[0] = posX; data[1] = posY; data[2] = scaleX; data[3] = scaleY;
           data[4] = rotation; data[5] = opacity; data[6] = videoAspect; data[7] = canvasAspect;
+          const m = item.maskRect || [0, 0, 1, 1];
+          data[8] = m[0]; data[9] = m[1]; data[10] = m[2]; data[11] = m[3];
           device.queue.writeBuffer(uniformBuf, 0, data);
 
           const bindGroup = device.createBindGroup({

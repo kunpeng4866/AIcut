@@ -611,16 +611,26 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         // ── 转场检测 ──
         // 对处于转场区的 active clip，记录其淡出 opacity，并收集同轨下一 clip
         let mut fade_out: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
-        let mut extra_next: Vec<(&Clip, f64, f64)> = Vec::new();
+        let mut out_mask: std::collections::HashMap<&str, (f32, f32, f32, f32)> = std::collections::HashMap::new();
+        // (入片段, progress, duration, 类型, 方向)
+        let mut extra_next: Vec<(&Clip, f64, f64, String, String)> = Vec::new();
         for cr in &video_clips {
             if let Some(tr) = &cr.clip.transition {
                 if tr.transition_type != "none" && tr.duration > 0.0 {
                     let trans_start = cr.clip.timeline_out - tr.duration;
                     if t >= trans_start && t < cr.clip.timeline_out {
                         let progress = ((t - trans_start) / tr.duration).max(0.0).min(1.0);
-                        fade_out.insert(cr.clip.id.as_str(), 1.0 - progress);
+                        let tt = tr.transition_type.clone();
+                        let dir = tr.direction.clone();
+                        if tt == "wipe" {
+                            // wipe：出片段满不透明，仅按方向矩形裁剪（与 transitionUtils.wipeRects 一致）
+                            let (out_rect, _in_rect) = wipe_rects(&dir, progress);
+                            out_mask.insert(cr.clip.id.as_str(), out_rect);
+                        } else {
+                            fade_out.insert(cr.clip.id.as_str(), 1.0 - progress);
+                        }
                         if let Some(next) = self.find_next_clip(cr.track_id, cr.clip.timeline_out) {
-                            extra_next.push((next, progress, tr.duration));
+                            extra_next.push((next, progress, tr.duration, tt, dir));
                         }
                     }
                 }
@@ -637,7 +647,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
             PrefetchRequest { asset_path, source_time: src_t, width: w, height: h }
         }).collect();
-        for (next, progress, dur) in &extra_next {
+        for (next, progress, dur, _tt, _dir) in &extra_next {
             let src_t = next.src_range.start + *progress * *dur * next.speed;
             let (w, h) = self.clip_decode_size(next);
             let asset = self.project.asset_by_id(&next.asset_id);
@@ -657,20 +667,21 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
                 .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", clip.asset_id, e)))?;
             let mut tf = clip.transform.clone();
             if let Some(o) = fade_out.get(cr.clip.id.as_str()) { tf.opacity *= o; }
-            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &clip.asset_id), transform: tf });
+            let reveal = out_mask.get(cr.clip.id.as_str()).copied();
+            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &clip.asset_id), transform: tf, reveal_mask: reveal });
         }
-        // 额外层：转场后 clip（叠加在顶层，淡入/滑入）
-        for ((next, progress, _dur), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
+        // 额外层：转场后 clip（叠加在顶层，淡入/滑入/wipe 揭示）
+        for ((next, progress, _dur, tt, dir), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
             let frame = self.decoder_pool
                 .decode(&req.asset_path, req.source_time, req.width, req.height)
                 .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", next.asset_id, e)))?;
             let mut tf = next.transform.clone();
-            match next.transition.as_ref().map(|x| x.transition_type.as_str()) {
-                Some("slide") => { tf.x = 1.5 - *progress; } // 从右侧滑入（简化）
-                _ => {} // fade / dissolve 用 opacity 交叉淡化
-            }
-            tf.opacity *= *progress;
-            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &next.asset_id), transform: tf });
+            let reveal = match tt.as_str() {
+                "slide" => { tf.x = 1.5 - *progress; tf.opacity *= *progress; None } // 从右侧滑入（简化）
+                "wipe" => { tf.opacity *= 1.0; Some(wipe_rects(dir, *progress).1) } // 入片段矩形揭示
+                _ => { tf.opacity *= *progress; None } // fade / dissolve 用 opacity 交叉淡化
+            };
+            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &next.asset_id), transform: tf, reveal_mask: reveal });
         }
 
         // 4. 多轨道 Over 合成（输出画布尺寸的 RGBA 帧）
@@ -781,6 +792,18 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
 }
 
 // ════════════════════ 单元测试 ════════════════════
+
+/// wipe 遮罩矩形（归一化 x0,y0,x1,y1，y-down）：返回 (出片段矩形, 入片段矩形)
+/// 与 gui/src/utils/transitionUtils.ts::wipeRects 完全一致。
+fn wipe_rects(direction: &str, p: f64) -> ((f32, f32, f32, f32), (f32, f32, f32, f32)) {
+    let c = p.max(0.0).min(1.0) as f32;
+    match direction {
+        "left" => ((0.0, 0.0, 1.0 - c, 1.0), (1.0 - c, 0.0, 1.0, 1.0)),
+        "up" => ((0.0, 0.0, 1.0, 1.0 - c), (0.0, 1.0 - c, 1.0, 1.0)),
+        "down" => ((0.0, c, 1.0, 1.0), (0.0, 0.0, 1.0, c)),
+        _ => ((c, 0.0, 1.0, 1.0), (0.0, 0.0, c, 1.0)), // right
+    }
+}
 
 #[cfg(test)]
 mod tests {
