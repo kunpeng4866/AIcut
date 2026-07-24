@@ -268,7 +268,22 @@ ipcMain.handle('plugin:list', async () => {
   try {
     return await callEngine('plugin', 'list');
   } catch {
-    return '[]';
+    // 引擎子进程不可用时的兜底：直接读取插件目录下的 manifest.json，
+    // 保证 GUI 仍可列出插件（仅导出/构建滤镜需要引擎）。
+    try {
+      const dir = process.env.AICUT_PLUGIN_DIR || join(__dirname, '../../plugins');
+      const entries = await readdir(dir);
+      const out: any[] = [];
+      for (const name of entries) {
+        try {
+          const m = JSON.parse(await readFile(join(dir, name, 'manifest.json'), 'utf8'));
+          out.push(m);
+        } catch { /* 单个 manifest 解析失败则跳过 */ }
+      }
+      return JSON.stringify(out);
+    } catch {
+      return '[]';
+    }
   }
 });
 

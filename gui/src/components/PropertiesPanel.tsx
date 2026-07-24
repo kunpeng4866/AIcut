@@ -214,14 +214,23 @@ function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     (async () => {
       try {
         const raw = await (window as any).aicut?.listPlugins();
         const list: PluginManifest[] = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        setPlugins(Array.isArray(list) ? list : []);
-      } catch { setPlugins([]); }
-      finally { setLoading(false); }
+        if (Array.isArray(list)) {
+          setPlugins(list);
+          if (list.length === 0) setError('未发现插件：请在仓库 plugins/ 目录放置 manifest.json（重启应用生效）');
+        } else {
+          setPlugins([]);
+          setError('插件清单格式异常');
+        }
+      } catch {
+        setPlugins([]);
+        setError('插件服务不可用，请重启应用（Electron 主进程需重新编译）');
+      } finally { setLoading(false); }
     })();
   }, []);
 
@@ -253,6 +262,7 @@ function PluginsTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
 
   return (
     <div>
+      {error && <div style={{ color: '#e94560', fontSize: 11, padding: '6px 0' }}>⚠ {error}</div>}
       <div style={{ position: 'relative', marginBottom: 8 }}>
         <button style={S.btn} onClick={() => setShowMenu(!showMenu)}>+ 添加插件</button>
         {showMenu && (
