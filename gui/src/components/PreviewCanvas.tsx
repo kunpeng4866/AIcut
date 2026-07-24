@@ -10,6 +10,7 @@ import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
 import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, type TransitionPreviewLayer } from '../utils/transitionUtils';
+import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -132,7 +133,7 @@ const theme = {
   root: { display: 'flex', flexDirection: 'column', height: '100%', background: '#000', fontFamily: 'system-ui' } as React.CSSProperties,
   stage: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative' } as React.CSSProperties,
   video: { maxWidth: '100%', maxHeight: '100%' } as React.CSSProperties,
-  canvas: { maxWidth: '100%', maxHeight: '100%', background: '#000' } as React.CSSProperties,
+  canvas: { width: '100%', height: '100%', display: 'block', background: '#000' } as React.CSSProperties,
   hiddenMedia: { display: 'none' } as React.CSSProperties,
   placeholder: { color: '#555', fontSize: 14, textAlign: 'center' } as React.CSSProperties,
   controls: { height: 48, background: '#1a1a2e', borderTop: '1px solid #0f3460', display: 'flex', alignItems: 'center', padding: '0 12px', gap: 10, flexShrink: 0 } as React.CSSProperties,
@@ -143,10 +144,15 @@ const theme = {
   progressHandle: { position: 'absolute', width: 12, height: 12, background: '#eee', borderRadius: '50%', top: -3, transform: 'translateX(-50%)' } as React.CSSProperties,
   volume: { display: 'flex', alignItems: 'center', gap: 4 } as React.CSSProperties,
   volumeSlider: { width: 60, accentColor: '#e94560', cursor: 'pointer' } as React.CSSProperties,
+  frame: { position: 'relative', flex: '0 0 auto', overflow: 'hidden', background: '#000', boxShadow: '0 0 0 1px #0f3460' } as React.CSSProperties,
+  frameVideo: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' } as React.CSSProperties,
+  aspectSelectWrap: { position: 'absolute', right: 10, bottom: 10, zIndex: 30 } as React.CSSProperties,
+  aspectSelect: { background: 'rgba(10,15,30,0.85)', color: '#eee', border: '1px solid #e94560', borderRadius: 6, padding: '5px 8px', fontSize: 12, cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.5)', maxWidth: 220 } as React.CSSProperties,
 };
 
 export default function PreviewCanvas() {
   const project = useProjectStore((s) => s.project);
+  const setCanvasSize = useProjectStore((s) => s.setCanvasSize);
   const { currentTime, isPlaying, togglePlay, setCurrentTime } = useUIStore();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -156,6 +162,9 @@ export default function PreviewCanvas() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainMapRef = useRef<Map<string, { el: HTMLMediaElement; src: MediaElementAudioSourceNode; gain: GainNode }>>(new Map());
   const stageRef = useRef<HTMLDivElement>(null);
+  // 画布框：把工程画布按 aspect ratio letterbox 到 stage 内，保证面板缩放时画幅/视频比例不变、所见即所得。
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [frameSize, setFrameSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [volume, setVolume] = useState(1);
 
   // 手动驱动片段（倒放/冻结/零速曲线）的预解码帧缓存：播放时按源时间直接取帧，绕开每帧 seek
@@ -423,6 +432,25 @@ export default function PreviewCanvas() {
   // 渲染引擎状态标签
   const engineLabel = !webgpuAvailable ? 'HTML5' : gpuError ? 'HTML5 (fallback)' : gpuReady ? 'WebGPU' : 'WebGPU…';
   const engineColor = useWebGPU && gpuReady ? '#4caf50' : '#ff9800';
+  const presetIdx = findPresetIndex(project.canvas.width, project.canvas.height);
+
+  // 预览画布框：根据 stage 实际像素 + 工程画布比例，计算 letterbox 后的框尺寸。
+  // 面板/时间轴缩放只改变 stage 尺寸 → ResizeObserver 触发重算，画布始终等比、不拉伸。
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const recompute = () => {
+      const sw = el.clientWidth, sh = el.clientHeight;
+      if (sw <= 0 || sh <= 0) return;
+      const cw = project.canvas.width || 1920, ch = project.canvas.height || 1080;
+      const scale = Math.min(sw / cw, sh / ch);
+      setFrameSize({ w: Math.max(1, Math.round(cw * scale)), h: Math.max(1, Math.round(ch * scale)) });
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [project.canvas.width, project.canvas.height]);
 
   // 工程总时长（所有片段的最大 timelineOut）
   const totalDuration = Math.max(0, ...project.tracks.flatMap((t) => t.clips.map((c) => c.timelineOut)));
@@ -768,7 +796,9 @@ export default function PreviewCanvas() {
     <div style={theme.root}>
       {/* 舞台：视频画面 */}
       <div style={theme.stage} ref={stageRef}>
-        {activeVideoClips.length > 0 ? (
+        {(activeVideoClips.length > 0 || activeTextOverlays.length > 0 || activeStickerOverlays.length > 0) ? (
+          <div style={{ ...theme.frame, width: frameSize.w || 1, height: frameSize.h || 1 }} ref={frameRef}>
+          {activeVideoClips.length > 0 ? (
           useWebGPU ? (
             <>
               {/* 隐藏 video：每个活跃 clip 一个，负责解码+音频 */}
@@ -807,10 +837,8 @@ export default function PreviewCanvas() {
                   ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                   src={pathToUrl(asset.path)}
                   style={{
-                    position: idx === 0 ? 'relative' : 'absolute',
-                    maxWidth: '100%', maxHeight: '100%',
+                    ...theme.frameVideo,
                     zIndex: idx,  // 底层 idx=0，顶层 idx=最大
-                    top: 0, left: 0,
                     // 转场：出片段在转场窗内淡出（与 transform.opacity 相乘）
                     opacity: (clip.transform?.opacity ?? 1) * outTr.opacity,
                     ...(outTr.clipPath ? { clipPath: outTr.clipPath } : {}),
@@ -822,13 +850,8 @@ export default function PreviewCanvas() {
               );}) }
               {/* 转场入片段层：转场窗内叠在出片段上方（zIndex 高于出片段） */}
               {activeTransitionLayers.map(({ layer, asset }) => {
-                const stageW = stageRef.current?.clientWidth || project.canvas?.width || 1920;
-                const tStyle: React.CSSProperties = {
-                  position: 'absolute', top: 0, left: 0,
-                  maxWidth: '100%', maxHeight: '100%',
-                  zIndex: layer.zIndex,
-                  opacity: layer.opacity,
-                };
+                const stageW = frameRef.current?.clientWidth || project.canvas.width || 1920;
+                const tStyle: React.CSSProperties = { ...theme.frameVideo, zIndex: layer.zIndex, opacity: layer.opacity };
                 if (layer.offsetX !== 0) {
                   // slide：从右侧外（offsetX*stageWidth）滑入归位（0）
                   tStyle.transform = `translateX(${layer.offsetX * stageW}px)`;
@@ -850,6 +873,26 @@ export default function PreviewCanvas() {
               })}
             </>
           )
+        ) : null}
+          {/* 文字/字幕叠加层 */}
+          {activeTextOverlays.map((item, idx) => (
+            <div
+              key={idx}
+              style={item.style}
+              title="单击选中 · 双击编辑文字"
+              onClick={() => useUIStore.getState().selectClip(item.trackId, item.clipId)}
+              onDoubleClick={() => {
+                useUIStore.getState().selectClip(item.trackId, item.clipId);
+                useUIStore.getState().setActiveRightPanel(item.kind === 'subtitle' ? 'subtitle' : 'text');
+              }}
+            >{item.text}</div>
+          ))}
+
+          {/* 贴纸图片叠加层（DOM <img>，跨 WebGPU/HTML5 通用） */}
+          {activeStickerOverlays.map((item, idx) => (
+            <img key={idx} src={item.src} style={item.style} alt="" />
+          ))}
+          </div>
         ) : activeAudioClips.length > 0 ? (
           // 仅有音频，无视频画面
           <div style={theme.placeholder}>
@@ -862,25 +905,6 @@ export default function PreviewCanvas() {
             <div>选择时间轴片段以预览</div>
           </div>
         )}
-
-        {/* 文字/字幕叠加层 */}
-        {activeTextOverlays.map((item, idx) => (
-          <div
-            key={idx}
-            style={item.style}
-            title="单击选中 · 双击编辑文字"
-            onClick={() => useUIStore.getState().selectClip(item.trackId, item.clipId)}
-            onDoubleClick={() => {
-              useUIStore.getState().selectClip(item.trackId, item.clipId);
-              useUIStore.getState().setActiveRightPanel(item.kind === 'subtitle' ? 'subtitle' : 'text');
-            }}
-          >{item.text}</div>
-        ))}
-
-        {/* 贴纸图片叠加层（DOM <img>，跨 WebGPU/HTML5 通用） */}
-        {activeStickerOverlays.map((item, idx) => (
-          <img key={idx} src={item.src} style={item.style} alt="" />
-        ))}
 
         {/* 隐藏 audio：每个活跃音频 clip 一个 */}
         {activeAudioClips.map(({ clip, asset }) => (
@@ -947,6 +971,25 @@ export default function PreviewCanvas() {
             ⟳ 解码中…
           </div>
         )}
+
+        {/* 画幅比例下拉（预览右下角） */}
+        <div style={theme.aspectSelectWrap}>
+          <select
+            value={presetIdx >= 0 ? String(presetIdx) : 'custom'}
+            onChange={(e) => {
+              if (e.target.value === 'custom') return;
+              const p = CANVAS_PRESETS[Number(e.target.value)];
+              setCanvasSize(p.width, p.height);
+            }}
+            title="画幅比例"
+            style={theme.aspectSelect}
+          >
+            {presetIdx < 0 && <option value="custom">自定义 {project.canvas.width}×{project.canvas.height}</option>}
+            {CANVAS_PRESETS.map((p, i) => (
+              <option key={i} value={String(i)}>{p.label}（{p.width}×{p.height}）</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* 播放控制栏 */}

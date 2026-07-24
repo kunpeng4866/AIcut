@@ -69,6 +69,8 @@ interface ProjectState {
   isDirty: boolean;
   filePath: string | null;
   setProject: (p: ProjectConfig) => void;
+  // 设置工程画布尺寸（即画幅比例）。离散动作（下拉选择），走 mutate 压一次快照即可。
+  setCanvasSize: (width: number, height: number) => void;
   newProject: () => void;
   loadProject: (path: string) => Promise<void>;
   saveProject: (path?: string) => Promise<void>;
@@ -146,6 +148,10 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       }
       set({ project: { ...p, tracks }, isDirty: false });
     },
+    setCanvasSize: (width, height) => mutate((p) => ({
+      ...p,
+      canvas: { ...p.canvas, width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) },
+    })),
     newProject: () => {
       useHistoryStore.getState().clear();
       set({
