@@ -9,7 +9,7 @@ import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
-import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipEnvelopeGain, type TransitionPreviewLayer } from '../utils/transitionUtils';
+import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, type TransitionPreviewLayer } from '../utils/transitionUtils';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -565,7 +565,7 @@ export default function PreviewCanvas() {
       if (!track) return;
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
-      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getClipEnvelopeGain(clip, currentTime) : 0;
+      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getClipFadeGain(clip, currentTime) : 0;
     });
     activeTransitionLayers.forEach(({ layer, outClip }) => {
       const v = videoRefs.current.get(layer.clip.id);
@@ -577,7 +577,7 @@ export default function PreviewCanvas() {
       // 视频转场入片段：音频按 equal-power 淡入包络
       const inEnv = getIncomingAudioTransitionLayer(track, outClip, currentTime)?.progress ?? 1;
       const env = inEnv > 1 ? 1 : audioCrossfadeEnv(inEnv < 0 ? 0 : inEnv).inEnv;
-      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (layer.clip.volume ?? 1) * env * getClipEnvelopeGain(layer.clip, currentTime) : 0;
+      v.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (layer.clip.volume ?? 1) * env * getClipFadeGain(layer.clip, currentTime) : 0;
     });
     activeAudioClips.forEach(({ clip, trackId }) => {
       const a = audioRefs.current.get(clip.id);
@@ -587,7 +587,7 @@ export default function PreviewCanvas() {
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
       // 出片段在转场窗内乘音频包络（cos 淡出），窗外=1；再乘音频包络线增益
-      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getOutClipAudioEnv(clip, currentTime) * getClipEnvelopeGain(clip, currentTime) : 0;
+      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * getOutClipAudioEnv(clip, currentTime) * getClipFadeGain(clip, currentTime) : 0;
     });
     // 转场窗内"入片段"音频（同轨下一片段，提前淡入）：equal-power 淡入包络；再乘音频包络线增益
     activeAudioTransitionIn.forEach(({ clip, trackId, progress }) => {
@@ -598,7 +598,7 @@ export default function PreviewCanvas() {
       const shouldHaveAudio = trackHasAudio(track);
       const { frozen } = clipSourceTime(currentTime, clip);
       const inEnv = audioCrossfadeEnv(progress).inEnv;
-      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * inEnv * getClipEnvelopeGain(clip, currentTime) : 0;
+      a.volume = shouldHaveAudio && !frozen ? volume * (track.volume ?? 1) * (clip.volume ?? 1) * inEnv * getClipFadeGain(clip, currentTime) : 0;
     });
   }, [volume, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn, project.tracks, hasSolo, currentTime]);
 

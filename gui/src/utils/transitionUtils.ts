@@ -173,30 +173,21 @@ export function getIncomingAudioTransitionLayer(
   return { inClip: next, progress };
 }
 
-// ── 音频包络线增益 ──
-// clip.audioEnvelope：关键帧 {time: 相对 clip 起点秒, gain: 0~2}，按 time 升序。
-// 相对时间 rt = currentTime - clip.timelineIn，对包络做分段线性插值得到当前增益。
-// 无包络（空/未定义）→ 返回 1.0（不影响，整段仍受 clip.volume 控制）。
-// 算法须与 src/pipeline/export.rs::envelope_gain_at 逐字节一致，保证预览=导出。
+// ── 音频淡入/淡出增益 ──
+// clip.audioFadeIn / clip.audioFadeOut：片段开头/结尾的淡入/淡出时长（秒），0 = 无。
+// 相对时间 rt = currentTime - clip.timelineIn：
+//   rt < fadeIn        → 线性 0→1（淡入）
+//   rt > dur - fadeOut → 线性 1→0（淡出）
+// 否则 1.0。增益夹 [0, 1]。须与 src/pipeline/export.rs::fade_gain_at 逐字节一致。
 
-export function getClipEnvelopeGain(clip: ClipConfig, currentTime: number): number {
-  const pts = clip.audioEnvelope;
-  if (!pts || pts.length === 0) return 1;
+export function getClipFadeGain(clip: ClipConfig, currentTime: number): number {
   const dur = clip.timelineOut - clip.timelineIn;
   if (dur <= 0) return 1;
   let rt = currentTime - clip.timelineIn;
   rt = Math.max(0, Math.min(dur, rt));
-  const sorted = [...pts].sort((a, b) => a.time - b.time);
-  if (rt <= sorted[0].time) return Math.max(0, Math.min(2, sorted[0].gain));
-  const last = sorted.length - 1;
-  if (rt >= sorted[last].time) return Math.max(0, Math.min(2, sorted[last].gain));
-  for (let i = 1; i < sorted.length; i++) {
-    if (rt <= sorted[i].time) {
-      const a = sorted[i - 1];
-      const b = sorted[i];
-      const f = Math.abs(b.time - a.time) < 1e-9 ? 0 : (rt - a.time) / (b.time - a.time);
-      return Math.max(0, Math.min(2, a.gain + f * (b.gain - a.gain)));
-    }
-  }
+  const fi = clip.audioFadeIn ?? 0;
+  const fo = clip.audioFadeOut ?? 0;
+  if (fi > 0 && rt < fi) return Math.max(0, Math.min(1, rt / fi));
+  if (fo > 0 && rt > dur - fo) return Math.max(0, Math.min(1, (dur - rt) / fo));
   return 1;
 }

@@ -11,9 +11,8 @@ import { useUIStore } from '../store/uiStore';
 
 import { useWaveform } from '../hooks/useWaveform';
 
-import type { ClipConfig, TrackConfig, AssetConfig, EnvelopePoint } from '../types';
+import type { ClipConfig, TrackConfig, AssetConfig } from '../types';
 
-import { getClipEnvelopeGain } from '../utils/transitionUtils';
 
 // Convert a filesystem path to an aicut-asset:// URL so it can be loaded by
 // PreviewCanvas.tsx and other components without extra plumbing.
@@ -202,141 +201,82 @@ function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
   );
 }
 
-// Audio envelope overlay: visualizes and edits an audio clip's gain envelope
-// (audioEnvelope) as a draggable polyline of keyframe points over a gain=1
-// baseline. Lives on top of the waveform but below the resize handles.
+// Audio fade in/out handles: two draggable points at the clip head (fade-in)
+// and tail (fade-out). Drag length = fade duration. The SVG is pointer-events:none
+// so the clip body stays draggable; only the handle circles capture pointer events
+// (robust against the earlier freeze where a full-area capture intercepted drags).
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
-function EnvelopeOverlay({ clip, track, zoom, width }: {
+function FadeHandles({ clip, track, zoom, width }: {
   clip: ClipConfig; track: TrackConfig; zoom: number; width: number;
 }) {
   if (track.type !== 'audio') return null;
   const H = TRACK_HEIGHT - 8;
+  const TOP = 5;
   const dur = clip.timelineOut - clip.timelineIn;
   if (dur <= 0) return null;
+  const fi = clip.audioFadeIn ?? 0;
+  const fo = clip.audioFadeOut ?? 0;
+  // gain 1 -> top (y=TOP), gain 0 -> bottom (y=H)
+  const yOf = (g: number) => TOP + (1 - g) * (H - TOP);
+  const xFi = (fi / dur) * width;          // fade-in handle x (head)
+  const xFo = ((dur - fo) / dur) * width;   // fade-out handle x (tail)
 
-  // Coordinate mapping helpers.
-  const gainToY = (g: number) => H * (1 - g / 2); // gain0->bottom, gain2->top, gain1->mid
-  const yToGain = (y: number) => clamp((1 - y / H) * 2, 0, 2);
-  const tToX = (t: number) => (t / dur) * width;
-  const xToT = (x: number) => clamp((x / width) * dur, 0, dur);
-
-  const pts = (clip.audioEnvelope || []).slice().sort((a, b) => a.time - b.time);
-
-  // Drag a single keyframe point (horizontal = time, vertical = gain).
-  const startPointDrag = (e: React.MouseEvent, index: number) => {
+  // Fade-in: drag right to increase fade-in duration.
+  const startFadeIn = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (track.locked) return;
-    const p = pts[index];
     const startX = e.clientX;
-    const startY = e.clientY;
-    const startTime = p.time;
-    const startGain = p.gain;
-    const isEnd = startTime < 1e-3 || Math.abs(startTime - dur) < 1e-3; // pinned at an end
+    const startFi = clip.audioFadeIn ?? 0;
     const onMove = (ev: MouseEvent) => {
-      const newTime = isEnd ? startTime : xToT(startTime + (ev.clientX - startX) / zoom);
-      const newGain = yToGain(gainToY(startGain) + (ev.clientY - startY));
-      const newPts = pts.slice();
-      newPts[index] = { time: newTime, gain: clamp(newGain, 0, 2) };
-      useProjectStore.getState().updateClip(track.id, clip.id, {
-        audioEnvelope: newPts.slice().sort((a, b) => a.time - b.time),
-      });
+      const next = clamp(startFi + (ev.clientX - startX) / zoom, 0, dur - fo);
+      useProjectStore.getState().updateClip(track.id, clip.id, { audioFadeIn: next });
     };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   };
 
-  // Drag the whole envelope vertically (all gains shift together).
-  const startLineDrag = (e: React.MouseEvent) => {
-    if (pts.length === 0) return; // 无包络：放行 clip 整体拖动
-    if (e.altKey) return;         // Alt+拖动：移动 clip，不动包络
+  // Fade-out: drag left to increase fade-out duration.
+  const startFadeOut = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (track.locked) return;
-    const startY = e.clientY;
-    // Initialize envelope if empty, using the clicked gain at that point.
-    let working: EnvelopePoint[];
-    let basePts: EnvelopePoint[];
-    if (pts.length === 0) {
-      const G0 = yToGain(e.nativeEvent.offsetY);
-      working = [{ time: 0, gain: G0 }, { time: dur, gain: G0 }];
-      basePts = working.slice();
-    } else {
-      working = pts.slice();
-      basePts = pts.slice();
-    }
+    const startX = e.clientX;
+    const startFo = clip.audioFadeOut ?? 0;
     const onMove = (ev: MouseEvent) => {
-      const dGain = -(ev.clientY - startY) / (H / 2);
-      const newPts = working.map((p, i) => ({ time: p.time, gain: clamp(basePts[i].gain + dGain, 0, 2) }));
-      useProjectStore.getState().updateClip(track.id, clip.id, {
-        audioEnvelope: newPts.slice().sort((a, b) => a.time - b.time),
-      });
+      const next = clamp(startFo - (ev.clientX - startX) / zoom, 0, dur - fi);
+      useProjectStore.getState().updateClip(track.id, clip.id, { audioFadeOut: next });
     };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-  };
-
-  // Double-click on empty area: insert a keyframe at the clicked time.
-  const onSvgDoubleClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (track.locked) return;
-    const time = xToT(e.nativeEvent.offsetX);
-    const base: EnvelopePoint[] =
-      pts.length === 0
-        ? [{ time: 0, gain: 1 }, { time: dur, gain: 1 }]
-        : pts.slice();
-    const gain = getClipEnvelopeGain(clip, clip.timelineIn + time);
-    const newPts = base.concat([{ time, gain: clamp(gain, 0, 2) }]).sort((a, b) => a.time - b.time);
-    useProjectStore.getState().updateClip(track.id, clip.id, { audioEnvelope: newPts });
-  };
-
-  // Double-click on a point: remove it (keep at least 2 points).
-  const onPointDoubleClick = (e: React.MouseEvent, index: number) => {
-    e.stopPropagation();
-    if (track.locked) return;
-    if (pts.length <= 2) return;
-    const newPts = pts.slice();
-    newPts.splice(index, 1);
-    useProjectStore.getState().updateClip(track.id, clip.id, { audioEnvelope: newPts });
   };
 
   return (
-    <svg
-      width={width}
-      height={H}
-      onMouseDown={startLineDrag}
-      onDoubleClick={onSvgDoubleClick}
-      style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'auto', overflow: 'visible' }}
-    >
+    <svg width={width} height={H}
+      style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', overflow: 'visible', zIndex: 4 }}>
       {/* gain=1 baseline */}
-      <line x1={0} y1={gainToY(1)} x2={width} y2={gainToY(1)} stroke="rgba(255,255,255,0.25)" strokeDasharray="4 4" pointerEvents="none" />
-      {/* envelope polyline */}
-      <polyline
-        points={pts.map(p => `${tToX(p.time)},${gainToY(p.gain)}`).join(' ')}
-        fill="none" stroke="#ffd166" strokeWidth={2} pointerEvents="none"
-      />
-      {/* keyframe points */}
-      {pts.map((p, i) => (
-        <circle
-          key={i}
-          cx={tToX(p.time)}
-          cy={gainToY(p.gain)}
-          r={4}
-          fill="#e94560"
-          stroke="#fff"
-          strokeWidth={1}
-          style={{ cursor: 'move', pointerEvents: 'auto' }}
-          onMouseDown={(e) => startPointDrag(e, i)}
-          onDoubleClick={(e) => onPointDoubleClick(e, i)}
-        />
-      ))}
+      <line x1={0} y1={yOf(1)} x2={width} y2={yOf(1)} stroke="rgba(255,255,255,0.22)" strokeDasharray="4 4" pointerEvents="none" />
+      {/* fade-in ramp (gain 0 -> 1) */}
+      {fi > 0 && (
+        <>
+          <polygon points={`0,${H} ${xFi},${yOf(1)} ${xFi},${H}`} fill="rgba(74,222,128,0.18)" pointerEvents="none" />
+          <line x1={0} y1={H} x2={xFi} y2={yOf(1)} stroke="#4ade80" strokeWidth={2} pointerEvents="none" />
+        </>
+      )}
+      {/* fade-out ramp (gain 1 -> 0) */}
+      {fo > 0 && (
+        <>
+          <polygon points={`${xFo},${yOf(1)} ${width},${yOf(1)} ${width},${H}`} fill="rgba(251,146,60,0.18)" pointerEvents="none" />
+          <line x1={xFo} y1={yOf(1)} x2={width} y2={H} stroke="#fb923c" strokeWidth={2} pointerEvents="none" />
+        </>
+      )}
+      {/* fade-in handle (green, always visible) */}
+      <circle cx={xFi} cy={yOf(1)} r={5} fill="#4ade80" stroke="#0b6" strokeWidth={1}
+        style={{ cursor: 'col-resize', pointerEvents: 'auto' }} onMouseDown={startFadeIn} />
+      {/* fade-out handle (orange, always visible) */}
+      <circle cx={xFo} cy={yOf(1)} r={5} fill="#fb923c" stroke="#a35" strokeWidth={1}
+        style={{ cursor: 'col-resize', pointerEvents: 'auto' }} onMouseDown={startFadeOut} />
     </svg>
   );
 }
@@ -464,7 +404,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
           )}
         </div>
       )}
-      <EnvelopeOverlay clip={clip} track={track} zoom={zoom} width={width} />
+      <FadeHandles clip={clip} track={track} zoom={zoom} width={width} />
       <span style={{ position: 'absolute', top: 2, left: 8, fontSize: 11, color: '#eee', pointerEvents: 'none' }}>
         {clip.assetId}
       </span>

@@ -38,8 +38,6 @@ export interface SubtitleContent {
 // ── 时间重映射（与后端 clip_source_time 一致） ──
 export interface FreezeConfig { start: number; sourceTime: number; duration: number; }
 export interface SpeedPointConfig { play: number; speed: number; }
-// 音频包络关键帧：time 相对 clip 起点（秒），gain 0~2（1 = 原始音量）
-export interface EnvelopePoint { time: number; gain: number; }
 export interface TimeRemapConfig { reverse?: boolean; freeze?: FreezeConfig | null; curve?: SpeedPointConfig[]; }
 
 export interface ClipConfig {
@@ -51,8 +49,9 @@ export interface ClipConfig {
   subtitle?: SubtitleContent;
   // 转场：本片段结尾与同轨下一片段之间的过渡（None = 无）
   transition?: TransitionConfig;
-  // 音频包络线：关键帧 {time: 相对 clip 起点秒, gain: 0~2}，按 time 升序；空 = 无包络（整段用 volume）
-  audioEnvelope?: EnvelopePoint[];
+  // 音频淡入/淡出（秒）：片段开头从静音渐起到满音量、结尾从满音量渐弱到静音；0 = 无
+  audioFadeIn?: number;
+  audioFadeOut?: number;
 }
 // 转场配置（与后端 Transition 结构对应）
 export type TransitionType = 'none' | 'fade' | 'dissolve' | 'slide' | 'wipe';

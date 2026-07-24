@@ -416,7 +416,7 @@ mod tests {
             speed_curve: Vec::new(),
             time_remap: TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
-            subtitle: None, transition: None, audio_envelope: vec![],
+            subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0,
         }
     }
 
@@ -441,7 +441,7 @@ mod tests {
             speed_curve: Vec::new(),
             time_remap: remap,
             text: None,
-            subtitle: None, transition: None, audio_envelope: vec![],
+            subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0,
         }
     }
 
