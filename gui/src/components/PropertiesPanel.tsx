@@ -32,22 +32,8 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'plugins', label: '插件' },
 ];
 
-// 滤镜预设
-const FILTER_PRESETS = [
-  { type: 'brightness_contrast', label: '亮度对比度', params: { brightness: 1, contrast: 1, saturation: 1 } },
-  { type: 'blur', label: '模糊', params: { blur_radius: 5 } },
-  { type: 'sharpen', label: '锐化', params: { amount: 0.5 } },
-  { type: 'vignette', label: '暗角', params: { angle: 20, distance: 0.5 } },
-  { type: 'hue', label: '色调', params: { hue: 0, saturation: 1 } },
-];
-
-// 特效预设
-const EFFECT_PRESETS = [
-  { type: 'flash', label: '闪光', params: { intensity: 0.5, speed: 1 } },
-  { type: 'glitch', label: '故障', params: { amount: 0.3, speed: 1 } },
-  { type: 'oldfilm', label: '老电影', params: { grain: 0.3, flicker: 0.5, sepia: 0.5 } },
-  { type: 'edge', label: '边缘检测', params: { threshold: 0.5 } },
-];
+// 滤镜/特效预设已改为从 plugins/ 目录的真实插件加载（见下方 ItemsTab），
+// 不再使用硬编码预设——那些 kind 在引擎注册表/插件清单中均无实现，添加后预览与导出都不生效。
 
 const EASINGS = ['线性', '缓入', '缓出', '缓入缓出'];
 const KF_PROPS = [
@@ -160,51 +146,89 @@ function TransformTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
   );
 }
 
-// 滤镜/特效标签页（共用）
+// 滤镜/特效标签页（共用）：从已加载插件中按 plugin_type 分流，添加到 clip.filters。
+// 预览（HTML5 css_filter / WebGPU shader）与导出（filter_spec）均读取 clip.filters，故统一写入此字段。
 function ItemsTab({ clip, trackId, kind }: { clip: ClipConfig; trackId: string; kind: 'filters' | 'effects' }) {
   const updateClip = useProjectStore((s) => s.updateClip);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const presets: any[] = kind === 'filters' ? FILTER_PRESETS : EFFECT_PRESETS;
-  const items = (clip[kind] as any[]) || [];
+  const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [showMenu, setShowMenu] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await (window as any).aicut?.listPlugins();
+        const list: PluginManifest[] = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (Array.isArray(list)) setPlugins(list);
+      } catch { /* 插件不可用则列表为空 */ }
+    })();
+  }, []);
+
+  const wantType = kind === 'filters' ? 'Filter' : 'Effect';
+  const presets = plugins.filter((p) => p.plugin_type === wantType);
+  // 仅展示由本类插件产生的 filters（依据 manifest.id 匹配 kind）
+  const filters: any[] = (clip.filters as any[]) || [];
+  const items = filters.filter((it) => presets.some((p) => p.id === it.kind));
+  const installedIds = new Set(items.map((it) => it.kind));
+  const available = presets.filter((p) => !installedIds.has(p.id));
+  const pluginByKind: Record<string, PluginManifest> = {};
+  for (const p of presets) pluginByKind[p.id] = p;
   const zh = kind === 'filters' ? '滤镜' : '特效';
-  const add = (preset: any) => {
-    updateClip(trackId, clip.id, { [kind]: [...items, { kind: preset.type, name: preset.label, enabled: true, params: { ...preset.params } }] } as Partial<ClipConfig>);
+
+  const add = (p: PluginManifest) => {
+    const params: Record<string, number> = {};
+    for (const pd of p.parameters) params[pd.key] = pd.default;
+    updateClip(trackId, clip.id, { filters: [...filters, { kind: p.id, name: p.name, enabled: true, params }] } as Partial<ClipConfig>);
     setShowMenu(false);
   };
-  const remove = (i: number) => updateClip(trackId, clip.id, { [kind]: items.filter((_, idx) => idx !== i) } as Partial<ClipConfig>);
-  const toggle = (i: number) => updateClip(trackId, clip.id, { [kind]: items.map((it, idx) => idx === i ? { ...it, enabled: !it.enabled } : it) } as Partial<ClipConfig>);
-  const setParam = (i: number, k: string, v: number) => updateClip(trackId, clip.id, { [kind]: items.map((it, idx) => idx === i ? { ...it, params: { ...it.params, [k]: v } } : it) } as Partial<ClipConfig>);
+  // 用 kind+name 精确匹配目标实例，避免重排导致的索引错位
+  const remove = (i: number) => {
+    const target = items[i];
+    updateClip(trackId, clip.id, { filters: filters.filter((it) => !(it.kind === target.kind && it.name === target.name)) } as Partial<ClipConfig>);
+  };
+  const toggle = (i: number) => {
+    const target = items[i];
+    updateClip(trackId, clip.id, { filters: filters.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, enabled: !it.enabled } : it)) } as Partial<ClipConfig>);
+  };
+  const setParam = (i: number, k: string, v: number) => {
+    const target = items[i];
+    updateClip(trackId, clip.id, { filters: filters.map((it) => (it.kind === target.kind && it.name === target.name ? { ...it, params: { ...it.params, [k]: v } } : it)) } as Partial<ClipConfig>);
+  };
+
   return (
     <div>
       <div style={{ position: 'relative', marginBottom: 8 }}>
         <button style={S.btn} onClick={() => setShowMenu(!showMenu)}>+ 添加{zh}</button>
         {showMenu && (
           <div style={{ position: 'absolute', top: '100%', left: 0, background: '#1a1a2e', border: '1px solid #0f3460', borderRadius: 4, zIndex: 10, minWidth: 120 }}>
-            {presets.map((p) => (
-              <div key={p.type} style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 11, color: '#eee' }}
+            {available.length === 0 && <div style={{ padding: '6px 10px', fontSize: 11, color: '#aaa' }}>暂无可用{zh}插件</div>}
+            {available.map((p) => (
+              <div key={p.id} style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 11, color: '#eee' }}
                 onMouseEnter={(e) => (e.currentTarget.style.background = '#0f3460')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                onClick={() => add(p)}>{p.label}</div>
+                onClick={() => add(p)}>{p.name}</div>
             ))}
           </div>
         )}
       </div>
       {items.length === 0 && <div style={{ color: '#aaa', fontSize: 11, textAlign: 'center', padding: 20 }}>暂无{zh}</div>}
-      {items.map((it, i) => (
-        <div key={i} style={S.item}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-            <span style={{ fontSize: 11, color: '#eee' }}>{it.name}</span>
-            <div style={{ display: 'flex', gap: 4 }}>
-              <ToggleBtn active={!!it.enabled} onClick={() => toggle(i)}>{it.enabled ? '开' : '关'}</ToggleBtn>
-              <button style={S.btn} onClick={() => remove(i)}>×</button>
+      {items.map((it, i) => {
+        const pm = pluginByKind[it.kind];
+        return (
+          <div key={i} style={S.item}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span style={{ fontSize: 11, color: '#eee' }}>{it.name}</span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <ToggleBtn active={!!it.enabled} onClick={() => toggle(i)}>{it.enabled ? '开' : '关'}</ToggleBtn>
+                <button style={S.btn} onClick={() => remove(i)}>×</button>
+              </div>
             </div>
+            {it.enabled && pm && pm.parameters.map((pd: any) => (
+              <ParamSlider key={pd.key} label={pd.label} value={Number(it.params?.[pd.key] ?? pd.default)}
+                min={pd.min} max={pd.max} step={pd.step || 0.01}
+                onChange={(nv) => setParam(i, pd.key, nv)} />
+            ))}
           </div>
-          {it.enabled && Object.entries(it.params || {}).map(([k, v]) => (
-            <ParamSlider key={k} label={k} value={Number(v)} min={0} max={k.includes('radius') || k === 'amount' || k === 'angle' ? 100 : 2} step={0.01} onChange={(nv) => setParam(i, k, nv)} />
-          ))}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -1,0 +1,42 @@
+{
+  "id": "filter.brightness_contrast",
+  "name": "亮度对比度",
+  "version": "1.0.0",
+  "author": "AIcut",
+  "description": "调整画面亮度、对比度与饱和度（基于 FFmpeg eq）",
+  "plugin_type": "Filter",
+  "min_app_version": "0.1.0",
+  "parameters": [
+    {
+      "key": "brightness",
+      "label": "亮度",
+      "param_type": "Slider",
+      "default": 0,
+      "min": -1,
+      "max": 1,
+      "step": 0.01
+    },
+    {
+      "key": "contrast",
+      "label": "对比度",
+      "param_type": "Slider",
+      "default": 1,
+      "min": 0,
+      "max": 3,
+      "step": 0.01
+    },
+    {
+      "key": "saturation",
+      "label": "饱和度",
+      "param_type": "Slider",
+      "default": 1,
+      "min": 0,
+      "max": 3,
+      "step": 0.01
+    }
+  ],
+  "filter_spec": "eq=brightness={brightness}:contrast={contrast}:saturation={saturation}",
+  "shader": "struct FilterUniforms {\n  resolution: vec2f,\n  opacity: f32,\n  time: f32,\n  params: array<vec4f, 16>,\n};\n@group(0) @binding(0) var<uniform> u: FilterUniforms;\n@group(0) @binding(1) var inputTex: texture_2d<f32>;\n@group(0) @binding(2) var inputSampler: sampler;\nstruct VSOut {\n  @builtin(position) position: vec4f,\n  @location(0) uv: vec2f,\n};\n@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {\n  var positions = array<vec2f, 4>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0), vec2f(1.0, 1.0));\n  var uvs = array<vec2f, 4>(vec2f(0.0, 1.0), vec2f(1.0, 1.0), vec2f(0.0, 0.0), vec2f(1.0, 0.0));\n  var out: VSOut;\n  out.position = vec4f(positions[vi], 0.0, 1.0);\n  out.uv = uvs[vi];\n  return out;\n}\n\n@fragment fn fs_main(in: VSOut) -> @location(0) vec4f {\n  var c = textureSample(inputTex, inputSampler, in.uv);\n  let b = u.params[0].x;\n  let ct = u.params[1].x;\n  let s = u.params[2].x;\n  var rgb = (c.rgb - vec3f(0.5)) * ct + vec3f(0.5) + vec3f(b);\n  let l = dot(rgb, vec3f(0.299, 0.587, 0.114));\n  rgb = mix(vec3f(l), rgb, s);\n  rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));\n  return vec4f(rgb, c.a);\n}",
+  "css_filter": "brightness(calc(1 + {brightness})) contrast({contrast}) saturate({saturation})",
+  "thumbnail": "thumbnail.png"
+}

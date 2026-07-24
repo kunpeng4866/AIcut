@@ -1,0 +1,33 @@
+{
+  "id": "filter.vignette",
+  "name": "暗角",
+  "version": "1.0.0",
+  "author": "AIcut",
+  "description": "画面四周压暗（基于 FFmpeg vignette），WebGPU 预览",
+  "plugin_type": "Filter",
+  "min_app_version": "0.1.0",
+  "parameters": [
+    {
+      "key": "angle",
+      "label": "角度",
+      "param_type": "Slider",
+      "default": 20,
+      "min": 0,
+      "max": 360,
+      "step": 1
+    },
+    {
+      "key": "distance",
+      "label": "范围",
+      "param_type": "Slider",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "step": 0.01
+    }
+  ],
+  "filter_spec": "vignette=angle={angle}:x0={distance}",
+  "shader": "struct FilterUniforms {\n  resolution: vec2f,\n  opacity: f32,\n  time: f32,\n  params: array<vec4f, 16>,\n};\n@group(0) @binding(0) var<uniform> u: FilterUniforms;\n@group(0) @binding(1) var inputTex: texture_2d<f32>;\n@group(0) @binding(2) var inputSampler: sampler;\nstruct VSOut {\n  @builtin(position) position: vec4f,\n  @location(0) uv: vec2f,\n};\n@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {\n  var positions = array<vec2f, 4>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0), vec2f(1.0, 1.0));\n  var uvs = array<vec2f, 4>(vec2f(0.0, 1.0), vec2f(1.0, 1.0), vec2f(0.0, 0.0), vec2f(1.0, 0.0));\n  var out: VSOut;\n  out.position = vec4f(positions[vi], 0.0, 1.0);\n  out.uv = uvs[vi];\n  return out;\n}\n\n@fragment fn fs_main(in: VSOut) -> @location(0) vec4f {\n  let c = textureSample(inputTex, inputSampler, in.uv);\n  let dist = u.params[1].x;\n  let d = distance(in.uv, vec2f(0.5, 0.5));\n  let strength = clamp((d - dist * 0.4) / (0.7 - dist * 0.4 + 0.001), 0.0, 1.0);\n  let dark = 1.0 - strength * 0.85;\n  return vec4f(c.rgb * dark, c.a);\n}",
+  "css_filter": null,
+  "thumbnail": "thumbnail.png"
+}

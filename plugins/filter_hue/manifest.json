@@ -1,0 +1,33 @@
+{
+  "id": "filter.hue",
+  "name": "色调",
+  "version": "1.0.0",
+  "author": "AIcut",
+  "description": "色相旋转与饱和度（基于 FFmpeg hue）",
+  "plugin_type": "Filter",
+  "min_app_version": "0.1.0",
+  "parameters": [
+    {
+      "key": "hue",
+      "label": "色相",
+      "param_type": "Slider",
+      "default": 0,
+      "min": 0,
+      "max": 360,
+      "step": 1
+    },
+    {
+      "key": "saturation",
+      "label": "饱和度",
+      "param_type": "Slider",
+      "default": 1,
+      "min": 0,
+      "max": 3,
+      "step": 0.01
+    }
+  ],
+  "filter_spec": "hue=h={hue}:s={saturation}",
+  "shader": "struct FilterUniforms {\n  resolution: vec2f,\n  opacity: f32,\n  time: f32,\n  params: array<vec4f, 16>,\n};\n@group(0) @binding(0) var<uniform> u: FilterUniforms;\n@group(0) @binding(1) var inputTex: texture_2d<f32>;\n@group(0) @binding(2) var inputSampler: sampler;\nstruct VSOut {\n  @builtin(position) position: vec4f,\n  @location(0) uv: vec2f,\n};\n@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {\n  var positions = array<vec2f, 4>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0), vec2f(1.0, 1.0));\n  var uvs = array<vec2f, 4>(vec2f(0.0, 1.0), vec2f(1.0, 1.0), vec2f(0.0, 0.0), vec2f(1.0, 0.0));\n  var out: VSOut;\n  out.position = vec4f(positions[vi], 0.0, 1.0);\n  out.uv = uvs[vi];\n  return out;\n}\n\n@fragment fn fs_main(in: VSOut) -> @location(0) vec4f {\n  let c = textureSample(inputTex, inputSampler, in.uv);\n  let hue = u.params[0].x * 3.14159265 / 180.0;\n  let s = u.params[1].x;\n  let cosA = cos(hue);\n  let sinA = sin(hue);\n  let y = dot(c.rgb, vec3f(0.299, 0.587, 0.114));\n  let i = dot(c.rgb, vec3f(0.596, -0.274, -0.322));\n  let q = dot(c.rgb, vec3f(0.211, -0.523, 0.312));\n  let i2 = i * cosA - q * sinA;\n  let q2 = i * sinA + q * cosA;\n  var rgb = vec3f(y) + vec3f(i2 * 0.596 + q2 * 0.211, i2 * -0.274 + q2 * -0.523, i2 * 0.322 + q2 * 0.312);\n  let l = dot(rgb, vec3f(0.299, 0.587, 0.114));\n  rgb = mix(vec3f(l), rgb, s);\n  rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));\n  return vec4f(rgb, c.a);\n}",
+  "css_filter": "hue-rotate({hue}deg) saturate({saturation})",
+  "thumbnail": "thumbnail.png"
+}
