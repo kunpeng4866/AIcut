@@ -24,12 +24,12 @@ const formatTC = (sec: number): string => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 };
 
-// 速度曲线积分：srcT = srcStart + ∫₀^off speed(τ) dτ（speed 按 play 分段线性，trapezoid 积分）
-// 与后端 strategy.rs::speed_integral 保持一致。speed>0 时 srcT 单调推进，绝不静止。
-function speedIntegral(curve: SpeedPointConfig[], off: number, srcStart: number): number {
-  if (!curve || curve.length === 0) return srcStart;
+// 速度曲线原始积分（不含归一化）：返回 ∫₀^off speed(τ) dτ 的梯形积分值（相对 srcStart=0）。
+// speed 按 play 分段线性插值。与后端 strategy.rs::raw_speed_integral 逐字节一致。
+function rawSpeedIntegral(curve: SpeedPointConfig[], off: number): number {
+  if (!curve || curve.length === 0) return 0;
   const pts = [...curve].sort((a, b) => a.play - b.play);
-  if (off <= pts[0].play) return srcStart + Math.max(off, 0) * pts[0].speed;
+  if (off <= pts[0].play) return Math.max(off, 0) * pts[0].speed;
   let acc = pts[0].play * pts[0].speed; // 段 [0, 首点.play] 以首点速度恒定
   let lastPlay = pts[0].play;
   let lastSpeed = pts[0].speed;
@@ -41,14 +41,34 @@ function speedIntegral(curve: SpeedPointConfig[], off: number, srcStart: number)
       const frac = span < 1e-12 ? 0 : (off - a.play) / span;
       const speedOff = a.speed + (b.speed - a.speed) * frac;
       acc += (a.speed + speedOff) / 2 * (off - a.play);
-      return srcStart + acc;
+      return acc;
     }
-    acc += (a.speed + b.speed) / 2 * span;
+    if (span >= 1e-12) acc += (a.speed + b.speed) / 2 * span;
     lastPlay = b.play;
     lastSpeed = b.speed;
   }
-  acc += (off - lastPlay) * lastSpeed; // 超出末点：以末点速度外延
-  return srcStart + acc;
+  if (off > lastPlay) acc += (off - lastPlay) * lastSpeed; // 超出末点：以末点速度外延
+  return acc;
+}
+
+// 速度曲线积分（与后端 strategy.rs::speed_integral 一致）：
+// 按整段时间线时长归一化，保证 [0,dur] 恰好消耗整段素材 [srcStart, srcStart+srcDur]，
+// 任意曲线形状（含局部 speed>1）都不会越界定格，源素材始终播完。
+// srcT(off) = srcStart + rawSpeedIntegral(off) * (srcDur / rawSpeedIntegral(dur))
+function speedIntegral(curve: SpeedPointConfig[], off: number, srcStart: number, dur: number, srcDur: number): number {
+  if (!curve || curve.length === 0) return srcStart;
+  const totalRaw = rawSpeedIntegral(curve, dur);
+  if (Math.abs(totalRaw) < 1e-9) return srcStart; // 全 0 → 冻结在起点
+  const k = srcDur / totalRaw;
+  return srcStart + rawSpeedIntegral(curve, off) * k;
+}
+
+// 曲线是否为"常量速度"（所有关键帧速度一致）→ 可用 playbackRate 自播放，无需逐帧 seek
+function curveIsConstant(curve: SpeedPointConfig[]): boolean {
+  if (!curve || curve.length === 0) return true;
+  const first = curve[0].speed;
+  for (const p of curve) if (Math.abs(p.speed - first) > 1e-3) return false;
+  return true;
 }
 
 // 统一时间重映射：与后端 Rust clip_source_time 逐字节一致的纯函数
@@ -59,7 +79,8 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
   const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const clamp = (x: number) => Math.max(clip.src_range.start, Math.min(clip.src_range.end, x));
   if (remap.curve && remap.curve.length > 0) {
-    const srcT = speedIntegral(remap.curve, off, clip.src_range.start);
+    const srcDur = clip.src_range.end - clip.src_range.start;
+    const srcT = speedIntegral(remap.curve, off, clip.src_range.start, dur, srcDur);
     return { srcT: clamp(srcT), frozen: false };
   }
   let frozen = false; let srcT: number;
@@ -75,12 +96,15 @@ function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: bo
 }
 
 // 该 clip 是否必须手动驱动（pause + 逐帧 seek），而非依赖 <video>/<audio> 自播放。
-// 倒放 / 冻结帧 / 曲线映射都无法用 playbackRate 表达，必须由 RAF 时钟逐帧 seek 到 srcT，
+// 倒放 / 冻结帧 / 变速曲线（非恒定）都无法用 playbackRate 表达，必须由 RAF 时钟逐帧 seek 到 srcT，
 // 否则 video 自播放(1x) 与手动 seek(速率≠1x) 互掐 → 卡顿 / 反复播同一帧。
+// 注意：恒定速度曲线（所有关键帧速度相同）退化为匀速，可直接用 playbackRate 自播放，避免无谓卡顿。
 function clipNeedsManualDrive(clip: ClipConfig): boolean {
   const remap = clip.time_remap;
   if (!remap) return false;
-  return !!(remap.curve && remap.curve.length > 0) || !!remap.reverse || !!remap.freeze;
+  if (remap.reverse || remap.freeze) return true;
+  if (remap.curve && remap.curve.length > 0 && !curveIsConstant(remap.curve)) return true;
+  return false;
 }
 
 // 活跃音频片段（音频轨道上的 clip）
@@ -269,7 +293,10 @@ export default function PreviewCanvas() {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
       if (clipNeedsManualDrive(clip)) { v.pause(); return; }
-      v.playbackRate = clip.speed ?? 1;
+      // 整体速度 = 素材时长 / 时间线长（恒定曲线/普通片段通用，避免用可能被曲线覆盖的 speed 字段）
+      const dur = clip.timelineOut - clip.timelineIn;
+      const overall = (clip.src_range.end - clip.src_range.start) / Math.max(1e-6, dur);
+      v.playbackRate = overall;
       if (isPlaying) v.play().catch(() => {});
       else v.pause();
     });
@@ -277,7 +304,9 @@ export default function PreviewCanvas() {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
       if (clipNeedsManualDrive(clip)) { a.pause(); return; }
-      a.playbackRate = clip.speed ?? 1;
+      const dur = clip.timelineOut - clip.timelineIn;
+      const overall = (clip.src_range.end - clip.src_range.start) / Math.max(1e-6, dur);
+      a.playbackRate = overall;
       if (isPlaying) a.play().catch(() => {});
       else a.pause();
     });

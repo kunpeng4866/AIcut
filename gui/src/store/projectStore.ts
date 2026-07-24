@@ -208,7 +208,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.map((c) => c.id === clipId ? { ...c, ...updates } : c)));
     }),
     // 改变播放速度：无曲线时同步缩放片段时长（新时长 = 源时长 / speed），并按同轨后续片段做 ripple 避免重叠；
-    // 有曲线时曲线为权威映射，仅更新 speed 字段、不缩放时长。
+    // 有曲线时：曲线为相对速度形状，整体速度由时间线长决定 → 缩放曲线所有关键帧的 play 位置 + 片段时长（保持曲线形状），并 ripple。
+    // 这样"速度滑块"在有无曲线时都能整体变速，且归一化积分保证素材始终播完、绝不定格。
     setSpeed: (trackId, clipId, speed) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       const sp = Math.max(0.1, Math.min(8, speed));
@@ -217,11 +218,22 @@ export const useProjectStore = create<ProjectState>((set, get) => {
         if (!target) return clips;
         const remap = target.time_remap;
         const hasCurve = !!(remap && remap.curve && remap.curve.length > 0);
-        if (hasCurve) return clips.map((c) => c.id === clipId ? { ...c, speed: sp } : c);
         const srcDur = target.src_range.end - target.src_range.start;
         const newDur = srcDur / sp;
         const oldDur = target.timelineOut - target.timelineIn;
         const delta = newDur - oldDur;
+        if (hasCurve) {
+          const scale = oldDur > 1e-6 ? newDur / oldDur : 1;
+          return clips.map((cl) => {
+            if (cl.id === clipId) {
+              const r = cl.time_remap;
+              const newCurve = r?.curve ? r.curve.map((pt) => ({ ...pt, play: pt.play * scale })) : r?.curve;
+              return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur, time_remap: r ? { ...r, curve: newCurve } : r };
+            }
+            if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
+            return cl;
+          });
+        }
         return clips.map((cl) => {
           if (cl.id === clipId) return { ...cl, speed: sp, timelineOut: cl.timelineIn + newDur };
           if (cl.timelineIn > target.timelineIn) return { ...cl, timelineIn: cl.timelineIn + delta, timelineOut: cl.timelineOut + delta };
