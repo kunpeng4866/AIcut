@@ -11,7 +11,9 @@ import { useUIStore } from '../store/uiStore';
 
 import { useWaveform } from '../hooks/useWaveform';
 
-import type { ClipConfig, TrackConfig, AssetConfig } from '../types';
+import type { ClipConfig, TrackConfig, AssetConfig, EnvelopePoint } from '../types';
+
+import { getClipEnvelopeGain } from '../utils/transitionUtils';
 
 // Convert a filesystem path to an aicut-asset:// URL so it can be loaded by
 // PreviewCanvas.tsx and other components without extra plumbing.
@@ -200,6 +202,145 @@ function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
   );
 }
 
+// Audio envelope overlay: visualizes and edits an audio clip's gain envelope
+// (audioEnvelope) as a draggable polyline of keyframe points over a gain=1
+// baseline. Lives on top of the waveform but below the resize handles.
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+function EnvelopeOverlay({ clip, track, zoom, width }: {
+  clip: ClipConfig; track: TrackConfig; zoom: number; width: number;
+}) {
+  if (track.type !== 'audio') return null;
+  const H = TRACK_HEIGHT - 8;
+  const dur = clip.timelineOut - clip.timelineIn;
+  if (dur <= 0) return null;
+
+  // Coordinate mapping helpers.
+  const gainToY = (g: number) => H * (1 - g / 2); // gain0->bottom, gain2->top, gain1->mid
+  const yToGain = (y: number) => clamp((1 - y / H) * 2, 0, 2);
+  const tToX = (t: number) => (t / dur) * width;
+  const xToT = (x: number) => clamp((x / width) * dur, 0, dur);
+
+  const pts = (clip.audioEnvelope || []).slice().sort((a, b) => a.time - b.time);
+
+  // Drag a single keyframe point (horizontal = time, vertical = gain).
+  const startPointDrag = (e: React.MouseEvent, index: number) => {
+    e.stopPropagation();
+    if (track.locked) return;
+    const p = pts[index];
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startTime = p.time;
+    const startGain = p.gain;
+    const isEnd = startTime < 1e-3 || Math.abs(startTime - dur) < 1e-3; // pinned at an end
+    const onMove = (ev: MouseEvent) => {
+      const newTime = isEnd ? startTime : xToT(startTime + (ev.clientX - startX) / zoom);
+      const newGain = yToGain(gainToY(startGain) + (ev.clientY - startY));
+      const newPts = pts.slice();
+      newPts[index] = { time: newTime, gain: clamp(newGain, 0, 2) };
+      useProjectStore.getState().updateClip(track.id, clip.id, {
+        audioEnvelope: newPts.slice().sort((a, b) => a.time - b.time),
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // Drag the whole envelope vertically (all gains shift together).
+  const startLineDrag = (e: React.MouseEvent) => {
+    if (pts.length === 0) return; // 无包络：放行 clip 整体拖动
+    if (e.altKey) return;         // Alt+拖动：移动 clip，不动包络
+    e.stopPropagation();
+    if (track.locked) return;
+    const startY = e.clientY;
+    // Initialize envelope if empty, using the clicked gain at that point.
+    let working: EnvelopePoint[];
+    let basePts: EnvelopePoint[];
+    if (pts.length === 0) {
+      const G0 = yToGain(e.nativeEvent.offsetY);
+      working = [{ time: 0, gain: G0 }, { time: dur, gain: G0 }];
+      basePts = working.slice();
+    } else {
+      working = pts.slice();
+      basePts = pts.slice();
+    }
+    const onMove = (ev: MouseEvent) => {
+      const dGain = -(ev.clientY - startY) / (H / 2);
+      const newPts = working.map((p, i) => ({ time: p.time, gain: clamp(basePts[i].gain + dGain, 0, 2) }));
+      useProjectStore.getState().updateClip(track.id, clip.id, {
+        audioEnvelope: newPts.slice().sort((a, b) => a.time - b.time),
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // Double-click on empty area: insert a keyframe at the clicked time.
+  const onSvgDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (track.locked) return;
+    const time = xToT(e.nativeEvent.offsetX);
+    const base: EnvelopePoint[] =
+      pts.length === 0
+        ? [{ time: 0, gain: 1 }, { time: dur, gain: 1 }]
+        : pts.slice();
+    const gain = getClipEnvelopeGain(clip, clip.timelineIn + time);
+    const newPts = base.concat([{ time, gain: clamp(gain, 0, 2) }]).sort((a, b) => a.time - b.time);
+    useProjectStore.getState().updateClip(track.id, clip.id, { audioEnvelope: newPts });
+  };
+
+  // Double-click on a point: remove it (keep at least 2 points).
+  const onPointDoubleClick = (e: React.MouseEvent, index: number) => {
+    e.stopPropagation();
+    if (track.locked) return;
+    if (pts.length <= 2) return;
+    const newPts = pts.slice();
+    newPts.splice(index, 1);
+    useProjectStore.getState().updateClip(track.id, clip.id, { audioEnvelope: newPts });
+  };
+
+  return (
+    <svg
+      width={width}
+      height={H}
+      onMouseDown={startLineDrag}
+      onDoubleClick={onSvgDoubleClick}
+      style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'auto', overflow: 'visible' }}
+    >
+      {/* gain=1 baseline */}
+      <line x1={0} y1={gainToY(1)} x2={width} y2={gainToY(1)} stroke="rgba(255,255,255,0.25)" strokeDasharray="4 4" pointerEvents="none" />
+      {/* envelope polyline */}
+      <polyline
+        points={pts.map(p => `${tToX(p.time)},${gainToY(p.gain)}`).join(' ')}
+        fill="none" stroke="#ffd166" strokeWidth={2} pointerEvents="none"
+      />
+      {/* keyframe points */}
+      {pts.map((p, i) => (
+        <circle
+          key={i}
+          cx={tToX(p.time)}
+          cy={gainToY(p.gain)}
+          r={4}
+          fill="#e94560"
+          stroke="#fff"
+          strokeWidth={1}
+          style={{ cursor: 'move', pointerEvents: 'auto' }}
+          onMouseDown={(e) => startPointDrag(e, i)}
+          onDoubleClick={(e) => onPointDoubleClick(e, i)}
+        />
+      ))}
+    </svg>
+  );
+}
+
 function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, playhead, clipsOnTrack, sameTypeTrackIds, onSelect, onSplit, onMove, onMoveToTrack, onResize, onContext }: ClipItemProps) {
   const left = clip.timelineIn * zoom;
   const width = Math.max(4, (clip.timelineOut - clip.timelineIn) * zoom);
@@ -323,6 +464,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
           )}
         </div>
       )}
+      <EnvelopeOverlay clip={clip} track={track} zoom={zoom} width={width} />
       <span style={{ position: 'absolute', top: 2, left: 8, fontSize: 11, color: '#eee', pointerEvents: 'none' }}>
         {clip.assetId}
       </span>

@@ -275,7 +275,7 @@ mod tests {
     }
 
     fn make_layer(frame: VideoFrame, tf: Transform) -> CompositeLayer {
-        CompositeLayer { frame, transform: tf }
+        CompositeLayer { frame, transform: tf, reveal_mask: None }
     }
 
     #[test]

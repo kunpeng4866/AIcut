@@ -283,7 +283,7 @@ pub fn script_to_project(script: &ScriptResult, assets: &[String]) -> crate::pro
             timeline_in: t, timeline_out: t + scene.duration,
             transform: crate::project::Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
             volume: 1.0, speed: 1.0,
-            effects: vec![], masks: vec![], filters, keyframes: Default::default(), speed_curve: vec![], time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() }, text: None, subtitle: None, transition: None,
+            effects: vec![], masks: vec![], filters, keyframes: Default::default(), speed_curve: vec![], time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },             text: None, subtitle: None, transition: None, audio_envelope: vec![],
         });
         t += scene.duration;
     }

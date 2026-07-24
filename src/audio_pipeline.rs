@@ -384,6 +384,7 @@ mod tests {
             keyframes: Default::default(),
             text: None,
             subtitle: None, transition: None,
+            audio_envelope: vec![],
         }
     }
 

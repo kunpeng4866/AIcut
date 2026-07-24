@@ -94,6 +94,19 @@ pub struct SpeedPoint {
     pub play: f64,
 }
 
+/// 音频包络关键帧：相对片段起点的时间与增益
+///
+/// 序列化为 JSON camelCase：`{ "time", "gain" }`（前端 EnvelopePoint 逐字节一致）。
+/// `time` 为片段内相对时间（秒），`gain` 为音量增益：0.0(静音)–2.0(放大)，1.0 = 原始音量。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct AudioEnvelopePoint {
+    /// 相对片段起点的时间（秒）
+    #[serde(rename = "time")]
+    pub t: f64,
+    /// 音量增益：0.0(静音) – 2.0(放大)，1.0 = 原始音量
+    pub gain: f64,
+}
+
 /// 冻结帧配置：在片段内播放区间 [start, start+duration) 内冻结到 source_time
 ///
 /// 序列化为 JSON camelCase：`{ "start", "sourceTime", "duration" }`
@@ -227,6 +240,9 @@ pub struct Clip {
     /// 转场：本片段结尾与同轨下一片段之间的过渡（None = 无）
     #[serde(default)]
     pub transition: Option<Transition>,
+    /// 音频包络关键帧（相对片段起点），用于逐点音量控制；空 = 无包络（整段用 volume）
+    #[serde(default)]
+    pub audio_envelope: Vec<AudioEnvelopePoint>,
 }
 
 /// 转场定义：片段结尾与同轨下一片段之间的过渡效果
@@ -392,7 +408,7 @@ mod tests {
                             timeline_in: 0.0, timeline_out: 5.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_envelope: vec![],
                         },
                         Clip {
                             id: "c2".into(), asset_id: "a2".into(),
@@ -400,7 +416,7 @@ mod tests {
                             timeline_in: 5.0, timeline_out: 15.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_envelope: vec![],
                         },
                     ],
                     ..Default::default()
@@ -463,7 +479,7 @@ mod tests {
                     timeline_in: 0.0, timeline_out: 5.0,
                     transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                     volume: 1.0, speed: 1.0,
-                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None,
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_envelope: vec![],
                 }],
                 ..Default::default()
             }],

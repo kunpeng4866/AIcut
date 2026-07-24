@@ -172,3 +172,31 @@ export function getIncomingAudioTransitionLayer(
   if (!next) return null;
   return { inClip: next, progress };
 }
+
+// ── 音频包络线增益 ──
+// clip.audioEnvelope：关键帧 {time: 相对 clip 起点秒, gain: 0~2}，按 time 升序。
+// 相对时间 rt = currentTime - clip.timelineIn，对包络做分段线性插值得到当前增益。
+// 无包络（空/未定义）→ 返回 1.0（不影响，整段仍受 clip.volume 控制）。
+// 算法须与 src/pipeline/export.rs::envelope_gain_at 逐字节一致，保证预览=导出。
+
+export function getClipEnvelopeGain(clip: ClipConfig, currentTime: number): number {
+  const pts = clip.audioEnvelope;
+  if (!pts || pts.length === 0) return 1;
+  const dur = clip.timelineOut - clip.timelineIn;
+  if (dur <= 0) return 1;
+  let rt = currentTime - clip.timelineIn;
+  rt = Math.max(0, Math.min(dur, rt));
+  const sorted = [...pts].sort((a, b) => a.time - b.time);
+  if (rt <= sorted[0].time) return Math.max(0, Math.min(2, sorted[0].gain));
+  const last = sorted.length - 1;
+  if (rt >= sorted[last].time) return Math.max(0, Math.min(2, sorted[last].gain));
+  for (let i = 1; i < sorted.length; i++) {
+    if (rt <= sorted[i].time) {
+      const a = sorted[i - 1];
+      const b = sorted[i];
+      const f = Math.abs(b.time - a.time) < 1e-9 ? 0 : (rt - a.time) / (b.time - a.time);
+      return Math.max(0, Math.min(2, a.gain + f * (b.gain - a.gain)));
+    }
+  }
+  return 1;
+}

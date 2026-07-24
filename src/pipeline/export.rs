@@ -8,7 +8,7 @@ use crate::compositor::{CompositeLayer, Compositor};
 use crate::decoder::{DecoderPool, PrefetchRequest};
 use crate::ffmpeg;
 use crate::pipeline::strategy::*;
-use crate::project::{CanvasConfig, Clip, Project};
+use crate::project::{AudioEnvelopePoint, CanvasConfig, Clip, Project};
 use crate::subtitle;
 use crate::timeline::Timeline;
 use crate::AppError;
@@ -16,6 +16,44 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
+
+// 音频包络线增益：对 clip.audio_envelope 按相对时间 (t - timeline_in) 分段线性插值。
+// 无包络 → 1.0；增益夹在 [0, 2]。须与 gui/src/utils/transitionUtils.ts::getClipEnvelopeGain 一致。
+fn envelope_gain_at(clip: &Clip, t: f64) -> f32 {
+    let pts = &clip.audio_envelope;
+    if pts.is_empty() {
+        return 1.0;
+    }
+    let dur = clip.timeline_out - clip.timeline_in;
+    if dur <= 0.0 {
+        return 1.0;
+    }
+    let mut rt = t - clip.timeline_in;
+    rt = rt.max(0.0).min(dur);
+    let mut sorted: Vec<AudioEnvelopePoint> = pts.iter().copied().collect();
+    sorted.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+    if rt <= sorted[0].t {
+        return (sorted[0].gain as f32).max(0.0).min(2.0);
+    }
+    let last = sorted.len() - 1;
+    if rt >= sorted[last].t {
+        return (sorted[last].gain as f32).max(0.0).min(2.0);
+    }
+    for i in 1..sorted.len() {
+        if rt <= sorted[i].t {
+            let a = sorted[i - 1];
+            let b = sorted[i];
+            let f = if (b.t - a.t).abs() < 1e-9 {
+                0.0
+            } else {
+                (rt - a.t) / (b.t - a.t)
+            };
+            let g = a.gain + f * (b.gain - a.gain);
+            return (g as f32).max(0.0).min(2.0);
+        }
+    }
+    1.0
+}
 
 // ════════════════════ ExportConfig ════════════════════
 
@@ -751,7 +789,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let track = self.track_by_id(tid);
             let track_vol = track.map(|tr| tr.volume).unwrap_or(1.0) as f32;
             let track_pan = track.map(|tr| tr.pan).unwrap_or(0.0) as f32;
-            let env = out_env.get(clip.id.as_str()).copied().unwrap_or(1.0);
+            let env = out_env.get(clip.id.as_str()).copied().unwrap_or(1.0) * envelope_gain_at(clip, t);
             let gain = clip.volume as f32 * track_vol * env;
             let (l_gain, r_gain) = Self::pan_gains(track_pan);
 
@@ -795,7 +833,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let track = self.track_by_id(tid);
             let track_vol = track.map(|tr| tr.volume).unwrap_or(1.0) as f32;
             let track_pan = track.map(|tr| tr.pan).unwrap_or(0.0) as f32;
-            let gain = in_clip.volume as f32 * track_vol * (*in_e);
+            let gain = in_clip.volume as f32 * track_vol * (*in_e) * envelope_gain_at(in_clip, t);
             let (l_gain, r_gain) = Self::pan_gains(track_pan);
             let cached = match self.audio_cache.get(&in_clip.id) {
                 Some(b) if !b.is_empty() => b,
@@ -893,6 +931,7 @@ mod tests {
             text: None,
             subtitle: None,
             transition: None,
+            audio_envelope: vec![],
         }
     }
 

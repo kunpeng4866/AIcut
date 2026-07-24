@@ -236,6 +236,7 @@ mod tests {
             time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None, transition: None,
+            audio_envelope: vec![],
         }
     }
 
