@@ -3,6 +3,7 @@
 // 负责：设备初始化、WGSL 渲染管线、rAF 渲染循环（多视频帧上传→多 pass Over 合成→渲染）、资源清理
 import { useEffect, useRef, useState } from 'react';
 import type { ClipConfig, AssetConfig } from '../types';
+import { computeOutClipOpacity } from '../utils/transitionUtils';
 
 // ── WGSL 着色器 ──
 // Uniform 32 字节：transform(vec4f) + params(vec4f)
@@ -68,8 +69,8 @@ struct VSOut {
 }
 `;
 
-// 最大支持 4 个视频轨道叠加
-const MAX_CLIPS = 4;
+// 最大支持 4 个视频轨道叠加 + 最多 4 个转场入片段附加层（每轨转场时各加 1 层）
+const MAX_CLIPS = 8;
 
 export interface ActiveVideoClip {
   clip: ClipConfig;
@@ -86,6 +87,10 @@ interface UseWebGPUPreviewOptions {
   enabled: boolean;
   /** 插件清单（含预览用 shader: string 内联 WGSL），按 id 索引。供滤镜离屏 pass 使用。 */
   pluginManifests?: Record<string, any>;
+  /** 全局播放头时间（秒），用于 computeOutClipOpacity 计算转场淡出 */
+  currentTime?: number;
+  /** 转场入片段层：挂在"出片段"上，转场窗内作为附加合成层叠加在出片段之上 */
+  transitionIncoming?: Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number }>;
 }
 
 /**
@@ -96,6 +101,7 @@ interface UseWebGPUPreviewOptions {
  */
 export function useWebGPUPreview({
   canvasRef, videoRefs, bitmapSources, canvasWidth, canvasHeight, clips, enabled, pluginManifests,
+  currentTime, transitionIncoming,
 }: UseWebGPUPreviewOptions) {
   const deviceRef = useRef<GPUDevice | null>(null);
   const pipelineRef = useRef<GPURenderPipeline | null>(null);
@@ -115,11 +121,21 @@ export function useWebGPUPreview({
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 最新播放头时间 / 转场入片段层：渲染循环每帧读取，避免重建渲染循环
+  const currentTimeRef = useRef<number>(currentTime ?? 0);
+  const transitionIncomingRef = useRef<Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number }>>(transitionIncoming ?? []);
+
   // 保存最新 clips 到 ref，避免每帧重建渲染循环
   useEffect(() => { clipsRef.current = clips; }, [clips]);
 
   // 保存最新插件清单到 ref，供渲染循环读取（避免每帧重建）
   useEffect(() => { pluginManifestsRef.current = pluginManifests ?? {}; }, [pluginManifests]);
+
+  // 保存最新播放头时间到 ref（转场淡出计算用）
+  useEffect(() => { currentTimeRef.current = currentTime ?? 0; }, [currentTime]);
+
+  // 保存最新转场入片段层到 ref，供渲染循环读取
+  useEffect(() => { transitionIncomingRef.current = transitionIncoming ?? []; }, [transitionIncoming]);
 
   // 编译并缓存插件滤镜渲染管线（按 kind）。编译失败则标记 failed，后续跳过该滤镜（降级为原图）。
   // 插件 shader 绑定契约（硬约束）：@group(0) @binding(0)=uniform, 1=texture_2d<f32>, 2=sampler。
@@ -261,7 +277,7 @@ export function useWebGPUPreview({
       // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
       // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
       // 否则回退采视频元素（现有 seek 路径）。
-      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number }[] = [];
+      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number; extraOpacity: number; offsetX: number }[] = [];
       for (const { clip } of activeClips) {
         const video = videoRefs.current.get(clip.id);
         if (!video || video.readyState < 2) continue;
@@ -269,7 +285,22 @@ export function useWebGPUPreview({
         const source: HTMLVideoElement | ImageBitmap = bmp || video;
         const vw = bmp ? bmp.width : (video.videoWidth || canvasWidth);
         const vh = bmp ? bmp.height : (video.videoHeight || canvasHeight);
-        items.push({ source, clip, vw, vh });
+        // 出片段：转场窗内淡出（computeOutClipOpacity 窗外=1，窗内=1-progress）
+        const outOpacity = computeOutClipOpacity(clip, currentTimeRef.current);
+        items.push({ source, clip, vw, vh, extraOpacity: outOpacity, offsetX: 0 });
+
+        // 转场入片段（同轨下一片段）：转场窗内叠在出片段之上，保持出→入顺序以保证层级正确
+        const inc = transitionIncomingRef.current.find((t) => t.outClipId === clip.id);
+        if (inc) {
+          const iv = videoRefs.current.get(inc.clip.id);
+          if (iv && iv.readyState >= 2) {
+            const ibmp = bitmapSources?.current.get(inc.clip.id) || null;
+            const isource: HTMLVideoElement | ImageBitmap = ibmp || iv;
+            const ivw = ibmp ? ibmp.width : (iv.videoWidth || canvasWidth);
+            const ivh = ibmp ? ibmp.height : (iv.videoHeight || canvasHeight);
+            items.push({ source: isource, clip: inc.clip, vw: ivw, vh: ivh, extraOpacity: inc.opacity, offsetX: inc.offsetX });
+          }
+        }
       }
       if (items.length === 0) return;
 
@@ -293,7 +324,7 @@ export function useWebGPUPreview({
         // 多 pass 渲染：从底到顶依次 Over 合成
         // Pass 0: clear 黑色背景；Pass 1-N: load 保留前一 pass 结果
         items.forEach((item, idx) => {
-          const { source, clip, vw, vh } = item;
+          const { source, clip, vw, vh, extraOpacity, offsetX } = item;
 
           // 上传视频帧到临时纹理
           const texture = device.createTexture({
@@ -380,12 +411,14 @@ export function useWebGPUPreview({
 
           // 更新 uniform：transform + params
           const t = clip.transform || {};
-          const posX = t.x ?? 0.5;
+          // slide：入片段 transform.x 叠加归一化偏移（offsetX 0..1，1=完全偏出右侧），与 HTML5 换算一致
+          const posX = (t.x ?? 0.5) + (offsetX ?? 0);
           const posY = t.y ?? 0.5;
           const scaleX = t.scale_x ?? 1.0;
           const scaleY = t.scale_y ?? 1.0;
           const rotation = ((t.rotation ?? 0) * Math.PI) / 180;
-          const opacity = t.opacity ?? 1.0;
+          // 出片段乘转场淡出、入片段乘转场 progress 不透明度
+          const opacity = (t.opacity ?? 1.0) * (extraOpacity ?? 1.0);
           const videoAspect = vw / vh;
 
           const uniformBuf = uniformBufsRef.current[idx];

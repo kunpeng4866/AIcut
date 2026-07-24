@@ -145,6 +145,61 @@ interface ClipItemProps {
   onResize: (newIn: number, newOut: number) => void; onContext: (e: React.MouseEvent) => void;
 }
 
+// Transition marker block: rendered at the right junction (timelineOut) of an
+// "out clip" that carries an active transition. Spans the transition window
+// [timelineOut - duration, timelineOut), drawn as a small rounded block above
+// the clip body. Double-click selects the clip and jumps to the right panel's
+// 'transition' tab; dragging the right edge adjusts the transition duration.
+const TRANSITION_ICON: Record<string, string> = { fade: '✦', dissolve: '◈', slide: '➜' };
+
+function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
+  clip: ClipConfig; track: TrackConfig; zoom: number; onOpenPanel: () => void;
+}) {
+  const tr = clip.transition!;
+  const rawDur = tr.duration;
+  const dur = rawDur && rawDur > 0 ? rawDur : 0.5;
+  // Position the block over the transition window, in track-local pixel coords
+  // (same coordinate system as ClipItem: left = time * zoom inside the relative track).
+  const left = (clip.timelineOut - dur) * zoom;
+  const width = Math.max(6, dur * zoom);
+
+  // Drag the right edge to change duration (reuses the pxPerSec = zoom paradigm).
+  const startResize = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (track.locked) return; // locked tracks can't be edited
+    const startX = e.clientX;
+    const startDur = dur;
+    const onMove = (ev: MouseEvent) => {
+      const dsec = (ev.clientX - startX) / zoom;
+      const nd = Math.min(3, Math.max(0.1, Math.round((startDur + dsec) * 10) / 10));
+      useProjectStore.getState().updateClip(track.id, clip.id, { transition: { ...tr, duration: nd } });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  return (
+    <div
+      onDoubleClick={(e) => { e.stopPropagation(); onOpenPanel(); }}
+      title={`转场: ${tr.transitionType} (${dur.toFixed(1)}s) — 双击编辑，拖右缘改时长`}
+      style={{
+        position: 'absolute', left, top: 0, width, height: 16, zIndex: 6,
+        background: 'rgba(233,69,96,0.85)', borderRadius: 4, cursor: 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 10, color: '#fff', userSelect: 'none', pointerEvents: 'auto',
+        border: '1px solid #ffd2da',
+      }}
+    >
+      <span style={{ pointerEvents: 'none' }}>{TRANSITION_ICON[tr.transitionType ?? 'none'] || '✦'}</span>
+      <div onMouseDown={startResize} style={{ position: 'absolute', right: 0, top: 0, width: 6, height: '100%', cursor: 'ew-resize' }} />
+    </div>
+  );
+}
+
 function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, playhead, clipsOnTrack, sameTypeTrackIds, onSelect, onSplit, onMove, onMoveToTrack, onResize, onContext }: ClipItemProps) {
   const left = clip.timelineIn * zoom;
   const width = Math.max(4, (clip.timelineOut - clip.timelineIn) * zoom);
@@ -301,7 +356,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 
 export default function Timeline() {
   const { project, addTrack, insertTrackAt, addClip, removeClip, splitClip, moveClip, moveClipToTrack, updateClip, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
-  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap } = useUIStore();
+  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; clipId: string } | null>(null);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
@@ -648,16 +703,26 @@ export default function Timeline() {
                 }}>
 
                   {track.clips.map(clip => (
-                    <ClipItem key={clip.id} clip={clip} track={track} color={TRACK_COLORS[track.type] || '#0f3460'}
-                      selected={selectedClipId === clip.id} zoom={timelineZoom}
-                      magneticSnap={magneticSnap} clipSnap={clipSnap} playhead={currentTime} clipsOnTrack={track.clips}
-                      sameTypeTrackIds={sameTypeTrackIds}
-                      onSelect={() => selectClip(track.id, clip.id)}
-                      onSplit={() => splitClip(track.id, clip.id, currentTime)}
-                      onMove={(newIn) => moveClip(track.id, clip.id, newIn, true)}
-                      onMoveToTrack={(destTrackId, newIn) => moveClipToTrack(track.id, clip.id, destTrackId, newIn)}
-                      onResize={(newIn, newOut) => updateClip(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut })}
-                      onContext={(e) => onClipContext(e, track.id, clip.id)} />
+                    <React.Fragment key={clip.id}>
+                      <ClipItem clip={clip} track={track} color={TRACK_COLORS[track.type] || '#0f3460'}
+                        selected={selectedClipId === clip.id} zoom={timelineZoom}
+                        magneticSnap={magneticSnap} clipSnap={clipSnap} playhead={currentTime} clipsOnTrack={track.clips}
+                        sameTypeTrackIds={sameTypeTrackIds}
+                        onSelect={() => selectClip(track.id, clip.id)}
+                        onSplit={() => splitClip(track.id, clip.id, currentTime)}
+                        onMove={(newIn) => moveClip(track.id, clip.id, newIn, true)}
+                        onMoveToTrack={(destTrackId, newIn) => moveClipToTrack(track.id, clip.id, destTrackId, newIn)}
+                        onResize={(newIn, newOut) => updateClip(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut })}
+                        onContext={(e) => onClipContext(e, track.id, clip.id)} />
+                      {clip.transition && (clip.transition.transitionType ?? 'none') !== 'none' && (clip.transition.duration ?? 0) > 0 && (
+                        <TransitionMarker
+                          clip={clip}
+                          track={track}
+                          zoom={timelineZoom}
+                          onOpenPanel={() => { selectClip(track.id, clip.id); setActiveRightPanel('transition'); }}
+                        />
+                      )}
+                    </React.Fragment>
                   ))}
                 </div>
               );

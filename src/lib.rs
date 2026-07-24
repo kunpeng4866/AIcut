@@ -103,6 +103,13 @@ pub fn is_simple_project(project: &Project) -> bool {
         if !clip.filters.is_empty() {
             return false;
         }
+        // 转场（crossfade/slide 等）只在 ExportPipeline 完整路径合成，graph.rs 快速路径不处理
+        // → 带激活转场的工程必须强制走完整路径，否则转场会被静默丢弃
+        if let Some(tr) = &clip.transition {
+            if tr.transition_type != "none" && tr.duration > 0.0 {
+                return false;
+            }
+        }
         if !clip.effects.is_empty() {
             return false;
         }
