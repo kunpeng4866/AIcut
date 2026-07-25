@@ -182,6 +182,12 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             } else {
                 let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                 vci += 1;
+                // 累积时间线原点 = 本轨首个片段的主时间线起点。xfade 的 offset 是相对
+                // 累积视频流时间轴的，而转场窗锚点在出片段（prev）的主时间线
+                // [prev.timeline_out - xdur, prev.timeline_out]。两者相减才得到正确的 offset；
+                // 错误地用 (prev.timeline_out - prev.timeline_in) 会按"上一段自身时长"偏移，
+                // 第 2 个及以后的 xfade 把时间轴算短，多片段工程视频被截断。
+                let master_origin = clips[0].timeline_in;
                 for ci in 1..clips.len() {
                     let prev = clips[ci - 1]; let curr = clips[ci];
                     let gap = curr.timeline_in - prev.timeline_out;
@@ -198,9 +204,11 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                         // 注意：xfade 滤镜没有 fps 参数（会报 "Option not found"），
                         // 帧率一致由各路视频链末尾的 fps=<canvas.fps> 保证。
                         // xfade 无 easing 参数，xfade 自带缓动近似，无需额外处理。
+                        // offset 相对累积视频流时间轴：转场窗起点（主时间线） - 轨道原点。
+                        let offset = (prev.timeline_out - xdur) - master_origin;
                         nodes.push(format!("[{}][{}]xfade=transition={}:duration={}:offset={}[{}]",
                             track_acc, curr_label, xstyle, fmt(xdur),
-                            fmt((prev.timeline_out - prev.timeline_in) - xdur), merged));
+                            fmt(offset), merged));
                         track_acc = merged.clone();
                         // feather：xfade 的 wipe/circle 无原生软边参数；
                         // feather>0 时在 xfade 输出后追加 gblur（按 feather 折算 sigma）近似软边。
