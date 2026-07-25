@@ -240,20 +240,36 @@ pub struct Clip {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transition {
-    /// 类型：none | fade | dissolve | slide | wipe
+    /// 类型：none | fade | dissolve | slide | wipe | zoom | blur | flash
     #[serde(default = "default_transition_type")]
     pub transition_type: String,
     /// 持续时间（秒）
     #[serde(default = "default_transition_duration")]
     pub duration: f64,
-    /// wipe 方向：left | right | up | down，默认 right
+    /// slide / wipe 方向：left | right | up | down，默认 right
     #[serde(default = "default_transition_direction")]
     pub direction: String,
+    /// 缓动曲线：linear | ease-in-out，默认 ease-in-out（丝滑默认）
+    #[serde(default = "default_transition_easing")]
+    pub easing: String,
+    /// 遮罩羽化 0–30，默认 10（仅 mask/wipe 类使用）
+    #[serde(default = "default_transition_feather")]
+    pub feather: f64,
+    /// 模糊过渡强度 0–100，默认 65（仅 blur 类使用）
+    #[serde(default = "default_transition_blur")]
+    pub blur_amount: f64,
+    /// wipe 遮罩形状：linear | circle，默认 linear
+    #[serde(default = "default_transition_mask_shape")]
+    pub mask_shape: String,
 }
 
 fn default_transition_type() -> String { "none".into() }
 fn default_transition_duration() -> f64 { 0.5 }
 fn default_transition_direction() -> String { "right".into() }
+fn default_transition_easing() -> String { "ease-in-out".into() }
+fn default_transition_feather() -> f64 { 10.0 }
+fn default_transition_blur() -> f64 { 65.0 }
+fn default_transition_mask_shape() -> String { "linear".into() }
 
 // ---- 默认辅助函数 ----
 fn default_version() -> String { "1.0".into() }

@@ -9,7 +9,7 @@ import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
-import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, type TransitionPreviewLayer } from '../utils/transitionUtils';
+import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, getFlashOverlay, type TransitionPreviewLayer, type MaskRect } from '../utils/transitionUtils';
 import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 
@@ -212,6 +212,12 @@ export default function PreviewCanvas() {
     return result;
   })();
 
+  // flash 转场白场 overlay 不透明度：取所有视频轨出片段在转场窗内的峰值（窗中点最亮）
+  const flashOverlayOpacity = Math.max(
+    0,
+    ...activeVideoClips.map(({ clip }) => getFlashOverlay(clip, currentTime)?.opacity ?? 0),
+  );
+
   // 入片段「虚拟 timelineIn」映射（贯穿入片段整个可见生命周期，不止转场窗内）：
   // key=入片段 id，value=转场窗起点（outT - dur）。转场让入片段提前 dur 秒显示，
   // 其源时间应从转场窗起点起算，而非真实 timelineIn（=outT）。
@@ -308,7 +314,7 @@ export default function PreviewCanvas() {
     return [...m.values()];
   })();
 
-  // 传给 WebGPU 预览 hook 的转场入片段信息（已算好 opacity / slide 偏移）
+  // 传给 WebGPU 预览 hook 的转场入片段信息（已算好 opacity / slide 偏移 / 缩放 / 圆形遮罩）
   const transitionIncoming = activeTransitionLayers.map(({ layer, outClip }) => ({
     outClipId: outClip.id,
     clip: layer.clip,
@@ -317,6 +323,8 @@ export default function PreviewCanvas() {
     clipPath: layer.clipPath,
     maskRect: layer.maskRect,
     direction: layer.direction,
+    transform: layer.transform ?? null,
+    filter: layer.filter ?? null,
   }));
 
   // 查找 currentTime 下所有 audio 轨道的活跃 clip
@@ -950,10 +958,24 @@ export default function PreviewCanvas() {
                   if (layer.offsetX !== 0) {
                     // slide：从右侧外（offsetX*stageWidth）滑入归位（0）
                     tStyle.transform = `translateX(${layer.offsetX * stageW}px)`;
+                  } else if (layer.transform) {
+                    // zoom：scale(0.88→1.0) 归位
+                    tStyle.transform = layer.transform;
                   }
-                  if (layer.clipPath) {
-                    // wipe：入片段按 CSS clip-path 揭示（出片段已裁掉对应区域）
+                  if (layer.filter) {
+                    // blur 入片段（清晰，filter 一般用于出片段；此处兼容透传）
+                    tStyle.filter = layer.filter;
+                  }
+                  if (layer.clipPath && !layer.maskImage) {
+                    // wipe（无羽化）：入片段按 CSS clip-path 揭示
                     tStyle.clipPath = layer.clipPath;
+                  }
+                  if (layer.maskImage) {
+                    // wipe + feather：用软边 mask（circle 用 radial-gradient，linear 用 linear-gradient）
+                    tStyle.WebkitMaskImage = layer.maskImage;
+                    tStyle.maskImage = layer.maskImage;
+                    tStyle.WebkitMaskSize = '100% 100%';
+                    tStyle.maskSize = '100% 100%';
                   }
                   return (
                     <video
@@ -969,19 +991,36 @@ export default function PreviewCanvas() {
                 // role === 'active'：正常活跃片段（含出片段在转场窗内淡出）
                 const idx = activeVideoClips.findIndex((c) => c.clip.id === clip.id);
                 const outTr = getOutClipTransition(clip, currentTime);
+                const outStyle: React.CSSProperties = {
+                  ...theme.frameVideo,
+                  zIndex: idx,  // 底层 idx=0，顶层 idx=最大
+                  // 转场：出片段在转场窗内淡出（与 transform.opacity 相乘）
+                  opacity: (clip.transform?.opacity ?? 1) * outTr.opacity,
+                  filter: computeCssFilter(clip),  // HTML5 回退：CSS filter 实时预览插件（WebGPU 走 WGSL）
+                };
+                if (outTr.transform) {
+                  // zoom 出片段放大淡出：scale(1→1.12)
+                  outStyle.transform = outTr.transform;
+                }
+                if (outTr.filter) {
+                  // blur 出片段模糊淡出
+                  outStyle.filter = outStyle.filter ? `${outStyle.filter} ${outTr.filter}` : outTr.filter;
+                }
+                if (outTr.clipPath && !outTr.maskImage) {
+                  outStyle.clipPath = outTr.clipPath;
+                }
+                if (outTr.maskImage) {
+                  outStyle.WebkitMaskImage = outTr.maskImage;
+                  outStyle.maskImage = outTr.maskImage;
+                  outStyle.WebkitMaskSize = '100% 100%';
+                  outStyle.maskSize = '100% 100%';
+                }
                 return (
                   <video
                     key={clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                     src={pathToUrl(asset.path)}
-                    style={{
-                      ...theme.frameVideo,
-                      zIndex: idx,  // 底层 idx=0，顶层 idx=最大
-                      // 转场：出片段在转场窗内淡出（与 transform.opacity 相乘）
-                      opacity: (clip.transform?.opacity ?? 1) * outTr.opacity,
-                      ...(outTr.clipPath ? { clipPath: outTr.clipPath } : {}),
-                      filter: computeCssFilter(clip),  // HTML5 回退：CSS filter 实时预览插件（WebGPU 走 WGSL）
-                    }}
+                    style={outStyle}
                     onLoadedMetadata={onLoadedMetadataFor(clip)}
                     onClick={handleTogglePlay}
                   />
@@ -989,7 +1028,15 @@ export default function PreviewCanvas() {
               })}
             </>
           )
-        ) : null}
+          ) : null}
+
+          {/* flash 转场白场 overlay：全幅白色，叠在转场层之上（pointerEvents none） */}
+          {flashOverlayOpacity > 0.001 && (
+            <div style={{
+              position: 'absolute', inset: 0, background: '#fff',
+              opacity: flashOverlayOpacity, pointerEvents: 'none', zIndex: 200,
+            }} />
+          )}
           {/* 文字/字幕叠加层 */}
           {activeTextOverlays.map((item, idx) => (
             <div

@@ -56,12 +56,28 @@ export interface ClipConfig {
   audioFadeOut?: number;
 }
 // 转场配置（与后端 Transition 结构对应）
-export type TransitionType = 'none' | 'fade' | 'dissolve' | 'slide' | 'wipe';
+export type TransitionType =
+  | 'none'
+  | 'fade'
+  | 'dissolve'
+  | 'slide'
+  | 'wipe'
+  | 'zoom'
+  | 'blur'
+  | 'flash';
 export type WipeDirection = 'left' | 'right' | 'up' | 'down';
+// 缓动曲线：'linear' 易显卡顿；'ease-in-out' 为丝滑默认
+export type TransitionEasing = 'linear' | 'ease-in-out';
+// 擦除遮罩形状：'linear' 线性推扫；'circle' 圆形展开
+export type MaskShape = 'linear' | 'circle';
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'
-  duration?: number;               // 秒，默认 0.5
-  direction?: WipeDirection;       // wipe 方向，默认 'right'
+  duration?: number;               // 秒，默认 0.5，夹取 0.1–3.0
+  direction?: WipeDirection;       // slide / wipe 方向，默认 'right'
+  easing?: TransitionEasing;       // 缓动，默认 'ease-in-out'
+  feather?: number;                // 遮罩羽化 0–30（像素感），默认 10
+  blurAmount?: number;             // 模糊过渡强度 0–100，默认 65
+  maskShape?: MaskShape;           // wipe 遮罩形状，默认 'linear'
 }
 export interface TrackConfig {
   id: string; type: string; order?: number; clips: ClipConfig[];

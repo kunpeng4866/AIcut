@@ -151,6 +151,10 @@ interface ClipItemProps {
 // [timelineOut - duration, timelineOut), drawn as a small rounded block above
 // the clip body. Double-click selects the clip and jumps to the right panel's
 // 'transition' tab; dragging the right edge adjusts the transition duration.
+// 转场时长夹取区间（与共享契约 duration 夹取 [0.1, 3.0] 一致）
+const TRANSITION_MIN = 0.1;
+const TRANSITION_MAX = 3.0;
+
 const TRANSITION_ICON: Record<string, string> = { fade: '✦', dissolve: '◈', slide: '➜' };
 
 function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
@@ -174,7 +178,7 @@ function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
     const onMove = (ev: MouseEvent) => {
       if (!started) { useProjectStore.getState().pushHistorySnapshot(); started = true; }
       const dsec = (ev.clientX - startX) / zoom;
-      const nd = Math.min(3, Math.max(0.1, Math.round((startDur + dsec) * 10) / 10));
+      const nd = Math.min(TRANSITION_MAX, Math.max(TRANSITION_MIN, Math.round((startDur + dsec) * 10) / 10));
       useProjectStore.getState().updateClipLive(track.id, clip.id, { transition: { ...tr, duration: nd } });
     };
     const onUp = () => {

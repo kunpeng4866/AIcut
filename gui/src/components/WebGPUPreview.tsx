@@ -3,7 +3,16 @@
 // 负责：设备初始化、WGSL 渲染管线、rAF 渲染循环（多视频帧上传→多 pass Over 合成→渲染）、资源清理
 import { useEffect, useRef, useState } from 'react';
 import type { ClipConfig, AssetConfig } from '../types';
-import { computeOutClipOpacity, getOutClipTransition } from '../utils/transitionUtils';
+import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
+
+// 从 transform CSS 字符串（如 "scale(1.12)"）解析缩放因子，供 zoom 转场折进 WebGPU 用户 scale
+function parseScale(s: string | null | undefined): number {
+  if (!s) return 1;
+  const mm = /scale\(([^)]+)\)/.exec(s);
+  if (!mm) return 1;
+  const v = parseFloat(mm[1]);
+  return isFinite(v) ? v : 1;
+}
 
 // ── WGSL 着色器 ──
 // Uniform 32 字节：transform(vec4f) + params(vec4f)
@@ -14,6 +23,7 @@ struct Uniforms {
   transform: vec4f,
   params: vec4f,
   mask: vec4f,
+  mask2: vec4f, // x=mode(0=rect,1=circle), y=r(圈半径), z=feather, w=unused
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var videoTexture: texture_2d<f32>;
@@ -70,7 +80,16 @@ struct VSOut {
   let ny = 1.0 - in.uv.y; // 画布坐标 y-down
   let m = u.mask;
   if (nx < m.x || nx > m.z || ny < m.y || ny > m.w) { return vec4f(0.0, 0.0, 0.0, 0.0); }
-  return vec4f(color.rgb, color.a * u.params.y);
+  var alpha = color.a * u.params.y;
+  if (u.mask2.x > 0.5) {
+    // 圆形遮罩（归一化圆）：圈内可见、圈外丢弃；feather 软边 smoothstep
+    let d = distance(vec2f(nx, ny), vec2f(0.5, 0.5));
+    let fw = max(u.mask2.z, 0.001);
+    let a = 1.0 - smoothstep(u.mask2.y - fw, u.mask2.y + fw, d);
+    if (a <= 0.0) { return vec4f(0.0, 0.0, 0.0, 0.0); }
+    alpha = alpha * a;
+  }
+  return vec4f(color.rgb, alpha);
 }
 `;
 
@@ -95,7 +114,7 @@ interface UseWebGPUPreviewOptions {
   /** 全局播放头时间（秒），用于 computeOutClipOpacity 计算转场淡出 */
   currentTime?: number;
   /** 转场入片段层：挂在"出片段"上，转场窗内作为附加合成层叠加在出片段之上 */
-  transitionIncoming?: Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: [number, number, number, number] | null; direction: string }>;
+  transitionIncoming?: Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: MaskRect; direction: string; transform?: string | null; filter?: string | null }>;
 }
 
 /**
@@ -128,7 +147,7 @@ export function useWebGPUPreview({
 
   // 最新播放头时间 / 转场入片段层：渲染循环每帧读取，避免重建渲染循环
   const currentTimeRef = useRef<number>(currentTime ?? 0);
-  const transitionIncomingRef = useRef<Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: [number, number, number, number] | null; direction: string }>>(transitionIncoming ?? []);
+  const transitionIncomingRef = useRef<Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: MaskRect; direction: string; transform?: string | null; filter?: string | null }>>(transitionIncoming ?? []);
 
   // 保存最新 clips 到 ref，避免每帧重建渲染循环
   useEffect(() => { clipsRef.current = clips; }, [clips]);
@@ -234,7 +253,7 @@ export function useWebGPUPreview({
 
         // 预分配 MAX_CLIPS 个 uniform buffer，避免每帧创建/销毁
         uniformBufsRef.current = Array.from({ length: MAX_CLIPS }, () =>
-          device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+          device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
         );
         samplerRef.current = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 
@@ -282,7 +301,7 @@ export function useWebGPUPreview({
       // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
       // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
       // 否则回退采视频元素（现有 seek 路径）。
-      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number; extraOpacity: number; offsetX: number; maskRect: [number, number, number, number] | null }[] = [];
+      const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number; extraOpacity: number; offsetX: number; maskRect: any; transform?: string | null }[] = [];
       for (const { clip } of activeClips) {
         const video = videoRefs.current.get(clip.id);
         // 仅 readyState>=2 不够：video.seeking 中（刚 play/seek 首帧未稳定）或尺寸为 0 时，
@@ -294,7 +313,7 @@ export function useWebGPUPreview({
         const vh = bmp ? bmp.height : (video.videoHeight || canvasHeight);
         // 出片段：转场窗内淡出（computeOutClipOpacity 窗外=1，窗内=1-progress）
         const outTr = getOutClipTransition(clip, currentTimeRef.current);
-        items.push({ source, clip, vw, vh, extraOpacity: outTr.opacity, offsetX: 0, maskRect: outTr.maskRect ?? null });
+        items.push({ source, clip, vw, vh, extraOpacity: outTr.opacity, offsetX: 0, maskRect: outTr.maskRect ?? null, transform: outTr.transform ?? null });
 
         // 转场入片段（同轨下一片段）：转场窗内叠在出片段之上，保持出→入顺序以保证层级正确
         const inc = transitionIncomingRef.current.find((t) => t.outClipId === clip.id);
@@ -305,7 +324,7 @@ export function useWebGPUPreview({
             const isource: HTMLVideoElement | ImageBitmap = ibmp || iv;
             const ivw = ibmp ? ibmp.width : (iv.videoWidth || canvasWidth);
             const ivh = ibmp ? ibmp.height : (iv.videoHeight || canvasHeight);
-            items.push({ source: isource, clip: inc.clip, vw: ivw, vh: ivh, extraOpacity: inc.opacity, offsetX: inc.offsetX, maskRect: inc.maskRect ?? null });
+            items.push({ source: isource, clip: inc.clip, vw: ivw, vh: ivh, extraOpacity: inc.opacity, offsetX: inc.offsetX, maskRect: inc.maskRect ?? null, transform: inc.transform ?? null });
           }
         }
       }
@@ -438,11 +457,23 @@ export function useWebGPUPreview({
           const videoAspect = vw / vh;
 
           const uniformBuf = uniformBufsRef.current[idx];
-          const data = new Float32Array(12);
+          const data = new Float32Array(16);
           data[0] = posX; data[1] = posY; data[2] = scaleX; data[3] = scaleY;
           data[4] = rotation; data[5] = opacity; data[6] = videoAspect; data[7] = canvasAspect;
-          const m = item.maskRect || [0, 0, 1, 1];
-          data[8] = m[0]; data[9] = m[1]; data[10] = m[2]; data[11] = m[3];
+          // maskRect：元组=矩形硬裁切；对象=圆形遮罩（mode=1）
+          let mode = 0, r = 0, feather = 0;
+          let rx0 = 0, ry0 = 0, rx1 = 1, ry1 = 1;
+          const m = item.maskRect;
+          if (m && typeof m === 'object' && !Array.isArray(m)) {
+            mode = 1; r = m.r; feather = m.feather;
+          } else if (Array.isArray(m)) {
+            rx0 = m[0]; ry0 = m[1]; rx1 = m[2]; ry1 = m[3];
+          }
+          data[8] = rx0; data[9] = ry0; data[10] = rx1; data[11] = ry1;
+          data[12] = mode; data[13] = r; data[14] = feather; data[15] = 0;
+          // zoom 转场：把出/入片段的 scale() 折进现有用户 scale
+          const zoom = parseScale(item.transform);
+          if (zoom !== 1) { data[2] *= zoom; data[3] *= zoom; }
           device.queue.writeBuffer(uniformBuf, 0, data);
 
           const bindGroup = device.createBindGroup({

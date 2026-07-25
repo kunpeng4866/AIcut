@@ -187,6 +187,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let gap = curr.timeline_in - prev.timeline_out;
                     // 转场挂在出片段（prev）的 clip.transition（GUI 写入位置），兼容 filters[kind=transition]
                     let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
+                    let trans_params = clip_transition_params(prev).or_else(|| clip_transition_params(curr));
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
                     let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
@@ -196,10 +197,22 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                         let merged = format!("x{}", vci);
                         // 注意：xfade 滤镜没有 fps 参数（会报 "Option not found"），
                         // 帧率一致由各路视频链末尾的 fps=<canvas.fps> 保证。
+                        // xfade 无 easing 参数，xfade 自带缓动近似，无需额外处理。
                         nodes.push(format!("[{}][{}]xfade=transition={}:duration={}:offset={}[{}]",
                             track_acc, curr_label, xstyle, fmt(xdur),
                             fmt((prev.timeline_out - prev.timeline_in) - xdur), merged));
-                        track_acc = merged;
+                        track_acc = merged.clone();
+                        // feather：xfade 的 wipe/circle 无原生软边参数；
+                        // feather>0 时在 xfade 输出后追加 gblur（按 feather 折算 sigma）近似软边。
+                        if let Some((_, _, _, feather, _, _)) = trans_params {
+                            let is_wipe = xstyle.starts_with("wipe") || xstyle == "circleopen";
+                            if is_wipe && feather > 0.0 {
+                                let sigma = (feather * 0.25).max(0.3);
+                                let blurred = format!("xb{}", vci);
+                                nodes.push(format!("[{}]gblur=sigma={:.2}[{}]", merged, sigma, blurred));
+                                track_acc = blurred;
+                            }
+                        }
                     } else {
                         let merged = format!("x{}", vci);
                         nodes.push(format!("[{}][{}]concat=n=2:v=1:a=0[{}]", track_acc, curr_label, merged));
@@ -257,7 +270,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     cmd
 }
 
-/// 将 GUI 的转场类型 + 方向映射为 ffmpeg xfade 的 style 名
+/// 将 GUI 的转场类型 + 方向映射为 ffmpeg xfade 的 style 名。
+/// xfade 无原生 zoom，用 dissolve 近似（缩放感由预览提供，导出走 dissolve 交叉淡化）；
+/// xfade 无 easing 参数，自带缓动近似（注释说明，无额外处理）。
+/// wipe + circle 的圆形展开不在此处理（无 mask_shape 入参），由 clip_transition_params 改用 circleopen。
 fn transition_style(t: &str, dir: &str) -> String {
     match t {
         "fade" => "fade".to_string(),
@@ -272,18 +288,41 @@ fn transition_style(t: &str, dir: &str) -> String {
             "up" => "wipeup", "down" => "wipedown",
             _ => "wipeleft",
         }.to_string(),
+        // 新增转场：xfade 无原生 zoom，用 dissolve 近似
+        "zoom" => "dissolve".to_string(),
+        // blur：xfade 支持 hblur 水平模糊过渡
+        "blur" => "hblur".to_string(),
+        // flash：xfade 支持 fadewhite 白场闪变
+        "flash" => "fadewhite".to_string(),
         _ => "fade".to_string(),
     }
 }
 
-/// 读取 clip 的转场信息（顶层 clip.transition 优先，兼容 filters[kind=transition]）。
-/// 返回 (xfade_style, duration)。无激活转场返回 None。
+/// 读取 clip 的转场全部参数（顶层 clip.transition 优先，兼容 filters[kind=transition]）。
+/// 返回 (xfade_style, duration, easing, feather, mask_shape, blur_amount)。无激活转场返回 None。
+///
 /// 注意：GUI（PropertiesPanel）把转场写入顶层 `clip.transition`，导出必须读这里，
 /// 否则转场在预览可见、导出却消失（历史 bug）。
-fn clip_transition(clip: &Clip) -> Option<(String, f64)> {
+///
+/// wipe + circle 用 xfade 原生 `circleopen`（圆形展开）；其余新类型在 transition_style 映射。
+/// easing / feather / mask_shape / blur_amount 这几个字段 export.rs（逐帧路径）消费；
+/// ffmpeg 路径仅 feather 对 wipe/circle 生效（boxblur 软边近似，见 build_render_command）。
+fn clip_transition_params(clip: &Clip) -> Option<(String, f64, String, f64, String, f64)> {
     if let Some(tr) = &clip.transition {
         if tr.transition_type != "none" && tr.duration > 0.0 {
-            return Some((transition_style(&tr.transition_type, &tr.direction), tr.duration));
+            // wipe + circle → circleopen 圆形展开
+            let mut style = transition_style(&tr.transition_type, &tr.direction);
+            if tr.transition_type == "wipe" && tr.mask_shape == "circle" {
+                style = "circleopen".to_string();
+            }
+            return Some((
+                style,
+                tr.duration,
+                tr.easing.clone(),
+                tr.feather,
+                tr.mask_shape.clone(),
+                tr.blur_amount,
+            ));
         }
     }
     if let Some(f) = clip.filters.iter().find(|f| f.kind == "transition" && f.enabled) {
@@ -291,9 +330,19 @@ fn clip_transition(clip: &Clip) -> Option<(String, f64)> {
             .map(|&s| match s as i32 { 1=>"dissolve",2=>"wipeleft",3=>"wiperight",4=>"wipeup",5=>"wipedown",6=>"slideleft",7=>"slideright",8=>"slideup",9=>"slidedown",_=>"fade" })
             .unwrap_or("fade").to_string();
         let dur = f.params.get("duration").copied().filter(|d| *d > 0.0).map(|d| d.min(5.0).max(0.1)).unwrap_or(0.5);
-        return Some((style, dur));
+        // 旧 filters 路径无新字段，给合理默认值
+        return Some((style, dur, "ease-in-out".to_string(), 10.0, "linear".to_string(), 65.0));
     }
     None
+}
+
+/// 读取 clip 的转场信息（顶层 clip.transition 优先，兼容 filters[kind=transition]）。
+/// 返回 (xfade_style, duration)。无激活转场返回 None。
+/// 注意：GUI（PropertiesPanel）把转场写入顶层 `clip.transition`，导出必须读这里，
+/// 否则转场在预览可见、导出却消失（历史 bug）。
+/// 兼容保留版，转发到 clip_transition_params。
+fn clip_transition(clip: &Clip) -> Option<(String, f64)> {
+    clip_transition_params(clip).map(|(s, d, _, _, _, _)| (s, d))
 }
 
 /// 读取片段激活转场时长（顶层 `clip.transition` 优先，兼容 `filters[kind=transition]`），

@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
-import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
+import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, MaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
 
@@ -730,15 +730,38 @@ const TRANSITION_TYPES: { value: TransitionType; label: string }[] = [
   { value: 'slide', label: '滑动' },
   { value: 'wipe', label: '擦除' },
 ];
-const TRANSITION_PRESETS: { key: string; label: string; type: TransitionType; duration: number; direction?: WipeDirection }[] = [
-  { key: 'crossfade', label: '交叉淡化', type: 'fade', duration: 0.5 },
-  { key: 'dissolve', label: '交叉溶解', type: 'dissolve', duration: 0.5 },
-  { key: 'slideR', label: '右滑入', type: 'slide', duration: 0.6 },
-  { key: 'slideL', label: '左滑入', type: 'slide', duration: 0.6, direction: 'left' },
-  { key: 'wipeR', label: '右擦除', type: 'wipe', duration: 0.6, direction: 'right' },
-  { key: 'wipeL', label: '左擦除', type: 'wipe', duration: 0.6, direction: 'left' },
-  { key: 'wipeU', label: '上擦除', type: 'wipe', duration: 0.6, direction: 'up' },
-  { key: 'wipeD', label: '下擦除', type: 'wipe', duration: 0.6, direction: 'down' },
+// 由预设对象构造写入 transition 的字段；只写 preset 中存在的字段，缺失字段传 undefined 由 store omit
+function buildPresetTransition(p: { type: TransitionType; duration: number; direction?: WipeDirection; easing?: TransitionEasing; feather?: number; blurAmount?: number; maskShape?: MaskShape }) {
+  return {
+    transitionType: p.type,
+    duration: p.duration,
+    direction: p.direction,
+    easing: p.easing ?? 'ease-in-out',
+    feather: p.feather,
+    blurAmount: p.blurAmount,
+    maskShape: p.maskShape,
+  };
+}
+
+// 转场预设库（覆盖市场调研 Top10「丝滑主力」；每项带 easing 落实自然出厂默认）
+const TRANSITION_PRESETS: {
+  key: string; label: string; type: TransitionType; duration: number;
+  direction?: WipeDirection; easing: TransitionEasing; feather?: number;
+  blurAmount?: number; maskShape?: MaskShape;
+}[] = [
+  { key: 'none', label: '硬切', type: 'none', duration: 0, easing: 'ease-in-out' },
+  { key: 'dissolve', label: '交叉溶解', type: 'dissolve', duration: 0.5, easing: 'ease-in-out' },
+  { key: 'fade', label: '淡出黑场', type: 'fade', duration: 1.0, easing: 'ease-in-out' },
+  { key: 'slideR', label: '向右滑动', type: 'slide', duration: 0.4, direction: 'right', easing: 'ease-in-out' },
+  { key: 'slideL', label: '向左滑动', type: 'slide', duration: 0.4, direction: 'left', easing: 'ease-in-out' },
+  { key: 'slideU', label: '向上滑动', type: 'slide', duration: 0.4, direction: 'up', easing: 'ease-in-out' },
+  { key: 'slideD', label: '向下滑动', type: 'slide', duration: 0.4, direction: 'down', easing: 'ease-in-out' },
+  { key: 'zoom', label: '缩放推进', type: 'zoom', duration: 0.4, easing: 'ease-in-out' },
+  { key: 'wipeR', label: '线性擦除·右', type: 'wipe', duration: 0.8, direction: 'right', easing: 'ease-in-out', feather: 10, maskShape: 'linear' },
+  { key: 'wipeL', label: '线性擦除·左', type: 'wipe', duration: 0.8, direction: 'left', easing: 'ease-in-out', feather: 10, maskShape: 'linear' },
+  { key: 'wipeCircle', label: '圆形擦除', type: 'wipe', duration: 0.8, easing: 'ease-in-out', feather: 10, maskShape: 'circle' },
+  { key: 'blur', label: '模糊过渡', type: 'blur', duration: 0.4, easing: 'ease-in-out', blurAmount: 65 },
+  { key: 'flash', label: '闪白', type: 'flash', duration: 0.2, easing: 'ease-in-out' },
 ];
 function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
@@ -746,19 +769,26 @@ function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string })
   const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
   const project = useProjectStore((s) => s.project);
   const tr: TransitionConfig = clip.transition || { transitionType: 'none', duration: 0.5 };
+  const [activePreset, setActivePreset] = useState<typeof TRANSITION_PRESETS[number] | null>(null);
   const setType = (t: TransitionType) => updateClip(trackId, clip.id, { transition: { ...tr, transitionType: t } });
   const setDur = (d: number) => updateClipLive(trackId, clip.id, { transition: { ...tr, duration: d } });
   const setDir = (d: WipeDirection) => updateClip(trackId, clip.id, { transition: { ...tr, direction: d } });
+  // 复用现有相邻片段判定：同轨内某片段存在「下一片段起点 ≈ 本片段终点」即视为相邻出片段
   const applyToAll = () => {
+    const base = activePreset ? buildPresetTransition(activePreset) : { ...tr };
     for (const track of project.tracks.filter((t) => t.type === 'video' || t.type === 'audio')) {
       for (const c of track.clips) {
         const hasNext = track.clips.some((n) => n.id !== c.id && n.timelineIn >= c.timelineOut - 1e-4);
-        if (hasNext) updateClip(track.id, c.id, { transition: { ...tr } });
+        if (hasNext) updateClip(track.id, c.id, { transition: base });
       }
     }
   };
   return (
     <div>
+      {/* 克制引导：提示用户克制使用转场，落实自然观感的出厂默认 */}
+      <div style={{ background: 'rgba(15,52,96,0.6)', border: '1px solid #0f3460', borderRadius: 4, padding: '6px 8px', fontSize: 11, color: '#cfd8e8', lineHeight: 1.5, marginBottom: 10 }}>
+        💡 丝滑法则：整片转场种类 ≤ 3 种；每 10 秒 ≤ 1 个转场。缓动默认 ease-in-out、遮罩默认羽化，已是自然观感。
+      </div>
       <div style={S.row}>
         <span style={S.label}>类型</span>
         <select style={S.input} value={tr.transitionType ?? 'none'} onChange={(e) => setType(e.target.value as TransitionType)}>
@@ -782,7 +812,7 @@ function TransitionTab({ clip, trackId }: { clip: ClipConfig; trackId: string })
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {TRANSITION_PRESETS.map((p) => (
             <button key={p.key} style={{ ...S.btn, fontSize: 11, padding: '4px 8px' }}
-              onClick={() => updateClip(trackId, clip.id, { transition: { transitionType: p.type, duration: p.duration, direction: p.direction } })}>
+              onClick={() => { setActivePreset(p); updateClip(trackId, clip.id, { transition: buildPresetTransition(p) }); }}>
               {p.label}
             </button>
           ))}

@@ -633,28 +633,37 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         video_clips.sort_by_key(|c| c.track_order);
 
         // ── 转场检测 ──
-        // 对处于转场区的 active clip，记录其淡出 opacity，并收集同轨下一 clip
-        let mut fade_out: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
-        let mut out_mask: std::collections::HashMap<&str, (f32, f32, f32, f32)> = std::collections::HashMap::new();
-        // (入片段, progress, duration, 类型, 方向)
-        let mut extra_next: Vec<(&Clip, f64, f64, String, String)> = Vec::new();
+        // 对处于转场区的 active clip，记录其转场全部参数，并收集同轨下一 clip（入片段）。
+        // 新增转场 zoom / blur / flash 与字段 easing / feather / mask_shape / blur_amount 在此消费。
+        let mut out_trans: std::collections::HashMap<&str, ActiveTransition> = std::collections::HashMap::new();
+        // (入片段, 转场参数)
+        let mut extra_next: Vec<(&Clip, ActiveTransition)> = Vec::new();
+        // flash 白场叠加强度（sin(ep·π)），取活跃转场中的最大值
+        let mut flash_alpha: f64 = 0.0;
         for cr in &video_clips {
             if let Some(tr) = &cr.clip.transition {
                 if tr.transition_type != "none" && tr.duration > 0.0 {
                     let trans_start = cr.clip.timeline_out - tr.duration;
                     if t >= trans_start && t < cr.clip.timeline_out {
                         let progress = ((t - trans_start) / tr.duration).max(0.0).min(1.0);
-                        let tt = tr.transition_type.clone();
-                        let dir = tr.direction.clone();
-                        if tt == "wipe" {
-                            // wipe：出片段满不透明，仅按方向矩形裁剪（与 transitionUtils.wipeRects 一致）
-                            let (out_rect, _in_rect) = wipe_rects(&dir, progress);
-                            out_mask.insert(cr.clip.id.as_str(), out_rect);
-                        } else {
-                            fade_out.insert(cr.clip.id.as_str(), 1.0 - progress);
+                        // ep = 缓动后进度；easing 对导出逐帧路径生效（xfade 路径无此参数，靠近似）
+                        let ep = eased(progress, &tr.easing);
+                        let params = ActiveTransition {
+                            progress,
+                            ep,
+                            duration: tr.duration,
+                            tt: tr.transition_type.clone(),
+                            dir: tr.direction.clone(),
+                            feather: tr.feather,
+                            mask_shape: tr.mask_shape.clone(),
+                            blur_amount: tr.blur_amount,
+                        };
+                        out_trans.insert(cr.clip.id.as_str(), params.clone());
+                        if tr.transition_type == "flash" {
+                            flash_alpha = flash_alpha.max((ep * std::f64::consts::PI).sin());
                         }
                         if let Some(next) = self.find_next_clip(cr.track_id, cr.clip.timeline_out) {
-                            extra_next.push((next, progress, tr.duration, tt, dir));
+                            extra_next.push((next, params));
                         }
                     }
                 }
@@ -688,13 +697,13 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
             PrefetchRequest { asset_path, source_time: src_t, width: w, height: h }
         }).collect();
-        for (next, progress, dur, _tt, _dir) in &extra_next {
+        for (next, tp) in &extra_next {
             // 转场窗内入片段源时间：用虚拟 timeline_in（转场窗起点 = next.timeline_in - dur）
             // 从窗起点起算，progress·dur 对应入片段已播放的时长。
             // local_t = (next.timeline_in - dur) + progress·dur，progress=0→虚拟起点（off=0→src_range.start），
             // progress=1→next.timeline_in（off=dur→src_range.start + dur·speed），与窗后（虚拟 timeline_in）连续。
-            let virtual_in = incoming_virtual_in.get(next.id.as_str()).copied().unwrap_or(next.timeline_in - *dur);
-            let local_t = virtual_in + *progress * *dur;
+            let virtual_in = incoming_virtual_in.get(next.id.as_str()).copied().unwrap_or(next.timeline_in - tp.duration);
+            let local_t = virtual_in + tp.progress * tp.duration;
             let src_t = clip_source_time_with_in(local_t, next, Some(virtual_in)).0;
             let (w, h) = self.clip_decode_size(next);
             let asset = self.project.asset_by_id(&next.asset_id);
@@ -713,22 +722,40 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
                 .decode(&req.asset_path, req.source_time, req.width, req.height)
                 .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", clip.asset_id, e)))?;
             let mut tf = clip.transform.clone();
-            if let Some(o) = fade_out.get(cr.clip.id.as_str()) { tf.opacity *= o; }
-            let reveal = out_mask.get(cr.clip.id.as_str()).copied();
-            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &clip.asset_id), transform: tf, reveal_mask: reveal });
+            let mut vframe = frame.to_video_frame(t, &clip.asset_id);
+            // 出片段转场效果（zoom/blur/flash/wipe/feather/circle 在此施加）
+            if let Some(tp) = out_trans.get(cr.clip.id.as_str()) {
+                apply_outgoing_transition(&mut vframe, &mut tf, tp);
+            }
+            layers.push(CompositeLayer { frame: vframe, transform: tf, reveal_mask: None });
         }
         // 额外层：转场后 clip（叠加在顶层，淡入/滑入/wipe 揭示）
-        for ((next, progress, _dur, tt, dir), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
+        for ((next, tp), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
             let frame = self.decoder_pool
                 .decode(&req.asset_path, req.source_time, req.width, req.height)
                 .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", next.asset_id, e)))?;
             let mut tf = next.transform.clone();
-            let reveal = match tt.as_str() {
-                "slide" => { tf.x = 1.5 - *progress; tf.opacity *= *progress; None } // 从右侧滑入（简化）
-                "wipe" => { tf.opacity *= 1.0; Some(wipe_rects(dir, *progress).1) } // 入片段矩形揭示
-                _ => { tf.opacity *= *progress; None } // fade / dissolve 用 opacity 交叉淡化
+            let mut vframe = frame.to_video_frame(t, &next.asset_id);
+            // 入片段转场效果
+            apply_incoming_transition(&mut vframe, &mut tf, tp);
+            layers.push(CompositeLayer { frame: vframe, transform: tf, reveal_mask: None });
+        }
+        // flash 白场叠加（alpha = sin(ep·π)），置于最顶层
+        if flash_alpha > 1e-4 {
+            let w = self.config.width;
+            let h = self.config.height;
+            let white = VideoFrame {
+                width: w,
+                height: h,
+                format: PixelFormat::Rgba8,
+                data: vec![255u8; (w as usize) * (h as usize) * 4],
+                timestamp: t,
+                source_asset_id: String::new(),
+                source_time: 0.0,
             };
-            layers.push(CompositeLayer { frame: frame.to_video_frame(t, &next.asset_id), transform: tf, reveal_mask: reveal });
+            let mut wf = crate::compositor::default_transform();
+            wf.opacity = flash_alpha;
+            layers.push(CompositeLayer { frame: white, transform: wf, reveal_mask: None });
         }
 
         // 4. 多轨道 Over 合成（输出画布尺寸的 RGBA 帧）
@@ -913,6 +940,239 @@ fn wipe_rects(direction: &str, p: f64) -> ((f32, f32, f32, f32), (f32, f32, f32,
         "down" => ((0.0, c, 1.0, 1.0), (0.0, 0.0, 1.0, c)),
         _ => ((c, 0.0, 1.0, 1.0), (0.0, 0.0, c, 1.0)), // right
     }
+}
+
+/// 导出逐帧路径内部的转场渲染参数
+#[derive(Clone)]
+struct ActiveTransition {
+    progress: f64,    // 线性进度 0..1
+    ep: f64,          // 缓动后进度（easing 作用）
+    duration: f64,    // 转场时长（秒）
+    tt: String,       // 转场类型
+    dir: String,      // 方向
+    feather: f64,     // 遮罩羽化 0–30
+    mask_shape: String, // linear | circle
+    blur_amount: f64, // 模糊强度 0–100
+}
+
+/// 缓动：linear 原样返回；ease-in-out 用 cosine 缓动 0.5 - 0.5·cos(π·p)。
+fn eased(p: f64, easing: &str) -> f64 {
+    let p = p.max(0.0).min(1.0);
+    match easing {
+        "linear" => p,
+        _ => 0.5 - 0.5 * (p * std::f64::consts::PI).cos(),
+    }
+}
+
+/// 出片段转场效果。zoom/blur/flash/wipe 在此施加到帧/变换上。
+fn apply_outgoing_transition(frame: &mut VideoFrame, tf: &mut crate::project::Transform, tp: &ActiveTransition) {
+    match tp.tt.as_str() {
+        // zoom：出片段 1.0→1.12 放大（自中心）+ equal-power 淡出
+        "zoom" => {
+            let s = 1.0 + 0.12 * tp.ep;
+            tf.scale_x = s;
+            tf.scale_y = s;
+            tf.opacity *= (tp.ep * std::f64::consts::FRAC_PI_2).cos();
+        }
+        // blur：出片段逐帧模糊（强度 = blur_amount/100·maxBlur·ep）+ equal-power 淡出；入片段清晰
+        "blur" => {
+            let max_blur = 8.0;
+            let r = (tp.blur_amount / 100.0 * max_blur * tp.ep).round() as u32;
+            if r > 0 {
+                box_blur_color(frame, r);
+            }
+            tf.opacity *= (tp.ep * std::f64::consts::FRAC_PI_2).cos();
+        }
+        // flash：equal-power 淡出，白场叠加在 render_video_frame 末尾统一处理
+        "flash" => {
+            tf.opacity *= (tp.ep * std::f64::consts::FRAC_PI_2).cos();
+        }
+        // wipe：线性矩形或圆形遮罩揭示；feather>0 对遮罩 alpha 做 boxblur 近似软边
+        "wipe" => {
+            if tp.mask_shape == "circle" {
+                apply_circle_mask(frame, tp.ep, true);
+            } else {
+                apply_linear_wipe_mask(frame, &tp.dir, tp.progress, true);
+            }
+            if tp.feather > 0.0 {
+                feather_alpha(frame, tp.feather);
+            }
+        }
+        // slide / fade / dissolve 及其它：线性淡出（保持原行为 1-progress）
+        _ => {
+            tf.opacity *= 1.0 - tp.progress;
+        }
+    }
+}
+
+/// 入片段转场效果。
+fn apply_incoming_transition(frame: &mut VideoFrame, tf: &mut crate::project::Transform, tp: &ActiveTransition) {
+    match tp.tt.as_str() {
+        // slide：从右侧滑入（简化），opacity 线性 0→1
+        "slide" => {
+            tf.x = 1.5 - tp.progress;
+            tf.opacity *= tp.progress;
+        }
+        // wipe：线性矩形或圆形遮罩揭示；feather 软边
+        "wipe" => {
+            if tp.mask_shape == "circle" {
+                apply_circle_mask(frame, tp.ep, false);
+            } else {
+                apply_linear_wipe_mask(frame, &tp.dir, tp.progress, false);
+            }
+            if tp.feather > 0.0 {
+                feather_alpha(frame, tp.feather);
+            }
+        }
+        // zoom：入片段 0.88→1.0 放大 + equal-power 淡入
+        "zoom" => {
+            let s = 0.88 + 0.12 * tp.ep;
+            tf.scale_x = s;
+            tf.scale_y = s;
+            tf.opacity *= (tp.ep * std::f64::consts::FRAC_PI_2).sin();
+        }
+        // blur：入片段清晰，equal-power 淡入
+        "blur" => {
+            tf.opacity *= (tp.ep * std::f64::consts::FRAC_PI_2).sin();
+        }
+        // flash：equal-power 淡入，白场叠加统一处理
+        "flash" => {
+            tf.opacity *= (tp.ep * std::f64::consts::FRAC_PI_2).sin();
+        }
+        // fade / dissolve：线性 opacity 交叉
+        _ => {
+            tf.opacity *= tp.progress;
+        }
+    }
+}
+
+/// 线性 wipe 遮罩：按方向矩形裁剪出片段/入片段的保留区域，直接写帧 alpha（替代 compositor 的 reveal_mask）。
+/// is_outgoing=true → 仅保留 rect 内像素（出片段保留区）；false → 仅保留 rect 内（入片段揭示区）。
+fn apply_linear_wipe_mask(frame: &mut VideoFrame, dir: &str, p: f64, is_outgoing: bool) {
+    let (out_r, in_r) = wipe_rects(dir, p);
+    let rect = if is_outgoing { out_r } else { in_r };
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    for y in 0..h {
+        let ny = (y as f32 + 0.5) / h as f32;
+        for x in 0..w {
+            let nx = (x as f32 + 0.5) / w as f32;
+            let inside = nx >= rect.0 && nx <= rect.2 && ny >= rect.1 && ny <= rect.3;
+            let a: u8 = if inside { 255 } else { 0 };
+            let idx = (y * w + x) * 4;
+            frame.data[idx + 3] = a;
+        }
+    }
+}
+
+/// 圆形 wipe 遮罩：像素空间居中圆，半径随 ep 0→1 展开（ep=1 覆盖全帧）。
+/// is_outgoing=true → 圆内透明（让入片段透出）；false → 仅圆内可见。
+fn apply_circle_mask(frame: &mut VideoFrame, ep: f64, is_outgoing: bool) {
+    let w = frame.width as f32;
+    let h = frame.height as f32;
+    let cx = w / 2.0;
+    let cy = h / 2.0;
+    let max_r = w.max(h) / 2.0;
+    let r = (ep as f32) * max_r;
+    let rw = frame.width as usize;
+    let rh = frame.height as usize;
+    for y in 0..rh {
+        let dy = (y as f32 + 0.5) - cy;
+        for x in 0..rw {
+            let dx = (x as f32 + 0.5) - cx;
+            let inside = (dx * dx + dy * dy) <= r * r;
+            let a: u8 = match (is_outgoing, inside) {
+                (true, true) => 0,
+                (true, false) => 255,
+                (false, true) => 255,
+                (false, false) => 0,
+            };
+            let idx = (y * rw + x) * 4;
+            frame.data[idx + 3] = a;
+        }
+    }
+}
+
+/// 对遮罩 alpha 做 boxblur 近似软边（feather 折算为像素半径）。
+fn feather_alpha(frame: &mut VideoFrame, feather: f64) {
+    let r = feather.max(0.0).round() as usize;
+    if r == 0 {
+        return;
+    }
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mut alpha: Vec<u8> = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            alpha.push(frame.data[(y * w + x) * 4 + 3]);
+        }
+    }
+    let blurred = box_blur_channel(&alpha, w, h, r);
+    for y in 0..h {
+        for x in 0..w {
+            frame.data[(y * w + x) * 4 + 3] = blurred[y * w + x];
+        }
+    }
+}
+
+/// 对 RGB 三通道做 boxblur（模糊出片段画面，保留 alpha）。简化近似用 3×3 量级可控半径盒滤波。
+fn box_blur_color(frame: &mut VideoFrame, radius: u32) {
+    let r = radius as usize;
+    if r == 0 {
+        return;
+    }
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    for c in 0..3 {
+        let mut ch: Vec<u8> = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                ch.push(frame.data[(y * w + x) * 4 + c]);
+            }
+        }
+        let blurred = box_blur_channel(&ch, w, h, r);
+        for y in 0..h {
+            for x in 0..w {
+                frame.data[(y * w + x) * 4 + c] = blurred[y * w + x];
+            }
+        }
+    }
+}
+
+/// 单通道可分离 boxblur（水平 + 垂直各一遍，每遍局部均值）。
+fn box_blur_channel(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
+    if r == 0 {
+        return src.to_vec();
+    }
+    let mut hpass = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let x0 = x.saturating_sub(r);
+            let x1 = (x + r).min(w - 1);
+            let mut s: u32 = 0;
+            let mut n: u32 = 0;
+            for k in x0..=x1 {
+                s += src[y * w + k] as u32;
+                n += 1;
+            }
+            hpass[y * w + x] = (s / n) as u8;
+        }
+    }
+    let mut out = vec![0u8; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            let y0 = y.saturating_sub(r);
+            let y1 = (y + r).min(h - 1);
+            let mut s: u32 = 0;
+            let mut n: u32 = 0;
+            for k in y0..=y1 {
+                s += hpass[k * w + x] as u32;
+                n += 1;
+            }
+            out[y * w + x] = (s / n) as u8;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
