@@ -185,24 +185,14 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 for ci in 1..clips.len() {
                     let prev = clips[ci - 1]; let curr = clips[ci];
                     let gap = curr.timeline_in - prev.timeline_out;
-                    let has_transition = prev.filters.iter().any(|f| f.kind == "transition" && f.enabled)
-                        || curr.filters.iter().any(|f| f.kind == "transition" && f.enabled);
+                    // 转场挂在出片段（prev）的 clip.transition（GUI 写入位置），兼容 filters[kind=transition]
+                    let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
+                    let has_transition = trans_opt.is_some() && gap <= 0.0;
                     let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
-                    if has_transition && gap <= 0.0 {
-                        // 优先用用户设置的转场时长（filters params.duration），否则用两 clip 重叠时长
-                        let trans_filter = prev.filters.iter().chain(curr.filters.iter())
-                            .find(|f| f.kind == "transition" && f.enabled);
-                        let xdur = trans_filter
-                            .and_then(|f| f.params.get("duration"))
-                            .copied()
-                            .filter(|d| *d > 0.0)
-                            .map(|d| d.min(5.0).max(0.1))
-                            .unwrap_or_else(|| (-gap).min(1.0).max(0.1));
-                        let xstyle = trans_filter
-                            .and_then(|f| f.params.get("style"))
-                            .map(|&s| match s as i32 { 1=>"dissolve",2=>"wipeleft",3=>"wiperight",4=>"wipeup",5=>"wipedown",6=>"slideleft",7=>"slideright",8=>"slideup",9=>"slidedown",_=>"fade"})
-                            .unwrap_or("fade");
+                    if has_transition {
+                        let (xstyle, xdur_raw) = trans_opt.unwrap();
+                        let xdur = xdur_raw.min(5.0).max(0.1);
                         let merged = format!("x{}", vci);
                         // 注意：xfade 滤镜没有 fps 参数（会报 "Option not found"），
                         // 帧率一致由各路视频链末尾的 fps=<canvas.fps> 保证。
@@ -254,13 +244,83 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         }
         nodes.extend(audio_parts);
     } else if !video_clips.is_empty() {
-        // 无显式音频轨道时，自动从第一个视频输入提取音频
-        aout_label = "[0:a]".to_string();
+        // 无显式音频轨道：从所有视频输入提取音频，按各 clip 的 timeline_in 偏移后混音。
+        // 这样多 clip 工程（含转场）也能保留每段视频的原声，而非仅取第一个输入（旧 [0:a] 写法）。
+        // 每个输入音频经 anull/adelay 输出为滤镜标签，再统一 amix，避免 [0:a] 方括号被误判为滤镜标签而丢轨。
+        let mut audio_offsets: HashMap<usize, f64> = HashMap::new();
+        for (_, c) in &video_clips {
+            if let Some(&idx) = asset_to_idx.get(&c.asset_id) {
+                let e = audio_offsets.entry(idx).or_insert(f64::MAX);
+                if c.timeline_in < *e { *e = c.timeline_in; }
+            }
+        }
+        let mut audio_parts: Vec<String> = Vec::new();
+        let mut ainx: Vec<String> = Vec::new();
+        let mut ai = 0usize;
+        for (idx, off) in audio_offsets.iter() {
+            let alabel = format!("a{}", ai);
+            let delay_ms = (off * 1000.0).round() as i64;
+            let mut achain = format!("[{}:a]", idx);
+            if delay_ms > 0 { achain.push_str(&format!("adelay={}:all=1", delay_ms)); }
+            else { achain.push_str("anull"); }
+            achain.push_str(&format!("[{}]", alabel));
+            audio_parts.push(achain);
+            ainx.push(format!("[{}]", alabel));
+            ai += 1;
+        }
+        if ainx.len() == 1 {
+            aout_label = ainx[0].clone();
+        } else if ainx.len() > 1 {
+            audio_parts.push(format!("{}amix=inputs={}:duration=longest[aout]", ainx.join(""), ainx.len()));
+            aout_label = "[aout]".to_string();
+        }
+        nodes.extend(audio_parts);
     }
     cmd.filter_graph = nodes.join(";");
-    let map_label = format!("{}{}", vout_label, aout_label);
-    if !map_label.is_empty() { cmd.map_label = Some(map_label); }
+    let mut map_labels: Vec<String> = Vec::new();
+    if !vout_label.is_empty() { map_labels.push(vout_label); }
+    if !aout_label.is_empty() { map_labels.push(aout_label); }
+    if !map_labels.is_empty() { cmd.map_labels = map_labels; }
     cmd
+}
+
+/// 将 GUI 的转场类型 + 方向映射为 ffmpeg xfade 的 style 名
+fn transition_style(t: &str, dir: &str) -> String {
+    match t {
+        "fade" => "fade".to_string(),
+        "dissolve" => "dissolve".to_string(),
+        "slide" => match dir {
+            "left" => "slideleft", "right" => "slideright",
+            "up" => "slideup", "down" => "slidedown",
+            _ => "slideright",
+        }.to_string(),
+        "wipe" => match dir {
+            "left" => "wipeleft", "right" => "wiperight",
+            "up" => "wipeup", "down" => "wipedown",
+            _ => "wipeleft",
+        }.to_string(),
+        _ => "fade".to_string(),
+    }
+}
+
+/// 读取 clip 的转场信息（顶层 clip.transition 优先，兼容 filters[kind=transition]）。
+/// 返回 (xfade_style, duration)。无激活转场返回 None。
+/// 注意：GUI（PropertiesPanel）把转场写入顶层 `clip.transition`，导出必须读这里，
+/// 否则转场在预览可见、导出却消失（历史 bug）。
+fn clip_transition(clip: &Clip) -> Option<(String, f64)> {
+    if let Some(tr) = &clip.transition {
+        if tr.transition_type != "none" && tr.duration > 0.0 {
+            return Some((transition_style(&tr.transition_type, &tr.direction), tr.duration));
+        }
+    }
+    if let Some(f) = clip.filters.iter().find(|f| f.kind == "transition" && f.enabled) {
+        let style = f.params.get("style")
+            .map(|&s| match s as i32 { 1=>"dissolve",2=>"wipeleft",3=>"wiperight",4=>"wipeup",5=>"wipedown",6=>"slideleft",7=>"slideright",8=>"slideup",9=>"slidedown",_=>"fade" })
+            .unwrap_or("fade").to_string();
+        let dur = f.params.get("duration").copied().filter(|d| *d > 0.0).map(|d| d.min(5.0).max(0.1)).unwrap_or(0.5);
+        return Some((style, dur));
+    }
+    None
 }
 
 /// 解析工程 JSON → 构建 FFmpeg 命令字符串

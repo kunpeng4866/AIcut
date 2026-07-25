@@ -31,8 +31,10 @@ pub fn resolve_encoder(preset: &str, codec_type: &str) -> &'static str {
 pub struct RenderCommand {
     pub inputs: Vec<String>,
     pub filter_graph: String,
-    /// 滤镜图最终输出标签（如 "[vout]"），非空时追加 `-map`
-    pub map_label: Option<String>,
+    /// 滤镜图输出标签列表，每个元素追加为一个独立 `-map` 参数。
+    /// 视频用 `[vout]` 滤镜标签，音频用 `[a0]`/`[aout]` 滤镜标签或 `0:a` 文件索引。
+    /// 必须拆分多个 `-map`：音频不能写成 `[0:a]`（方括号是滤镜标签语法，会被当成不存在的标签而丢轨）。
+    pub map_labels: Vec<String>,
     pub output_codec: String,
     pub crf: u32,
     pub resolution: (u32, u32),
@@ -45,7 +47,7 @@ impl Default for RenderCommand {
         Self {
             inputs: Vec::new(),
             filter_graph: String::new(),
-            map_label: None,
+            map_labels: Vec::new(),
             output_codec: DEFAULT_CODEC.to_string(),
             crf: DEFAULT_CRF,
             resolution: (1920, 1080),
@@ -69,11 +71,13 @@ impl RenderCommand {
     /// 构建输出参数
     pub fn build_output_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        if let Some(label) = &self.map_label {
-            args.push("-map".to_string());
-            args.push(label.clone());
-            // 检测是否包含音频流（[a0] [aout] [0:a] 等）
-            let has_audio = label.contains("[a") || label.contains(":a]");
+        if !self.map_labels.is_empty() {
+            for label in &self.map_labels {
+                args.push("-map".to_string());
+                args.push(label.clone());
+            }
+            // 检测是否包含音频流（[a0] [aout] 等滤镜标签，或 0:a 文件索引）
+            let has_audio = self.map_labels.iter().any(|l| l.contains("[a") || l.starts_with("0:a") || l.contains(":a"));
             if has_audio {
                 args.extend(["-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string()]);
             }
