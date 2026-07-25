@@ -410,6 +410,10 @@ pub fn build_clip_filters(clip: &Clip) -> Option<String> {
         if !f.enabled {
             continue;
         }
+        // transition 是 clip 间的合并操作（xfade），不是单 clip 滤镜，单 clip 链里不能生成 xfade
+        if f.kind == "transition" {
+            continue;
+        }
         if plugin_manager().get(&f.kind).is_some() {
             if let Ok(s) = plugin_manager().build_filter(&f.kind, &f.params) {
                 if !s.is_empty() {
@@ -424,6 +428,9 @@ pub fn build_clip_filters(clip: &Clip) -> Option<String> {
     }
     for e in &clip.effects {
         if !e.enabled {
+            continue;
+        }
+        if e.kind == "transition" {
             continue;
         }
         if plugin_manager().get(&e.kind).is_some() {

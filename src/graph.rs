@@ -190,16 +190,25 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
                     if has_transition && gap <= 0.0 {
-                        let xdur = (-gap).min(1.0).max(0.1);
-                        let xstyle = prev.filters.iter().chain(curr.filters.iter())
-                            .find(|f| f.kind == "transition" && f.enabled)
+                        // 优先用用户设置的转场时长（filters params.duration），否则用两 clip 重叠时长
+                        let trans_filter = prev.filters.iter().chain(curr.filters.iter())
+                            .find(|f| f.kind == "transition" && f.enabled);
+                        let xdur = trans_filter
+                            .and_then(|f| f.params.get("duration"))
+                            .copied()
+                            .filter(|d| *d > 0.0)
+                            .map(|d| d.min(5.0).max(0.1))
+                            .unwrap_or_else(|| (-gap).min(1.0).max(0.1));
+                        let xstyle = trans_filter
                             .and_then(|f| f.params.get("style"))
                             .map(|&s| match s as i32 { 1=>"dissolve",2=>"wipeleft",3=>"wiperight",4=>"wipeup",5=>"wipedown",6=>"slideleft",7=>"slideright",8=>"slideup",9=>"slidedown",_=>"fade"})
                             .unwrap_or("fade");
                         let merged = format!("x{}", vci);
-                        nodes.push(format!("[{}][{}]xfade=transition={}:duration={}:offset={}:fps={}[{}]",
+                        // 注意：xfade 滤镜没有 fps 参数（会报 "Option not found"），
+                        // 帧率一致由各路视频链末尾的 fps=<canvas.fps> 保证。
+                        nodes.push(format!("[{}][{}]xfade=transition={}:duration={}:offset={}[{}]",
                             track_acc, curr_label, xstyle, fmt(xdur),
-                            fmt((prev.timeline_out - prev.timeline_in) - xdur), project.canvas.fps, merged));
+                            fmt((prev.timeline_out - prev.timeline_in) - xdur), merged));
                         track_acc = merged;
                     } else {
                         let merged = format!("x{}", vci);
@@ -208,8 +217,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     }
                 }
                 let next_acc = format!("va{}", vci + 1);
-                if *track_order == 0 && acc == "base" { nodes.push(format!("[{}]null[{}]", track_acc, next_acc)); }
-                else { nodes.push(format!("[{}][{}]overlay=x=0:y=0:shortest=1[{}]", acc, track_acc, next_acc)); }
+                // base 必须被消费：单轨（主轨直接产出）也必须 overlay 到 base，否则 color 滤镜输出孤立导致 filtergraph 绑定失败
+                nodes.push(format!("[{}][{}]overlay=x=0:y=0:shortest=1[{}]", acc, track_acc, next_acc));
                 acc = next_acc;
             }
         }
