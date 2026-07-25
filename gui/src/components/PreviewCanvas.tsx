@@ -229,6 +229,37 @@ export default function PreviewCanvas() {
     return result;
   })();
 
+  // 预加载列表：转场窗将在未来 2 秒内开始的入片段（同轨下一片段）。
+  // 条件：currentTime >= outT - duration - 2.0 && currentTime < outT - duration
+  // 这些入片段的 <video> 元素提前渲染（hidden），提前加载 + seek 到转场起点，
+  // 转场窗开始时首帧已就绪，避免入片段开头卡顿。
+  // 注意：与 activeTransitionLayers 互斥——进入转场窗后由 active 接管，upcoming 不再包含。
+  const upcomingTransitionClips: { clip: ClipConfig; asset: AssetConfig; outClip: ClipConfig }[] = (() => {
+    const tracks = project.tracks
+      .filter((t) => t.type === 'video' && t.visible !== false)
+      .reverse();
+    const result: { clip: ClipConfig; asset: AssetConfig; outClip: ClipConfig }[] = [];
+    for (const track of tracks) {
+      const outClip = track.clips.find((c) => currentTime >= c.timelineIn && currentTime < c.timelineOut);
+      if (!outClip) continue;
+      const tr = outClip.transition;
+      if (!tr || tr.transitionType === undefined || tr.transitionType === 'none') continue;
+      const dur = tr.duration && tr.duration > 0 ? tr.duration : 0.5;
+      const outT = outClip.timelineOut;
+      const windowStart = outT - dur;       // 转场窗起点
+      const preloadStart = windowStart - 2.0; // 预加载起点（提前 2 秒）
+      if (currentTime < preloadStart || currentTime >= windowStart) continue;
+      // 同轨下一片段：timelineIn 最接近 outT（邻接）的那个
+      const next = [...track.clips]
+        .filter((c) => c.id !== outClip.id && c.timelineIn >= outT - 1e-4)
+        .sort((a, b) => a.timelineIn - b.timelineIn)[0];
+      if (!next) continue;
+      const asset = project.assets.find((a) => a.id === next.assetId);
+      if (asset) result.push({ clip: next, asset, outClip });
+    }
+    return result;
+  })();
+
   // 传给 WebGPU 预览 hook 的转场入片段信息（已算好 opacity / slide 偏移）
   const transitionIncoming = activeTransitionLayers.map(({ layer, outClip }) => ({
     outClipId: outClip.id,
@@ -524,7 +555,13 @@ export default function PreviewCanvas() {
       if (isPlaying) a.play().catch(() => {});
       else a.pause();
     });
-  }, [isPlaying, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn]);
+    // 预加载入片段：不播放，只 pause（由 seek effect 提前定位到转场起点）
+    upcomingTransitionClips.forEach(({ clip }) => {
+      const v = videoRefs.current.get(clip.id);
+      if (!v) return;
+      v.pause();
+    });
+  }, [isPlaying, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn, upcomingTransitionClips]);
 
   // seek 同步：currentTime 变化时同步所有视频/音频源时间
   //  - 手动驱动片段（time_remap）：每帧按 currentTime 设源时间，!seeking 防止 seek 请求堆积，
@@ -544,15 +581,28 @@ export default function PreviewCanvas() {
         if (v.readyState >= 1 && Math.abs(v.currentTime - targetTime) > 0.3) v.currentTime = Math.max(0, targetTime);
       }
     });
-    activeTransitionLayers.forEach(({ layer }) => {
+    activeTransitionLayers.forEach(({ layer, outClip }) => {
       const v = videoRefs.current.get(layer.clip.id);
       if (!v) return;
-      const { srcT: targetTime } = clipSourceTime(currentTime, layer.clip);
+      let targetTime: number;
+      if (currentTime < layer.clip.timelineIn) {
+        // 转场窗内：入片段按转场进度推进（与音频入片段逻辑一致）。
+        // transition 挂在出片段上，从 outClip 获取 duration。
+        const tr = outClip.transition;
+        const dur = tr?.duration && tr.duration > 0 ? tr.duration : 0.5;
+        const outT = outClip.timelineOut;
+        const progress = Math.max(0, Math.min(1, (currentTime - (outT - dur)) / dur));
+        targetTime = layer.clip.src_range.start + progress * dur * (layer.clip.speed ?? 1);
+      } else {
+        // 重叠段：入片段已活跃，按普通时间重映射
+        targetTime = clipSourceTime(currentTime, layer.clip).srcT;
+      }
+      targetTime = Math.max(0, targetTime);
       if (clipNeedsManualDrive(layer.clip, currentTime)) {
-        if (v.readyState >= 1 && !v.seeking) v.currentTime = Math.max(0, targetTime);
+        if (v.readyState >= 1 && !v.seeking) v.currentTime = targetTime;
       } else {
         v.playbackRate = effectiveRate(layer.clip, currentTime);
-        if (v.readyState >= 1 && Math.abs(v.currentTime - targetTime) > 0.3) v.currentTime = Math.max(0, targetTime);
+        if (v.readyState >= 1 && Math.abs(v.currentTime - targetTime) > 0.3) v.currentTime = targetTime;
       }
     });
     activeAudioClips.forEach(({ clip }) => {
@@ -588,7 +638,16 @@ export default function PreviewCanvas() {
         if (a.readyState >= 1 && Math.abs(a.currentTime - targetTime) > 0.3) a.currentTime = targetTime;
       }
     });
-  }, [currentTime, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn]);
+    // 预加载入片段：seek 到转场起点（progress=0 对应素材起点），转场窗开始时首帧已就绪
+    upcomingTransitionClips.forEach(({ clip }) => {
+      const v = videoRefs.current.get(clip.id);
+      if (!v) return;
+      const targetTime = Math.max(0, clip.src_range.start);
+      if (v.readyState >= 1 && !v.seeking && Math.abs(v.currentTime - targetTime) > 0.1) {
+        v.currentTime = targetTime;
+      }
+    });
+  }, [currentTime, activeVideoClips, activeAudioClips, activeTransitionLayers, activeAudioTransitionIn, upcomingTransitionClips]);
 
   // ---- 音量放大支持：HTMLMediaElement.volume 硬限 [0,1] ----
   // clip.volume / track.volume 可达 2，超出 1 的部分用 Web Audio GainNode 放大；
@@ -761,7 +820,14 @@ export default function PreviewCanvas() {
     const v = videoRefs.current.get(clip.id);
     if (!v) return;
     applyPreservesPitch(v); // 元素初次加载即设置，保证变速不变调
-    const { srcT: targetTime } = clipSourceTime(currentTime, clip);
+    let targetTime: number;
+    if (currentTime < clip.timelineIn) {
+      // 转场入片段：转场窗内 currentTime < timelineIn，clipSourceTime 会算出负偏移并 clamp 到开头。
+      // 此时入片段刚加载，seek 到素材起点（progress=0），后续 seek effect 会按转场进度逐帧推进。
+      targetTime = clip.src_range.start;
+    } else {
+      targetTime = clipSourceTime(currentTime, clip).srcT;
+    }
     v.currentTime = Math.max(0, Math.min(v.duration || targetTime, targetTime));
     // 手动驱动片段（time_remap）不 play()，交由 RAF 逐帧 seek
     if (!clipNeedsManualDrive(clip, currentTime) && useUIStore.getState().isPlaying) v.play().catch(() => {});
@@ -824,6 +890,20 @@ export default function PreviewCanvas() {
                   onLoadedMetadata={onLoadedMetadataFor(layer.clip)}
                 />
               ))}
+              {/* 预加载转场入片段 video：转场窗将在未来 2 秒内开始时提前渲染（hidden），
+                  key 与转场窗内一致（tr-${clip.id}），进入转场窗时 React 复用同一 DOM 元素，不重新加载。
+                  activeTransitionLayers 优先，已在该列表中的片段不重复渲染。 */}
+              {upcomingTransitionClips
+                .filter(({ clip }) => !activeTransitionLayers.some((l) => l.layer.clip.id === clip.id))
+                .map(({ clip, asset }) => (
+                  <video
+                    key={`tr-${clip.id}`}
+                    ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
+                    src={pathToUrl(asset.path)}
+                    style={theme.hiddenMedia}
+                    onLoadedMetadata={onLoadedMetadataFor(clip)}
+                  />
+                ))}
               {/* 可见 canvas：WebGPU 渲染 */}
               <canvas ref={canvasRef} style={theme.canvas} onClick={handleTogglePlay} />
             </>
@@ -874,6 +954,19 @@ export default function PreviewCanvas() {
                   />
                 );
               })}
+              {/* 预加载转场入片段 video（HTML5 路径）：hidden 提前加载，
+                  key 与转场窗内一致（tr-${clip.id}），进入转场窗时复用同一 DOM 元素。 */}
+              {upcomingTransitionClips
+                .filter(({ clip }) => !activeTransitionLayers.some((l) => l.layer.clip.id === clip.id))
+                .map(({ clip, asset }) => (
+                  <video
+                    key={`tr-${clip.id}`}
+                    ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
+                    src={pathToUrl(asset.path)}
+                    style={theme.hiddenMedia}
+                    onLoadedMetadata={onLoadedMetadataFor(clip)}
+                  />
+                ))}
             </>
           )
         ) : null}

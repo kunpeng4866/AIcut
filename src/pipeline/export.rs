@@ -672,7 +672,12 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             PrefetchRequest { asset_path, source_time: src_t, width: w, height: h }
         }).collect();
         for (next, progress, dur, _tt, _dir) in &extra_next {
-            let src_t = next.src_range.start + *progress * *dur * next.speed;
+            // 转场窗内入片段源时间：把转场进度映射到入片段「本地时间线」上
+            // （next.timeline_in + progress·dur），再走统一 clip_source_time，
+            // 与音频入片段（clip_source_time + 重叠分支）一致，且支持 time_remap（倒放/冻结/曲线）。
+            // 普通正放时等价于 next.src_range.start + progress·dur·speed。
+            let local_t = next.timeline_in + *progress * *dur;
+            let src_t = clip_source_time(local_t, next).0;
             let (w, h) = self.clip_decode_size(next);
             let asset = self.project.asset_by_id(&next.asset_id);
             let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
