@@ -529,28 +529,44 @@ function applyExportOptions(args: string[], options: ExportOptionsParam): string
     const scaleFilter = `scale=-2:${h}`;
     const fcIdx = result.indexOf('-filter_complex');
     if (fcIdx >= 0 && fcIdx + 1 < result.length) {
-      // 合并进 filter_complex 末尾输出节点，避免与 -vf 冲突
+      // 合并 scale 进 filter_complex，但必须作用于【视频】输出标签，而非图中最后一个标签。
+      // 历史 bug：音频 [aout]/[a0] 常位于滤镜图末尾，若对其施加 scale 会报
+      //   "Media type mismatch: audio output -> scale(video) input"
+      // 因此显式定位视频输出标签：优先取 -map 中首个非音频标签；兜底取图中末个非音频输出标签。
       const fc = result[fcIdx + 1];
-      const m = fc.match(/\[([^\]]+)\]\s*$/);
-      if (m) {
-        const outLabel = m[1];
-        const scaledLabel = '__scaled__';
-        result[fcIdx + 1] = fc.replace(/\[([^\]]+)\]\s*$/, `[$1];[$1]${scaleFilter}[${scaledLabel}]`);
-        // 同步更新 -map 对该输出节点的引用（-map 可能是合并形式如 [va1][0:a]）
-        for (let i = 0; i < result.length - 1; i++) {
-          if (result[i] === '-map' && result[i + 1].includes(`[${outLabel}]`)) {
-            result[i + 1] = result[i + 1].split(`[${outLabel}]`).join(`[${scaledLabel}]`);
-          }
-        }
-      } else {
-        // 滤镜图末尾无命名输出（异常），降级用原 -vf 方式
-        const vfIdx = result.indexOf('-vf');
-        if (vfIdx >= 0 && vfIdx + 1 < result.length) {
-          result[vfIdx + 1] = `${result[vfIdx + 1]},${scaleFilter}`;
-        } else {
-          result.splice(result.length - 1, 0, '-vf', scaleFilter);
+      const isAudioLabel = (l: string) => /^\[a/.test(l); // [a0] [a1] [aout] ...
+      const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let videoLabel: string | null = null;
+      // 1) 从 -map 推断视频输出标签（视频 map 通常在音频 map 之前；音频标签以 [a 开头）
+      for (let i = 0; i < result.length - 1; i++) {
+        if (result[i] === '-map') {
+          const m = result[i + 1].match(/\[([^\]]+)\]/);
+          if (m && !isAudioLabel('[' + m[1] + ']')) { videoLabel = m[1]; break; }
         }
       }
+      // 2) 兜底：取 filter_complex 中最后一个【输出】位置且非音频的标签
+      if (!videoLabel) {
+        const outs = [...fc.matchAll(/\[([^\]]+)\]\s*(?=\s*;|\s*$)/g)];
+        for (let k = outs.length - 1; k >= 0; k--) {
+          if (!isAudioLabel('[' + outs[k][1] + ']')) { videoLabel = outs[k][1]; break; }
+        }
+      }
+      if (videoLabel) {
+        const scaledLabel = '__scaled__';
+        // 仅替换 videoLabel 作为【输出标签】的位置（其后为 ; 或字符串结尾），
+        // 避免误改它作为后续滤镜输入引用的位置。
+        const outRe = new RegExp('\\[' + escapeRe(videoLabel) + '\\]\\s*(?=\\s*;|\\s*$)');
+        if (outRe.test(fc)) {
+          result[fcIdx + 1] = fc.replace(outRe, '[' + videoLabel + '];[' + videoLabel + ']' + scaleFilter + '[' + scaledLabel + ']');
+          // 同步更新 -map 对该视频输出标签的引用
+          for (let i = 0; i < result.length - 1; i++) {
+            if (result[i] === '-map' && result[i + 1].includes('[' + videoLabel + ']')) {
+              result[i + 1] = result[i + 1].split('[' + videoLabel + ']').join('[' + scaledLabel + ']');
+            }
+          }
+        }
+      }
+      // 无视频输出（纯音频工程）：无需缩放，不注入 scale
     } else {
       // 无 filter_complex：简单路径，直接用 -vf
       const vfIdx = result.indexOf('-vf');
