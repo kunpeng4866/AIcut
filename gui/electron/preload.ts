@@ -68,4 +68,7 @@ contextBridge.exposeInMainWorld('aicut', {
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),
   listDrafts: () => ipcRenderer.invoke('draft:list'),
   deleteDraft: (name: string) => ipcRenderer.invoke('draft:delete', name),
+
+  // ── 内置字体目录 ──
+  getFontsDir: () => ipcRenderer.invoke('fonts:getDir'),
 });

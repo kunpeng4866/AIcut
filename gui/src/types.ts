@@ -148,4 +148,6 @@ export interface AicutAPI {
   loadDraft(name: string): Promise<string>;
   listDrafts(): Promise<string[]>;
   deleteDraft(name: string): Promise<boolean>;
+  // 内置字体目录（随包分发字体文件所在路径，dev=仓库/public/fonts，打包=resources/fonts）
+  getFontsDir(): Promise<string>;
 }

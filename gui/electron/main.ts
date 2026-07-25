@@ -14,9 +14,24 @@ const ENGINE_BIN = join(__dirname, '../../target/debug/aicut-engine.exe');
 // render 子进程继承此环境变量，因而应用插件也会在导出时生效。
 try { process.env.AICUT_PLUGIN_DIR = join(__dirname, '../../plugins'); } catch { /* dev 兜底 */ }
 
+// 内置字体目录：传给 Rust 引擎，导出时 drawtext 用 fontfile= 指向随包字体，保证预览/导出一致。
+try { process.env.AICUT_FONTS_DIR = getFontsDir(); } catch { /* dev 兜底 */ }
+
 // ── 路径常量 ──
 function getConfigPath() { return join(app.getPath('userData'), 'config.json'); }
 function getDraftsDir() { return join(app.getPath('userData'), 'drafts'); }
+
+// 内置字体目录：
+// 开发模式 → 仓库 gui/public/fonts（vite 以 /fonts/* 提供，且预览渲染层直接读取）
+// 打包模式 → 安装包 resources/fonts（electron-builder extraResources 拷贝）
+// 该目录同时传递给 Rust 引擎子进程（AICUT_FONTS_DIR），用于导出时 drawtext 的 fontfile=
+function getFontsDir(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'fonts');
+  }
+  // 开发：从 main.js(dist-electron) 向上两级到 gui，再进 public/fonts
+  return join(__dirname, '..', 'public', 'fonts');
+}
 
 // ── 自定义协议 aicut-asset:// ──
 // 绕过系统代理直接读取本地文件，修复 file:// 走代理导致 SSL handshake failed
@@ -452,6 +467,9 @@ ipcMain.handle('draft:delete', async (_e, name: string) => {
     return false;
   }
 });
+
+// ── 内置字体目录（供渲染器/导出侧定位随包字体） ──
+ipcMain.handle('fonts:getDir', async () => getFontsDir());
 
 // ═══════════════════════════════════════════
 // 辅助函数

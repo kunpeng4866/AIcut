@@ -385,16 +385,19 @@ impl<'a> ExportPipeline<'a> {
         let mut text_filters: Vec<String> = Vec::new();
         let w = self.config.width;
         let h = self.config.height;
+        // 内置字体目录（由 Electron 主进程通过 AICUT_FONTS_DIR 传入），用于导出时
+        // 将 drawtext 的 fontfile= 指向随包字体，保证预览/导出字体一致。
+        let fontfile_dir = std::env::var("AICUT_FONTS_DIR").unwrap_or_default();
         for track in &self.project.tracks {
             if track.visible == false { continue; }  // 隐藏轨不渲染
             for clip in &track.clips {
                 if let Some(t) = &clip.text {
-                    if let Some(f) = subtitle::build_text_overlay_filter(t, clip.timeline_in, clip.timeline_out, w, h) {
+                    if let Some(f) = subtitle::build_text_overlay_filter(t, clip.timeline_in, clip.timeline_out, w, h, &fontfile_dir) {
                         text_filters.push(f);
                     }
                 }
                 if let Some(s) = &clip.subtitle {
-                    text_filters.extend(subtitle::build_subtitle_overlay_filters(s, clip.timeline_in, w, h));
+                    text_filters.extend(subtitle::build_subtitle_overlay_filters(s, clip.timeline_in, w, h, &fontfile_dir));
                 }
             }
         }

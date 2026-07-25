@@ -32,6 +32,10 @@
     "appId": "com.aicut.desktop",
     "productName": "AIcut",
     "files": ["dist/**/*", "dist-electron/**/*"],
-    "extraResources": [{ "from": "../target/release/aicut-engine.exe", "to": "engine/aicut-engine.exe" }]
+    "extraResources": [
+      { "from": "../target/release/aicut-engine.exe", "to": "engine/aicut-engine.exe" },
+      { "from": "public/fonts", "to": "fonts" }
+    ],
+    "asarUnpack": ["fonts/**", "engine/**"]
   }
 }

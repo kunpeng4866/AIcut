@@ -169,6 +169,85 @@ pub fn build_drawtext_filters(track: &SubtitleTrack, width: u32, height: u32) ->
     }).collect()
 }
 
+/// 内置字体文件名（与前端 gui/public/fonts 保持一致）。导出时若 fontfile_dir 存在，
+/// 将 font_family 解析为具体字体文件路径，拼入 drawtext 的 fontfile=，保证与预览一致。
+const BUNDLED_FONT_FILES: &[&str] = &[
+    "NotoSansSC-Regular.woff2",
+    "NotoSansSC-Bold.woff2",
+    "NotoSerifSC-Regular.woff2",
+    "NotoSerifSC-Bold.woff2",
+    "AlibabaPuHuiTi-Regular.woff2",
+    "AlibabaPuHuiTi-Bold.woff2",
+    "AlibabaPuHuiTi-Thin.woff2",
+    "HarmonyOS-SansSC-Regular.ttf",
+    "HarmonyOS-SansSC-Bold.ttf",
+    "ZCOOLKuaiLe-Regular.ttf",
+    "ZCOOLQingKeHuangYou-Regular.ttf",
+];
+
+/// 字体 id（前端存进工程的 font_family 值）→ 内置文件名。
+/// 这是导出字体一致性的关键映射：渲染器写入工程的 font_family 即下方 id，
+/// 必须能精确解析到随包字体文件，否则导出会回退到系统字体，与预览不一致。
+const FONT_ID_TO_FILE: &[(&str, &str)] = &[
+    ("source-han-sans", "NotoSansSC-Regular.woff2"),
+    ("source-han-serif", "NotoSerifSC-Regular.woff2"),
+    ("alipuhui", "AlibabaPuHuiTi-Regular.woff2"),
+    ("harmonyos", "HarmonyOS-SansSC-Regular.ttf"),
+    ("zcool-kuaile", "ZCOOLKuaiLe-Regular.ttf"),
+    ("zcool-hei", "ZCOOLQingKeHuangYou-Regular.ttf"),
+];
+
+/// 根据 font_family 字符串解析内置字体文件绝对路径。
+/// 仅当 fontfile_dir 非空且文件存在时返回 Some；否则返回 None（交给 ffmpeg 按系统字体查找）。
+fn resolve_bundled_font(font_family: &Option<String>, fontfile_dir: &str) -> Option<String> {
+    let dir = fontfile_dir.trim();
+    if dir.is_empty() { return None; }
+    let family = font_family.as_ref()?;
+    let family_lc = family.to_lowercase();
+    // 0) 按字体 id 精确匹配（前端 FontSelect 写入工程的 font_family 即此 id）
+    for (id, file) in FONT_ID_TO_FILE {
+        if family_lc.eq_ignore_ascii_case(id) {
+            let p = std::path::Path::new(dir).join(file);
+            if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+        }
+    }
+    // 1) 若 font_family 已直接是内置文件名（如 "NotoSansSC-Regular.woff2"）
+    if family_lc.ends_with(".woff2") || family_lc.ends_with(".ttf") || family_lc.ends_with(".otf") {
+        for f in BUNDLED_FONT_FILES {
+            if f.eq_ignore_ascii_case(family) {
+                let p = std::path::Path::new(dir).join(f);
+                if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+            }
+        }
+    }
+    // 2) 按字体家族关键字匹配（兼容手写/旧工程里的英文 family 名，如 "Noto Sans SC"）
+    let matched = if family_lc.contains("noto sans sc") || family_lc.contains("source han sans sc") || family_lc.contains("notosanssc") {
+        "NotoSansSC-Regular.woff2"
+    } else if family_lc.contains("noto serif sc") || family_lc.contains("source han serif sc") || family_lc.contains("notoserifsc") {
+        "NotoSerifSC-Regular.woff2"
+    } else if family_lc.contains("alibaba") || family_lc.contains("puhuiti") {
+        "AlibabaPuHuiTi-Regular.woff2"
+    } else if family_lc.contains("harmonyos") || family_lc.contains("harmony") {
+        "HarmonyOS-SansSC-Regular.ttf"
+    } else if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") {
+        "ZCOOLKuaiLe-Regular.ttf"
+    } else if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") {
+        "ZCOOLQingKeHuangYou-Regular.ttf"
+    } else {
+        return None;
+    };
+    let p = std::path::Path::new(dir).join(matched);
+    if p.exists() { Some(p.to_string_lossy().into_owned()) } else { None }
+}
+
+/// 为 drawtext 滤镜追加 fontfile=（若解析到内置字体）
+fn with_fontfile(base: String, fontfile: &Option<String>) -> String {
+    match fontfile {
+        Some(path) => format!("{}:fontfile='{}'", base, path.replace('\\', "\\\\").replace(':', "\\:")),
+        None => base,
+    }
+}
+
 /// 生成 ASS 格式字幕内容（用于嵌入视频或软字幕）
 pub fn to_ass(track: &SubtitleTrack) -> String {
     let mut ass = String::from("[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n");
@@ -192,6 +271,7 @@ pub fn build_text_overlay_filter(
     timeline_out: f64,
     width: u32,
     height: u32,
+    fontfile_dir: &str,
 ) -> Option<String> {
     if text.content.trim().is_empty() { return None; }
     let escaped = text.content.replace(':', "\\:").replace('\'', "'\\''");
@@ -210,11 +290,13 @@ pub fn build_text_overlay_filter(
         format!("(h - {})/2", fontsize)
     };
     let _ = (width, height);
-    Some(format!(
+    let base = format!(
         "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:enable='between(t,{},{})'",
         escaped, fontsize, fontcolor, x_expr, y_expr,
         timeline_in, timeline_out
-    ))
+    );
+    let fontfile = resolve_bundled_font(&text.font_family, fontfile_dir);
+    Some(with_fontfile(base, &fontfile))
 }
 
 /// 生成字幕 drawtext 滤镜串数组（每条 item 按相对偏移 + clip 起点定位）
@@ -223,6 +305,7 @@ pub fn build_subtitle_overlay_filters(
     timeline_in: f64,
     width: u32,
     height: u32,
+    fontfile_dir: &str,
 ) -> Vec<String> {
     let fontsize = sub.font_size.unwrap_or(48);
     let fontcolor = sub.color.clone().unwrap_or_else(|| "white".to_string());
@@ -232,14 +315,16 @@ pub fn build_subtitle_overlay_filters(
         _ => ((height as i64) / 2) - (fontsize as i64) / 2, // center 默认
     };
     let _ = width;
+    let fontfile = resolve_bundled_font(&sub.font_family, fontfile_dir);
     sub.items.iter().filter(|i| !i.text.trim().is_empty()).map(|item| {
         let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
         let abs_start = timeline_in + item.start;
         let abs_end = timeline_in + item.end;
-        format!(
+        let base = format!(
             "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2:y={}:enable='between(t,{},{})'",
             escaped, fontsize, fontcolor, y_pos, abs_start, abs_end
-        )
+        );
+        with_fontfile(base, &fontfile)
     }).collect()
 }
 
@@ -277,7 +362,7 @@ mod tests {
     #[test]
     fn test_build_text_overlay_filter() {
         let t = TextOverlay { content: "标题".into(), font_size: Some(60), color: Some("yellow".into()), text_align: Some("center".into()), x: None, y: None, ..Default::default() };
-        let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080).unwrap();
+        let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080, "").unwrap();
         assert!(f.contains("drawtext="));
         assert!(f.contains("标题"));
         assert!(f.contains("enable='between(t,0,5)'"));
@@ -290,7 +375,7 @@ mod tests {
             font_size: Some(48), color: Some("white".into()), position: Some("bottom".into()),
             ..Default::default()
         };
-        let fs = build_subtitle_overlay_filters(&s, 10.0, 1920, 1080);
+        let fs = build_subtitle_overlay_filters(&s, 10.0, 1920, 1080, "");
         assert_eq!(fs.len(), 1);
         assert!(fs[0].contains("你好"));
         assert!(fs[0].contains("between(t,11,13)"));  // 10 + 1 .. 10 + 3
