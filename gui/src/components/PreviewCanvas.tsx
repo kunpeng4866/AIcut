@@ -289,6 +289,25 @@ export default function PreviewCanvas() {
     return result;
   })();
 
+  // 统一视频渲染列表：active 活跃片段 + 转场入片段（窗内）+ upcoming 预加载入片段（窗前），
+  // 全部以 clip.id 为 React key 渲染在同一个 .map() 列表（同一父节点）。
+  // 入片段在「upcoming → 转场窗(入片段层) → 正常活跃」全链路复用同一 DOM <video> 元素，
+  // 转场窗结束瞬间不卸载重建（React 同父同 key 复用），消除「一下卡顿」。
+  // 转场窗内/窗后仅切换该元素的样式（opacity/clipPath/transform），源位置由 incomingVirtualInMap 保证连续。
+  const allVideoClips: { clip: ClipConfig; asset: AssetConfig; role: 'active' | 'incoming' | 'upcoming' }[] = (() => {
+    const m = new Map<string, { clip: ClipConfig; asset: AssetConfig; role: 'active' | 'incoming' | 'upcoming' }>();
+    for (const { clip, asset } of activeVideoClips) {
+      if (!m.has(clip.id)) m.set(clip.id, { clip, asset, role: 'active' });
+    }
+    for (const { layer, asset } of activeTransitionLayers) {
+      if (!m.has(layer.clip.id)) m.set(layer.clip.id, { clip: layer.clip, asset, role: 'incoming' });
+    }
+    for (const { clip, asset } of upcomingTransitionClips) {
+      if (!m.has(clip.id)) m.set(clip.id, { clip, asset, role: 'upcoming' });
+    }
+    return [...m.values()];
+  })();
+
   // 传给 WebGPU 预览 hook 的转场入片段信息（已算好 opacity / slide 偏移）
   const transitionIncoming = activeTransitionLayers.map(({ layer, outClip }) => ({
     outClipId: outClip.id,
@@ -888,10 +907,12 @@ export default function PreviewCanvas() {
         {(activeVideoClips.length > 0 || activeTextOverlays.length > 0 || activeStickerOverlays.length > 0) ? (
           <div style={{ ...theme.frame, width: frameSize.w || 1, height: frameSize.h || 1 }} ref={frameRef}>
           {activeVideoClips.length > 0 ? (
-          useWebGPU ? (
+            useWebGPU ? (
             <>
-              {/* 隐藏 video：每个活跃 clip 一个，负责解码+音频 */}
-              {activeVideoClips.map(({ clip, asset }) => (
+              {/* 统一隐藏 video 列表：active + 转场入片段 + upcoming 预加载，全部 key=clip.id，
+                  同一父节点同一 .map()，跨转场窗前后复用同一 DOM，不重建（消除卡顿）。
+                  WebGPU 模式下 video 仅作解码源，画面由 canvas 合成。 */}
+              {allVideoClips.map(({ clip, asset }) => (
                 <video
                   key={clip.id}
                   ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
@@ -900,93 +921,72 @@ export default function PreviewCanvas() {
                   onLoadedMetadata={onLoadedMetadataFor(clip)}
                 />
               ))}
-              {/* 转场入片段隐藏 video：解码 + 供 WebGPU 取纹理（与出片段同步 seek） */}
-              {activeTransitionLayers.map(({ layer, asset }) => (
-                <video
-                  key={layer.clip.id}
-                  ref={(el) => { if (el) videoRefs.current.set(layer.clip.id, el); else videoRefs.current.delete(layer.clip.id); }}
-                  src={pathToUrl(asset.path)}
-                  style={theme.hiddenMedia}
-                  onLoadedMetadata={onLoadedMetadataFor(layer.clip)}
-                />
-              ))}
-              {/* 预加载转场入片段 video：转场窗将在未来 2 秒内开始时提前渲染（hidden），
-                  key 与转场窗内一致（tr-${clip.id}），进入转场窗时 React 复用同一 DOM 元素，不重新加载。
-                  activeTransitionLayers 优先，已在该列表中的片段不重复渲染。 */}
-              {upcomingTransitionClips
-                .filter(({ clip }) => !activeTransitionLayers.some((l) => l.layer.clip.id === clip.id))
-                .map(({ clip, asset }) => (
-                  <video
-                    key={clip.id}
-                    ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-                    src={pathToUrl(asset.path)}
-                    style={theme.hiddenMedia}
-                    onLoadedMetadata={onLoadedMetadataFor(clip)}
-                  />
-                ))}
               {/* 可见 canvas：WebGPU 渲染 */}
               <canvas ref={canvasRef} style={theme.canvas} onClick={handleTogglePlay} />
             </>
           ) : (
             <>
-              {/* HTML5 回退：渲染所有活跃视频轨道，按层级叠加 */}
-              {/* activeVideoClips: index 0 = 底层(主轨)，最后一个 = 顶层 */}
-              {/* zIndex 从 0 开始递增，确保顶层覆盖底层 */}
-              {activeVideoClips.map(({ clip, asset }, idx) => {
+              {/* HTML5 回退：统一 video 列表，按 role 计算样式。
+                  入片段在转场窗内用叠加样式(incoming)，窗后变 active 正常样式——同一 DOM 元素切换样式，不重建。 */}
+              {allVideoClips.map(({ clip, asset, role }) => {
+                if (role === 'upcoming') {
+                  // 预加载阶段：不显示，仅解码 + seek 到转场起点，进入转场窗时首帧已就绪
+                  return (
+                    <video
+                      key={clip.id}
+                      ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
+                      src={pathToUrl(asset.path)}
+                      style={theme.hiddenMedia}
+                      onLoadedMetadata={onLoadedMetadataFor(clip)}
+                    />
+                  );
+                }
+                if (role === 'incoming') {
+                  // 转场入片段叠加层：叠在出片段上方（zIndex 高于出片段）
+                  const layer = activeTransitionLayers.find((l) => l.layer.clip.id === clip.id)?.layer;
+                  if (!layer) return null;
+                  const stageW = frameRef.current?.clientWidth || project.canvas.width || 1920;
+                  const tStyle: React.CSSProperties = { ...theme.frameVideo, zIndex: layer.zIndex, opacity: layer.opacity };
+                  if (layer.offsetX !== 0) {
+                    // slide：从右侧外（offsetX*stageWidth）滑入归位（0）
+                    tStyle.transform = `translateX(${layer.offsetX * stageW}px)`;
+                  }
+                  if (layer.clipPath) {
+                    // wipe：入片段按 CSS clip-path 揭示（出片段已裁掉对应区域）
+                    tStyle.clipPath = layer.clipPath;
+                  }
+                  return (
+                    <video
+                      key={clip.id}
+                      ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
+                      src={pathToUrl(asset.path)}
+                      style={tStyle}
+                      onLoadedMetadata={onLoadedMetadataFor(clip)}
+                      onClick={handleTogglePlay}
+                    />
+                  );
+                }
+                // role === 'active'：正常活跃片段（含出片段在转场窗内淡出）
+                const idx = activeVideoClips.findIndex((c) => c.clip.id === clip.id);
                 const outTr = getOutClipTransition(clip, currentTime);
                 return (
-                <video
-                  key={clip.id}
-                  ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-                  src={pathToUrl(asset.path)}
-                  style={{
-                    ...theme.frameVideo,
-                    zIndex: idx,  // 底层 idx=0，顶层 idx=最大
-                    // 转场：出片段在转场窗内淡出（与 transform.opacity 相乘）
-                    opacity: (clip.transform?.opacity ?? 1) * outTr.opacity,
-                    ...(outTr.clipPath ? { clipPath: outTr.clipPath } : {}),
-                    filter: computeCssFilter(clip),  // HTML5 回退：CSS filter 实时预览插件（WebGPU 走 WGSL）
-                  }}
-                  onLoadedMetadata={onLoadedMetadataFor(clip)}
-                  onClick={handleTogglePlay}
-                />
-              );}) }
-              {/* 转场入片段层：转场窗内叠在出片段上方（zIndex 高于出片段） */}
-              {activeTransitionLayers.map(({ layer, asset }) => {
-                const stageW = frameRef.current?.clientWidth || project.canvas.width || 1920;
-                const tStyle: React.CSSProperties = { ...theme.frameVideo, zIndex: layer.zIndex, opacity: layer.opacity };
-                if (layer.offsetX !== 0) {
-                  // slide：从右侧外（offsetX*stageWidth）滑入归位（0）
-                  tStyle.transform = `translateX(${layer.offsetX * stageW}px)`;
-                }
-                if (layer.clipPath) {
-                  // wipe：入片段按 CSS clip-path 揭示（出片段已裁掉对应区域）
-                  tStyle.clipPath = layer.clipPath;
-                }
-                return (
-                  <video
-                    key={layer.clip.id}
-                    ref={(el) => { if (el) videoRefs.current.set(layer.clip.id, el); else videoRefs.current.delete(layer.clip.id); }}
-                    src={pathToUrl(asset.path)}
-                    style={tStyle}
-                    onLoadedMetadata={onLoadedMetadataFor(layer.clip)}
-                    onClick={handleTogglePlay}
-                  />
-                );
-              })}
-              {/* 预加载转场入片段 video（HTML5 路径）：hidden 提前加载，
-                  key 与转场窗内一致（tr-${clip.id}），进入转场窗时复用同一 DOM 元素。 */}
-              {upcomingTransitionClips
-                .filter(({ clip }) => !activeTransitionLayers.some((l) => l.layer.clip.id === clip.id))
-                .map(({ clip, asset }) => (
                   <video
                     key={clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                     src={pathToUrl(asset.path)}
-                    style={theme.hiddenMedia}
+                    style={{
+                      ...theme.frameVideo,
+                      zIndex: idx,  // 底层 idx=0，顶层 idx=最大
+                      // 转场：出片段在转场窗内淡出（与 transform.opacity 相乘）
+                      opacity: (clip.transform?.opacity ?? 1) * outTr.opacity,
+                      ...(outTr.clipPath ? { clipPath: outTr.clipPath } : {}),
+                      filter: computeCssFilter(clip),  // HTML5 回退：CSS filter 实时预览插件（WebGPU 走 WGSL）
+                    }}
                     onLoadedMetadata={onLoadedMetadataFor(clip)}
+                    onClick={handleTogglePlay}
                   />
-                ))}
+                );
+              })}
             </>
           )
         ) : null}

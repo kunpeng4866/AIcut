@@ -285,7 +285,9 @@ export function useWebGPUPreview({
       const items: { source: HTMLVideoElement | ImageBitmap; clip: ClipConfig; vw: number; vh: number; extraOpacity: number; offsetX: number; maskRect: [number, number, number, number] | null }[] = [];
       for (const { clip } of activeClips) {
         const video = videoRefs.current.get(clip.id);
-        if (!video || video.readyState < 2) continue;
+        // 仅 readyState>=2 不够：video.seeking 中（刚 play/seek 首帧未稳定）或尺寸为 0 时，
+        // copyExternalImageToTexture 会同步抛 "doesn't have back resource"。必须一并排除。
+        if (!video || video.readyState < 2 || video.seeking || video.videoWidth === 0 || video.videoHeight === 0) continue;
         const bmp = bitmapSources?.current.get(clip.id) || null;
         const source: HTMLVideoElement | ImageBitmap = bmp || video;
         const vw = bmp ? bmp.width : (video.videoWidth || canvasWidth);
@@ -298,7 +300,7 @@ export function useWebGPUPreview({
         const inc = transitionIncomingRef.current.find((t) => t.outClipId === clip.id);
         if (inc) {
           const iv = videoRefs.current.get(inc.clip.id);
-          if (iv && iv.readyState >= 2) {
+          if (iv && iv.readyState >= 2 && !iv.seeking && iv.videoWidth > 0 && iv.videoHeight > 0) {
             const ibmp = bitmapSources?.current.get(inc.clip.id) || null;
             const isource: HTMLVideoElement | ImageBitmap = ibmp || iv;
             const ivw = ibmp ? ibmp.width : (iv.videoWidth || canvasWidth);
@@ -337,11 +339,20 @@ export function useWebGPUPreview({
             format: 'rgba8unorm',
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
           });
-          device.queue.copyExternalImageToTexture(
-            { source, flipY: false },
-            { texture },
-            [vw, vh],
-          );
+          try {
+            device.queue.copyExternalImageToTexture(
+              { source, flipY: false },
+              { texture },
+              [vw, vh],
+            );
+          } catch (err) {
+            // 偶发：video 当前帧尚未稳定（刚 seek/play 首帧尚未解码到 GPU 可见状态），
+            // copyExternalImageToTexture 同步抛 "doesn't have back resource"。
+            // 仅跳过该层、不回退整会话——错误发生在 JS 侧校验，未进入 GPU 验证队列，
+            // 不会触发 pushErrorScope 的验证错误，故不会误杀 WebGPU 会话。
+            try { texture.destroy(); } catch (_) {}
+            return; // forEach 回调内 return 即跳过该 item 的剩余合成
+          }
 
           // ── 插件滤镜离屏 pass：对每个 enabled 且有 shader 的滤镜，依次渲染到离屏纹理 ──
           // 输入 = 源纹理（或上一滤镜的离屏结果），uniform = 插件参数；最终离屏结果再喂给 Over pass。
