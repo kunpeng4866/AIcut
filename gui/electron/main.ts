@@ -397,8 +397,11 @@ ipcMain.handle('export:start', async (event, params: { project: any; outputPath:
           resolve({ success: true });
         } else {
           const errMsg = stderr || `FFmpeg退出码: ${code}`;
+          // 完整 stderr 落盘，避免前端错误框截断导致无法定位真正错误
+          const logPath = join(app.getPath('temp'), `aicut-export-error-${Date.now()}.log`);
+          writeFile(logPath, `FFmpeg命令:\nffmpeg ${args.join(' ')}\n\n完整错误输出:\n${errMsg}`, 'utf8').catch(() => {});
           event.sender.send('export:error', errMsg);
-          resolve({ success: false, error: errMsg });
+          resolve({ success: false, error: `${errMsg}\n\n完整日志已写入:\n${logPath}` });
         }
       });
       currentExportProcess.on('error', (e) => {
@@ -408,7 +411,10 @@ ipcMain.handle('export:start', async (event, params: { project: any; outputPath:
       });
     });
   } catch (e: any) {
-    return { success: false, error: e.message };
+    const logPath = join(app.getPath('temp'), `aicut-export-error-${Date.now()}.log`);
+    const detail = `导出异常:\n${(e && (e.stack || e.message)) || e}`;
+    await writeFile(logPath, detail, 'utf8').catch(() => {});
+    return { success: false, error: `${e?.message || e}\n\n完整日志已写入:\n${logPath}` };
   } finally {
     // 清理临时文件
     unlink(tmpProject).catch(() => {});
