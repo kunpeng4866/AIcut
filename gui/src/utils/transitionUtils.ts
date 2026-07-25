@@ -325,7 +325,8 @@ export function getClipFadeGain(clip: ClipConfig, currentTime: number): number {
     return Math.sin((Math.PI / 2) * p);
   }
   if (fo > 0 && rt > dur - fo) {
-    const p = Math.max(0, Math.min(1, (dur - rt) / fo));
+    // 淡出：rt 从 dur-fo(满音量,p=0) → dur(静音,p=1)，逐步降低。
+    const p = Math.max(0, Math.min(1, (rt - (dur - fo)) / fo));
     return Math.cos((Math.PI / 2) * p);
   }
   return 1;

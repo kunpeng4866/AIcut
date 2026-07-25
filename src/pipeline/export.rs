@@ -18,7 +18,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 // 音频淡入/淡出增益：相对时间 rt = t - timeline_in。
-// rt < fade_in        → 线性 0→1（淡入）；rt > dur - fade_out → 线性 1→0（淡出）；否则 1.0。
+// rt < fade_in        → raised-cosine 0→1（淡入，sin）；rt > dur - fade_out → raised-cosine 1→0（淡出，cos）；否则 1.0。
 // 增益夹 [0, 1]。须与 gui/src/utils/transitionUtils.ts::getClipFadeGain 逐字节一致。
 fn fade_gain_at(clip: &Clip, t: f64) -> f32 {
     let dur = clip.timeline_out - clip.timeline_in;
@@ -36,7 +36,8 @@ fn fade_gain_at(clip: &Clip, t: f64) -> f32 {
         return (std::f32::consts::FRAC_PI_2 * p).sin();
     }
     if fo > 0.0 && rt > dur - fo {
-        let p = (((dur - rt) / fo) as f32).max(0.0).min(1.0);
+        // 淡出：rt 从 dur-fo(满音量,p=0) → dur(静音,p=1)，逐步降低。
+        let p = (((rt - (dur - fo)) / fo) as f32).max(0.0).min(1.0);
         return (std::f32::consts::FRAC_PI_2 * p).cos();
     }
     1.0
