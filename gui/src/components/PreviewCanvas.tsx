@@ -75,9 +75,10 @@ function frozenElapsed(freeze: { start: number; duration: number } | null, off: 
   return off - freeze.start;
 }
 
-function clipSourceTime(t: number, clip: ClipConfig): { srcT: number; frozen: boolean } {
-  const dur = clip.timelineOut - clip.timelineIn;
-  const off = t - clip.timelineIn;                  // 绝对偏移（秒）
+function clipSourceTime(t: number, clip: ClipConfig, overrideTimelineIn?: number): { srcT: number; frozen: boolean } {
+  const timelineIn = overrideTimelineIn ?? clip.timelineIn;
+  const dur = clip.timelineOut - timelineIn;
+  const off = t - timelineIn;                  // 绝对偏移（秒）
   const offNorm = dur > 1e-6 ? off / dur : 0;        // 归一化 [0,1]（供曲线积分与冻结窗口判断）
   const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
   const clamp = (x: number) => Math.max(clip.src_range.start, Math.min(clip.src_range.end, x));
@@ -211,6 +212,11 @@ export default function PreviewCanvas() {
     return result;
   })();
 
+  // 入片段「虚拟 timelineIn」映射：key=入片段 id，value=转场窗起点（outT - dur）。
+  // 转场让入片段提前 dur 秒显示，源时间应从转场窗起点起算而非真实 timelineIn（=outT），
+  // 保证转场窗内与窗后源位置连续（窗后从 dur*speed 衔接，不跳回开头）。
+  const incomingVirtualIn = new Map<string, number>();
+
   // 查找每个活跃"出片段"在转场窗内的入片段层（同轨下一片段），供实时预览叠加。
   // 与 activeVideoClips 同源（同一可见 video 轨反转序列），故第 i 个层对应第 i 个活跃片段。
   const activeTransitionLayers: { layer: TransitionPreviewLayer; asset: AssetConfig; outClip: ClipConfig }[] = (() => {
@@ -224,10 +230,22 @@ export default function PreviewCanvas() {
       const layer = getIncomingTransitionLayer(track, clip, currentTime);
       if (!layer) continue;
       const asset = project.assets.find((a) => a.id === layer.clip.assetId);
-      if (asset) result.push({ layer, asset, outClip: clip });
+      if (asset) {
+        // 入片段的「虚拟 timelineIn」= 转场窗起点（outT - dur）。转场让入片段提前 dur 秒显示，
+        // 其源时间应从转场窗起点起算，而非真实 timelineIn（=outT）。这样转场窗内与窗后
+        // 源位置连续，避免窗后突然跳回开头导致「入片段开头反复播放」。
+        const tr = clip.transition!;
+        const dur = tr.duration && tr.duration > 0 ? tr.duration : 0.5;
+        incomingVirtualIn.set(layer.clip.id, clip.timelineOut - dur);
+        result.push({ layer, asset, outClip: clip });
+      }
     }
     return result;
   })();
+  // 入片段「虚拟 timelineIn」映射：key=入片段 id，value=转场窗起点（outT - dur）。
+  // 供 seek effect 在转场窗内及窗后（入片段成为活跃片段）统一用虚拟 timelineIn 计算源时间，
+  // 保证转场窗结束时源位置从 dur*speed 连续衔接，而非跳回 src_range.start。
+  const incomingVirtualInMap = incomingVirtualIn;
 
   // 预加载列表：转场窗将在未来 2 秒内开始的入片段（同轨下一片段）。
   // 条件：currentTime >= outT - duration - 2.0 && currentTime < outT - duration
@@ -571,7 +589,10 @@ export default function PreviewCanvas() {
     activeVideoClips.forEach(({ clip }) => {
       const v = videoRefs.current.get(clip.id);
       if (!v) return;
-      const { srcT: targetTime } = clipSourceTime(currentTime, clip);
+      // 若本片段是刚结束转场的入片段，用虚拟 timelineIn（转场窗起点）计算源时间，
+      // 保证转场窗结束后从 dur*speed 位置连续衔接，不跳回开头（避免「开头反复播放」）。
+      const virtualIn = incomingVirtualInMap.get(clip.id);
+      const { srcT: targetTime } = clipSourceTime(currentTime, clip, virtualIn);
       if (clipNeedsManualDrive(clip, currentTime)) {
         if (v.readyState >= 1 && !v.seeking) v.currentTime = Math.max(0, targetTime);
       } else {
@@ -584,20 +605,9 @@ export default function PreviewCanvas() {
     activeTransitionLayers.forEach(({ layer, outClip }) => {
       const v = videoRefs.current.get(layer.clip.id);
       if (!v) return;
-      let targetTime: number;
-      if (currentTime < layer.clip.timelineIn) {
-        // 转场窗内：入片段按转场进度推进（与音频入片段逻辑一致）。
-        // transition 挂在出片段上，从 outClip 获取 duration。
-        const tr = outClip.transition;
-        const dur = tr?.duration && tr.duration > 0 ? tr.duration : 0.5;
-        const outT = outClip.timelineOut;
-        const progress = Math.max(0, Math.min(1, (currentTime - (outT - dur)) / dur));
-        targetTime = layer.clip.src_range.start + progress * dur * (layer.clip.speed ?? 1);
-      } else {
-        // 重叠段：入片段已活跃，按普通时间重映射
-        targetTime = clipSourceTime(currentTime, layer.clip).srcT;
-      }
-      targetTime = Math.max(0, targetTime);
+      // 统一用虚拟 timelineIn（转场窗起点）计算源时间，保证窗内/窗后连续，支持 time_remap。
+      const virtualIn = outClip.timelineOut - (outClip.transition?.duration && outClip.transition.duration > 0 ? outClip.transition.duration : 0.5);
+      const targetTime = Math.max(0, clipSourceTime(currentTime, layer.clip, virtualIn).srcT);
       if (clipNeedsManualDrive(layer.clip, currentTime)) {
         if (v.readyState >= 1 && !v.seeking) v.currentTime = targetTime;
       } else {
@@ -820,14 +830,10 @@ export default function PreviewCanvas() {
     const v = videoRefs.current.get(clip.id);
     if (!v) return;
     applyPreservesPitch(v); // 元素初次加载即设置，保证变速不变调
-    let targetTime: number;
-    if (currentTime < clip.timelineIn) {
-      // 转场入片段：转场窗内 currentTime < timelineIn，clipSourceTime 会算出负偏移并 clamp 到开头。
-      // 此时入片段刚加载，seek 到素材起点（progress=0），后续 seek effect 会按转场进度逐帧推进。
-      targetTime = clip.src_range.start;
-    } else {
-      targetTime = clipSourceTime(currentTime, clip).srcT;
-    }
+    // 若本片段是转场入片段，用虚拟 timelineIn（转场窗起点）计算源时间，
+    // 转场窗内即可定位到正确的入片段位置（而非 clamp 到开头）。
+    const virtualIn = incomingVirtualInMap.get(clip.id);
+    const targetTime = clipSourceTime(currentTime, clip, virtualIn).srcT;
     v.currentTime = Math.max(0, Math.min(v.duration || targetTime, targetTime));
     // 手动驱动片段（time_remap）不 play()，交由 RAF 逐帧 seek
     if (!clipNeedsManualDrive(clip, currentTime) && useUIStore.getState().isPlaying) v.play().catch(() => {});

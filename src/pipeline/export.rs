@@ -661,23 +661,41 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             }
         }
 
+        // 入片段「虚拟 timeline_in」映射：key=入片段 id，value=转场窗起点（out_t - dur）。
+        // 转场让入片段提前 dur 秒显示，其源时间应从转场窗起点起算而非真实 timeline_in（=out_t），
+        // 保证转场窗内（progress 0→1 对应入片段 0→dur*speed）与窗后（从 dur*speed 继续）连续，
+        // 避免窗后跳回开头导致导出视频中入片段开头重复。
+        let mut incoming_virtual_in: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+        for cr in &video_clips {
+            if let Some(tr) = &cr.clip.transition {
+                if tr.transition_type != "none" && tr.duration > 0.0 {
+                    if let Some(next) = self.find_next_clip(cr.track_id, cr.clip.timeline_out) {
+                        incoming_virtual_in.insert(next.id.as_str(), cr.clip.timeline_out - tr.duration);
+                    }
+                }
+            }
+        }
+
         // 1. 构建并行预取请求（active clips 用 timeline 时间；转场后 clip 用转场进度对应源时间）
         let mut prefetch_reqs: Vec<PrefetchRequest> = video_clips.iter().map(|cr| {
             let clip = cr.clip;
+            // 若为刚结束转场的入片段，用虚拟 timeline_in（转场窗起点）保证窗后源位置连续衔接。
+            let virtual_in = incoming_virtual_in.get(clip.id.as_str()).copied();
             // 统一映射：预览与导出共用同一套 clip_source_time（frozen 不影响取哪帧）
-            let src_t = clip_source_time(t, clip).0;
+            let src_t = clip_source_time_with_in(t, clip, virtual_in).0;
             let (w, h) = self.clip_decode_size(clip);
             let asset = self.project.asset_by_id(&clip.asset_id);
             let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();
             PrefetchRequest { asset_path, source_time: src_t, width: w, height: h }
         }).collect();
         for (next, progress, dur, _tt, _dir) in &extra_next {
-            // 转场窗内入片段源时间：把转场进度映射到入片段「本地时间线」上
-            // （next.timeline_in + progress·dur），再走统一 clip_source_time，
-            // 与音频入片段（clip_source_time + 重叠分支）一致，且支持 time_remap（倒放/冻结/曲线）。
-            // 普通正放时等价于 next.src_range.start + progress·dur·speed。
-            let local_t = next.timeline_in + *progress * *dur;
-            let src_t = clip_source_time(local_t, next).0;
+            // 转场窗内入片段源时间：用虚拟 timeline_in（转场窗起点 = next.timeline_in - dur）
+            // 从窗起点起算，progress·dur 对应入片段已播放的时长。
+            // local_t = (next.timeline_in - dur) + progress·dur，progress=0→虚拟起点（off=0→src_range.start），
+            // progress=1→next.timeline_in（off=dur→src_range.start + dur·speed），与窗后（虚拟 timeline_in）连续。
+            let virtual_in = incoming_virtual_in.get(next.id.as_str()).copied().unwrap_or(next.timeline_in - *dur);
+            let local_t = virtual_in + *progress * *dur;
+            let src_t = clip_source_time_with_in(local_t, next, Some(virtual_in)).0;
             let (w, h) = self.clip_decode_size(next);
             let asset = self.project.asset_by_id(&next.asset_id);
             let asset_path = asset.map(|a| a.path.as_str()).unwrap_or("").to_string();

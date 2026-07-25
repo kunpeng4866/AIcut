@@ -242,8 +242,17 @@ pub fn timeline_to_source_time(t: f64, clip: &crate::project::Clip) -> f64 {
 /// - clip: 片段引用
 /// - 返回: (源素材时间, 是否冻结帧)
 pub fn clip_source_time(t: f64, clip: &crate::project::Clip) -> (f64, bool) {
-    let dur = clip.timeline_out - clip.timeline_in;
-    let off = t - clip.timeline_in;
+    clip_source_time_with_in(t, clip, None)
+}
+
+/// clip_source_time 的可覆盖 timeline_in 版本。
+/// override_in 用于转场入片段：转场让其提前 dur 秒显示，源时间应从「转场窗起点」
+/// （= 真实 timeline_in - dur）起算，保证转场窗内（progress 0→1 对应入片段 0→dur·speed）
+/// 与窗后（从 dur·speed 继续）连续，避免窗后跳回开头导致入片段开头重复。
+pub fn clip_source_time_with_in(t: f64, clip: &crate::project::Clip, override_in: Option<f64>) -> (f64, bool) {
+    let timeline_in = override_in.unwrap_or(clip.timeline_in);
+    let dur = clip.timeline_out - timeline_in;
+    let off = t - timeline_in;
     let remap = &clip.time_remap;
 
     let (src_t, frozen) = if !remap.curve.is_empty() {
