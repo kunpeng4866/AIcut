@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>转场淡变 / 波形 UI 美化预览</title>
+<style>
+  body { margin: 0; background: #0e1116; color: #e6e6e6; font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 24px; }
+  h2 { font-size: 16px; margin: 28px 0 10px; color: #9fd; }
+  .row { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+  .card { background: #171b22; border: 1px solid #2a2f3a; border-radius: 10px; padding: 14px 16px; }
+  .label { font-size: 12px; color: #8b93a1; margin-bottom: 8px; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 6px; margin-left: 8px; }
+  .old { background: #3a2a22; color: #ffb38a; }
+  .new { background: #1f3a2a; color: #8ff0b0; }
+  svg { display: block; background: #0b0f14; border-radius: 6px; }
+  canvas { display: block; background: #0b0f14; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <h1 style="font-size:20px;color:#cfe;">AIcut 时间轴 UI 美化预览</h1>
+  <div style="color:#8b93a1;font-size:13px;">左=改动前（直线 / 生硬矩形），右=改动后（平滑曲线 / 柔和圆头描边）。实际淡变已同步为 raised-cosine，视觉曲线=真实增益。</div>
+
+  <h2>① 视频片段淡入/淡出控制点（淡变斜坡）</h2>
+  <div class="row">
+    <div class="card">
+      <div class="label">改动前：直线斜坡 <span class="tag old">old</span></div>
+      <svg id="fadeOld" width="320" height="120"></svg>
+    </div>
+    <div class="card">
+      <div class="label">改动后：raised-cosine 平滑曲线（采样真实增益） <span class="tag new">new</span></div>
+      <svg id="fadeNew" width="320" height="120"></svg>
+    </div>
+  </div>
+
+  <h2>② 音频轨道波形</h2>
+  <div class="row">
+    <div class="card">
+      <div class="label">改动前：fillRect 矩形条（生硬） <span class="tag old">old</span></div>
+      <canvas id="waveOld" width="420" height="90"></canvas>
+    </div>
+    <div class="card">
+      <div class="label">改动后：圆头描边 + 淡中心轴（柔和） <span class="tag new">new</span></div>
+      <canvas id="waveNew" width="420" height="90"></canvas>
+    </div>
+  </div>
+
+<script>
+// ---- 淡变增益（与 transitionUtils::getClipFadeGain / export.rs::fade_gain_at 一致）----
+function getClipFadeGain(fi, fo, dur, rt) {
+  rt = Math.max(0, Math.min(dur, rt));
+  if (fi > 0 && rt < fi) { const p = Math.max(0, Math.min(1, rt / fi)); return Math.sin((Math.PI/2)*p); }
+  if (fo > 0 && rt > dur - fo) { const p = Math.max(0, Math.min(1, (dur - rt) / fo)); return Math.cos((Math.PI/2)*p); }
+  return 1;
+}
+
+const W = 320, H = 120, TOP = 8;
+const yOf = g => TOP + (1 - g) * (H - TOP);
+const dur = 1, fi = 0.38, fo = 0.32;
+const xFi = (fi / dur) * W, xFo = ((dur - fo) / dur) * W;
+
+// OLD: straight line + polygon
+(() => {
+  const s = document.getElementById('fadeOld');
+  const ns = 'http://www.w3.org/2000/svg';
+  const poly = (pts, fill) => { const p = document.createElementNS(ns,'polygon'); p.setAttribute('points',pts); p.setAttribute('fill',fill); s.appendChild(p); };
+  const line = (x1,y1,x2,y2,c) => { const l = document.createElementNS(ns,'line'); l.setAttribute('x1',x1);l.setAttribute('y1',y1);l.setAttribute('x2',x2);l.setAttribute('y2',y2);l.setAttribute('stroke',c);l.setAttribute('stroke-width',2); s.appendChild(l); };
+  const base = document.createElementNS(ns,'line'); base.setAttribute('x1',0);base.setAttribute('y1',yOf(1));base.setAttribute('x2',W);base.setAttribute('y2',yOf(1));base.setAttribute('stroke','rgba(255,255,255,0.22)');base.setAttribute('stroke-dasharray','4 4'); s.appendChild(base);
+  poly(`0,${H} ${xFi},${yOf(1)} ${xFi},${H}`, 'rgba(74,222,128,0.18)');
+  line(0, H, xFi, yOf(1), '#4ade80');
+  poly(`${xFo},${yOf(1)} ${W},${yOf(1)} ${W},${H}`, 'rgba(251,146,60,0.18)');
+  line(xFo, yOf(1), W, H, '#fb923c');
+})();
+
+// NEW: sampled smooth curve
+(() => {
+  const s = document.getElementById('fadeNew');
+  const ns = 'http://www.w3.org/2000/svg';
+  const base = document.createElementNS(ns,'line'); base.setAttribute('x1',0);base.setAttribute('y1',yOf(1));base.setAttribute('x2',W);base.setAttribute('y2',yOf(1));base.setAttribute('stroke','rgba(255,255,255,0.22)');base.setAttribute('stroke-dasharray','4 4'); s.appendChild(base);
+  const ramp = (x0,x1,fill,stroke) => {
+    const N=28, pts=[];
+    for (let i=0;i<=N;i++){ const x=x0+((x1-x0)*i)/N; const t=(x/W)*dur; const g=getClipFadeGain(fi,fo,dur,t); pts.push(`${x.toFixed(2)},${yOf(g).toFixed(2)}`); }
+    const curve='M '+pts.join(' L ');
+    const area=document.createElementNS(ns,'path'); area.setAttribute('d',`${curve} L ${x1.toFixed(2)},${H} L ${x0.toFixed(2)},${H} Z`); area.setAttribute('fill',fill); s.appendChild(area);
+    const path=document.createElementNS(ns,'path'); path.setAttribute('d',curve); path.setAttribute('fill','none'); path.setAttribute('stroke',stroke); path.setAttribute('stroke-width',2); path.setAttribute('stroke-linecap','round'); path.setAttribute('stroke-linejoin','round'); s.appendChild(path);
+  };
+  ramp(0, xFi, 'rgba(74,222,128,0.16)', '#4ade80');
+  ramp(xFo, W, 'rgba(251,146,60,0.16)', '#fb923c');
+})();
+
+// ---- 波形 ----
+const PEAKS = Array.from({length: 80}, (_, i) => 0.25 + 0.6*Math.abs(Math.sin(i*0.45))*(0.6+0.4*Math.abs(Math.cos(i*0.17))));
+function drawWave(canvas, mode) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height, midY = h/2;
+  ctx.clearRect(0,0,w,h);
+  const barW = w / PEAKS.length;
+  if (mode === 'old') {
+    ctx.fillStyle = '#8fd';
+    for (let i=0;i<PEAKS.length;i++){ const bh=Math.max(1,PEAKS[i]*h*0.9); ctx.fillRect(i*barW, midY-bh/2, Math.max(1,barW-0.5), bh); }
+  } else {
+    ctx.strokeStyle='rgba(103,232,196,0.18)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(0,midY); ctx.lineTo(w,midY); ctx.stroke();
+    ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='rgba(103,232,196,0.9)';
+    ctx.beginPath();
+    for (let i=0;i<PEAKS.length;i++){ const bh=Math.max(1.5,PEAKS[i]*h*0.9); const x=i*barW+barW/2; ctx.moveTo(x,midY-bh/2); ctx.lineTo(x,midY+bh/2); }
+    ctx.stroke();
+  }
+}
+drawWave(document.getElementById('waveOld'), 'old');
+drawWave(document.getElementById('waveNew'), 'new');
+</script>
+</body>
+</html>

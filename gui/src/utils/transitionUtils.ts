@@ -307,9 +307,11 @@ export function getIncomingAudioTransitionLayer(
 // ── 音频淡入/淡出增益 ──
 // clip.audioFadeIn / clip.audioFadeOut：片段开头/结尾的淡入/淡出时长（秒），0 = 无。
 // 相对时间 rt = currentTime - clip.timelineIn：
-//   rt < fadeIn        → 线性 0→1（淡入）
-//   rt > dur - fadeOut → 线性 1→0（淡出）
-// 否则 1.0。增益夹 [0, 1]。须与 src/pipeline/export.rs::fade_gain_at 逐字节一致。
+//   rt < fadeIn        → raised-cosine 0→1（淡入，sin）
+//   rt > dur - fadeOut → raised-cosine 1→0（淡出，cos）
+// 否则 1.0。增益夹 [0, 1]。
+// 采用 raised-cosine（两端切线为 0）而非线性斜坡：既消除线性增益突变带来的咔哒声，
+// 也让时间轴上画出的淡变曲线天然平滑。须与 src/pipeline/export.rs::fade_gain_at 一致。
 
 export function getClipFadeGain(clip: ClipConfig, currentTime: number): number {
   const dur = clip.timelineOut - clip.timelineIn;
@@ -318,7 +320,13 @@ export function getClipFadeGain(clip: ClipConfig, currentTime: number): number {
   rt = Math.max(0, Math.min(dur, rt));
   const fi = clip.audioFadeIn ?? 0;
   const fo = clip.audioFadeOut ?? 0;
-  if (fi > 0 && rt < fi) return Math.max(0, Math.min(1, rt / fi));
-  if (fo > 0 && rt > dur - fo) return Math.max(0, Math.min(1, (dur - rt) / fo));
+  if (fi > 0 && rt < fi) {
+    const p = Math.max(0, Math.min(1, rt / fi));
+    return Math.sin((Math.PI / 2) * p);
+  }
+  if (fo > 0 && rt > dur - fo) {
+    const p = Math.max(0, Math.min(1, (dur - rt) / fo));
+    return Math.cos((Math.PI / 2) * p);
+  }
   return 1;
 }

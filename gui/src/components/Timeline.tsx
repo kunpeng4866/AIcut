@@ -11,6 +11,8 @@ import { useUIStore } from '../store/uiStore';
 
 import { useWaveform } from '../hooks/useWaveform';
 
+import { getClipFadeGain } from '../utils/transitionUtils';
+
 import type { ClipConfig, TrackConfig, AssetConfig } from '../types';
 
 
@@ -123,13 +125,28 @@ function WaveformCanvas({ peaks, width, height, startTime, endTime, totalDuratio
     const barWidth = width / visiblePeaks.length;
     const midY = height / 2;
 
-    ctx.fillStyle = '#8fd';
+    // 柔和中心轴（淡）
+    ctx.strokeStyle = 'rgba(103, 232, 196, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, midY);
+    ctx.lineTo(width, midY);
+    ctx.stroke();
+
+    // 波形：细描边 + 圆头，替代生硬矩形条，视觉更柔顺
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(103, 232, 196, 0.9)'; // 柔和青绿 #67e8c4
+    ctx.beginPath();
     for (let i = 0; i < visiblePeaks.length; i++) {
       const peak = visiblePeaks[i];
-      const barHeight = Math.max(1, peak * height * 0.9);
-      const x = i * barWidth;
-      ctx.fillRect(x, midY - barHeight / 2, Math.max(1, barWidth - 0.5), barHeight);
+      const barHeight = Math.max(1.5, peak * height * 0.9);
+      const x = i * barWidth + barWidth / 2;
+      ctx.moveTo(x, midY - barHeight / 2);
+      ctx.lineTo(x, midY + barHeight / 2);
     }
+    ctx.stroke();
   }, [peaks, width, height, startTime, endTime, totalDuration]);
 
   return <canvas ref={canvasRef} style={{ display: 'block' }} />;
@@ -213,6 +230,31 @@ function TransitionMarker({ clip, track, zoom, onOpenPanel }: {
 // (robust against the earlier freeze where a full-area capture intercepted drags).
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
+// 平滑淡变曲线：按真实增益函数 getClipFadeGain 采样绘制，保证"视觉曲线 == 实际淡变"。
+// x0..x1 为淡入/淡出斜坡在片段内的水平区间；yOf 把增益映射到 y 坐标。
+function FadeRamp({ clip, dur, x0, x1, width, H, yOf, fill, stroke }: {
+  clip: ClipConfig; dur: number; x0: number; x1: number; width: number;
+  H: number; yOf: (g: number) => number; fill: string; stroke: string;
+}) {
+  const N = 28;
+  const pts: string[] = [];
+  for (let i = 0; i <= N; i++) {
+    const x = x0 + ((x1 - x0) * i) / N;
+    const t = clip.timelineIn + (x / width) * dur;
+    const g = getClipFadeGain(clip, t);
+    pts.push(`${x.toFixed(2)},${yOf(g).toFixed(2)}`);
+  }
+  const curve = 'M ' + pts.join(' L ');
+  const area = `${curve} L ${x1.toFixed(2)},${H} L ${x0.toFixed(2)},${H} Z`;
+  return (
+    <>
+      <path d={area} fill={fill} pointerEvents="none" />
+      <path d={curve} fill="none" stroke={stroke} strokeWidth={2}
+        strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+    </>
+  );
+}
+
 function FadeHandles({ clip, track, zoom, width }: {
   clip: ClipConfig; track: TrackConfig; zoom: number; width: number;
 }) {
@@ -280,19 +322,15 @@ function FadeHandles({ clip, track, zoom, width }: {
       style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', overflow: 'visible', zIndex: 4 }}>
       {/* gain=1 baseline */}
       <line x1={0} y1={yOf(1)} x2={width} y2={yOf(1)} stroke="rgba(255,255,255,0.22)" strokeDasharray="4 4" pointerEvents="none" />
-      {/* fade-in ramp (gain 0 -> 1) */}
+      {/* fade-in ramp (gain 0 -> 1)，平滑曲线 */}
       {fi > 0 && (
-        <>
-          <polygon points={`0,${H} ${xFi},${yOf(1)} ${xFi},${H}`} fill="rgba(74,222,128,0.18)" pointerEvents="none" />
-          <line x1={0} y1={H} x2={xFi} y2={yOf(1)} stroke="#4ade80" strokeWidth={2} pointerEvents="none" />
-        </>
+        <FadeRamp clip={clip} dur={dur} x0={0} x1={xFi} width={width} H={H}
+          yOf={yOf} fill="rgba(74,222,128,0.16)" stroke="#4ade80" />
       )}
-      {/* fade-out ramp (gain 1 -> 0) */}
+      {/* fade-out ramp (gain 1 -> 0)，平滑曲线 */}
       {fo > 0 && (
-        <>
-          <polygon points={`${xFo},${yOf(1)} ${width},${yOf(1)} ${width},${H}`} fill="rgba(251,146,60,0.18)" pointerEvents="none" />
-          <line x1={xFo} y1={yOf(1)} x2={width} y2={H} stroke="#fb923c" strokeWidth={2} pointerEvents="none" />
-        </>
+        <FadeRamp clip={clip} dur={dur} x0={xFo} x1={width} width={width} H={H}
+          yOf={yOf} fill="rgba(251,146,60,0.16)" stroke="#fb923c" />
       )}
       {/* fade-in handle (green, always visible) — 拖动改时长，双击复位为 0 */}
       <circle cx={xFi} cy={yOf(1)} r={5} fill="#4ade80" stroke="#0b6" strokeWidth={1}
@@ -421,9 +459,9 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
               totalDuration={totalDuration} />
           ) : (
             // Fallback faux-waveform when peaks are unavailable.
-            <div style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-              {Array.from({ length: Math.max(5, Math.floor(width / 3)) }).map((_, i) => (
-                <div key={i} style={{ width: 1, height: `${30 + Math.abs(Math.sin(i * 0.7)) * 50}%`, background: '#8fd', margin: '0 1px' }} />
+            <div style={{ display: 'flex', alignItems: 'center', height: '100%', gap: '2px' }}>
+              {Array.from({ length: Math.max(5, Math.floor(width / 4)) }).map((_, i) => (
+                <div key={i} style={{ width: 2, height: `${30 + Math.abs(Math.sin(i * 0.7)) * 50}%`, background: 'rgba(103, 232, 196, 0.85)', borderRadius: 1, margin: '0 0.5px' }} />
               ))}
             </div>
           )}

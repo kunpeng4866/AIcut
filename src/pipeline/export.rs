@@ -29,11 +29,15 @@ fn fade_gain_at(clip: &Clip, t: f64) -> f32 {
     rt = rt.max(0.0).min(dur);
     let fi = clip.audio_fade_in;
     let fo = clip.audio_fade_out;
+    // raised-cosine 平滑淡变（与 transitionUtils::getClipFadeGain 一致）：
+    // 淡入 sin(π/2·p)，淡出 cos(π/2·p)，两端切线为 0，避免线性斜坡咔哒声。
     if fi > 0.0 && rt < fi {
-        return ((rt / fi) as f32).max(0.0).min(1.0);
+        let p = ((rt / fi) as f32).max(0.0).min(1.0);
+        return (std::f32::consts::FRAC_PI_2 * p).sin();
     }
     if fo > 0.0 && rt > dur - fo {
-        return (((dur - rt) / fo) as f32).max(0.0).min(1.0);
+        let p = (((dur - rt) / fo) as f32).max(0.0).min(1.0);
+        return (std::f32::consts::FRAC_PI_2 * p).cos();
     }
     1.0
 }
