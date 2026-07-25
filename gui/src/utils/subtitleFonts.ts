@@ -31,14 +31,14 @@ export const SUBTITLE_FONTS: SubtitleFont[] = [
   { id: 'source-han-serif', label: '思源宋体', group: '开源·免费商用', bundled: 'NotoSerifSC-Regular.woff2', css: "'Source Han Serif SC', 'Noto Serif SC', 'NotoSerifSC', 'Source Han Serif', serif" },
   { id: 'harmonyos', label: '鸿蒙字体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'HarmonyOS Sans SC', 'HarmonyOS Sans', sans-serif" },
   { id: 'zcool-kuaile', label: '站酷快乐体', group: '开源·免费商用', bundled: 'ZCOOLKuaiLe-Regular.ttf', css: "'ZCOOL KuaiLe', sans-serif" },
-  { id: 'zcool-hei', label: '站酷酷黑', group: '开源·免费商用', bundled: 'ZCOOLQingKeHuangYou-Regular.ttf', css: "'ZCOOL QingKe HuangYOu', sans-serif" },
+  { id: 'zcool-hei', label: '站酷酷黑', group: '开源·免费商用', bundled: 'ZCOOLQingKeHuangYou-Regular.ttf', css: "'ZCOOL QingKe HuangYou', sans-serif" },
 
   // ── 平台 / 品牌原生字体（依赖用户系统/平台，未内置） ──
   { id: 'douyin', label: '抖音美好体', group: '平台·品牌字体', css: "'Douyin Sans', '字节跳动字体', sans-serif" },
 
-  // ── 英文标题（开源，系统通常自带） ──
+  // ── 英文标题（开源；Bebas Neue 已内置，Impact 通常系统自带） ──
   { id: 'impact', label: 'Impact', group: '英文标题', css: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" },
-  { id: 'bebas', label: 'Bebas Neue', group: '英文标题', css: "'Bebas Neue', Impact, sans-serif" },
+  { id: 'bebas', label: 'Bebas Neue', group: '英文标题', bundled: 'BebasNeue-Regular.ttf', css: "'Bebas Neue', Impact, sans-serif" },
 ];
 
 const FONT_MAP = new Map(SUBTITLE_FONTS.map((f) => [f.id, f]));
@@ -78,7 +78,15 @@ export const BUNDLED_FONT_FILES: Record<string, string> = {
 // fontsDir：由主进程 getFontsDir() 返回（dev=仓库/gui/public/fonts，打包=resources/fonts）。
 // 开发模式页面跑在 http(s)，直接用 '/fonts/...'（vite 由 public 提供）；
 // 打包模式页面跑在 file://，必须用绝对 file:// 路径指向 resources/fonts。
+// 关键：@font-face 的 font-family 必须与 findFontCss() 返回的 css 链里的真实字体名一致，
+// 否则浏览器找不到对应 @font-face → 回退系统字体（即用户看到的「没反应」）。
 let injected = false;
+// 从 css 回退链里提取首个别名（去掉引号/空格），作为 font-family 注册名。
+function firstFamilyName(css: string): string | null {
+  // 形如 "'ZCOOL KuaiLe', sans-serif" → "ZCOOL KuaiLe"
+  const m = css.match(/^\s*['"]?([^,'"]+?)['"]?\s*,/);
+  return m ? m[1].trim() : null;
+}
 export function injectBundledFontFaces(fontsDir: string) {
   if (injected || typeof document === 'undefined') return;
   injected = true;
@@ -96,15 +104,10 @@ export function injectBundledFontFaces(fontsDir: string) {
   const faces: string[] = [];
   for (const f of SUBTITLE_FONTS) {
     if (!f.bundled) continue;
-    // 用字体 id 作为 family 名，保证与 findFontCss 中的 'NotoSansSC' 等别名匹配
-    const family = f.id.replace(/-/g, ' ');
-    // 同时注册带连字符的别名，覆盖 css 链里写死的 'NotoSansSC' / 'NotoSerifSC'
-    const alias = f.id.replace(/-/g, '');
+    const family = firstFamilyName(f.css);
+    if (!family) continue;
     const isWoff2 = f.bundled.endsWith('.woff2');
     const fmt = isWoff2 ? 'woff2' : 'truetype';
-    faces.push(
-      `@font-face{font-family:'${alias}';font-style:normal;font-weight:normal;font-display:swap;src:url('${base}${f.bundled}') format('${fmt}');}`,
-    );
     faces.push(
       `@font-face{font-family:'${family}';font-style:normal;font-weight:normal;font-display:swap;src:url('${base}${f.bundled}') format('${fmt}');}`,
     );

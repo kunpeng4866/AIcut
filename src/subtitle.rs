@@ -183,6 +183,7 @@ const BUNDLED_FONT_FILES: &[&str] = &[
     "HarmonyOS-SansSC-Bold.ttf",
     "ZCOOLKuaiLe-Regular.ttf",
     "ZCOOLQingKeHuangYou-Regular.ttf",
+    "BebasNeue-Regular.ttf",
 ];
 
 /// 字体 id（前端存进工程的 font_family 值）→ 内置文件名。
@@ -195,6 +196,7 @@ const FONT_ID_TO_FILE: &[(&str, &str)] = &[
     ("harmonyos", "HarmonyOS-SansSC-Regular.ttf"),
     ("zcool-kuaile", "ZCOOLKuaiLe-Regular.ttf"),
     ("zcool-hei", "ZCOOLQingKeHuangYou-Regular.ttf"),
+    ("bebas", "BebasNeue-Regular.ttf"),
 ];
 
 /// 根据 font_family 字符串解析内置字体文件绝对路径。

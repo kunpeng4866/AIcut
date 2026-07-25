@@ -17,6 +17,7 @@
 | `HarmonyOS-SansSC-Bold.ttf` | 鸿蒙字体 | 700 | 同上 | 同上 |
 | `ZCOOLKuaiLe-Regular.ttf` | 站酷快乐体 | 400 | SIL OFL 1.1 | https://github.com/google/fonts (ofl/zcoolkuaile) |
 | `ZCOOLQingKeHuangYou-Regular.ttf` | 站酷酷黑 | 400 | SIL OFL 1.1 | https://github.com/google/fonts (ofl/zcoolqingkehuangyou) |
+| `BebasNeue-Regular.ttf` | Bebas Neue | 400 | SIL OFL 1.1 | https://github.com/google/fonts (ofl/bebasneue) |
 
 ## 许可证要点
 
