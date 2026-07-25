@@ -214,67 +214,40 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         }
         vout_label = format!("[{}]", acc);
     }
-    // 音频滤镜图
+    // 音频滤镜图：per-clip 音频流 + 转场 equal-power 交叉淡化
+    // 模型与 export.rs::render_audio_chunk / 预览 transitionUtils.audioCrossfadeEnv 一致：
+    //   出片段在转场窗 [outT-dur, outT] 乘 cos(progress·π/2)（1→0 淡出）
+    //   入片段在同窗乘 sin(progress·π/2)（0→1 淡入）
+    //   窗外保持原增益。最后统一 amix(normalize=0) 保留 equal-power 合成，alimiter 限幅防削波。
+    // 音频源：有 audio 轨则取 audio 轨片段；否则取 video/effect 轨自带音频（与旧逻辑一致）。
     let mut aout_label = String::new();
-    if !audio_clips.is_empty() {
-        let mut audio_parts: Vec<String> = Vec::new();
-        for (ai, c) in audio_clips.iter().enumerate() {
-            let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => continue, };
-            let alabel = format!("a{}", ai);
-            let mut achain = format!("[{}:a]", idx);
-            let vol = keyframed(c, "volume", c.volume).clamp(0.0, 2.0);
-            if (vol - 1.0).abs() > 0.01 { achain.push_str(&format!("volume={}", fmt(vol))); }
-            else { achain.push_str("anull"); }
-            if (c.speed - 1.0).abs() > 0.001 { let tempo = c.speed.clamp(0.5, 2.0); achain.push_str(&format!(",atempo={}", fmt(tempo))); }
-            for f in &c.filters {
-                if !f.enabled { continue; }
-                if let Some(s) = build_filter_spec(&f.kind, &f.params) {
-                    if f.kind == "denoise" || f.kind == "equalizer" { achain.push_str(&format!(",{}", s)); }
-                }
-            }
-            achain.push_str(&format!("[{}]", alabel));
-            audio_parts.push(achain);
+    let audio_source_clips: Vec<&Clip> = if !audio_clips.is_empty() {
+        audio_clips.clone()
+    } else {
+        video_clips.iter().map(|(_, c)| *c).collect()
+    };
+    if !audio_source_clips.is_empty() {
+        let mut audio_labels: Vec<String> = Vec::new();
+        let mut audio_nodes: Vec<String> = Vec::new();
+        for c in &audio_source_clips {
+            let trk = project.tracks.iter().find(|t| t.clips.iter().any(|cc| cc.id == c.id));
+            let track_vol = trk.map(|t| t.volume).unwrap_or(1.0);
+            let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => continue };
+            let label = format!("a{}", audio_labels.len());
+            let envelopes = audio_transition_envelopes(c, trk);
+            audio_nodes.push(build_clip_audio_node(c, idx, track_vol, &label, &envelopes));
+            audio_labels.push(label);
         }
-        if audio_parts.len() == 1 { aout_label = format!("[a0]"); }
-        else {
-            let mut mix_inputs = Vec::new();
-            for ai in 0..audio_parts.len() { mix_inputs.push(format!("[a{}]", ai)); }
-            audio_parts.push(format!("{}amix=inputs={}:duration=first[aout]", mix_inputs.join(""), mix_inputs.len()));
+        if audio_labels.len() == 1 {
+            aout_label = format!("[{}]", audio_labels[0]);
+        } else if audio_labels.len() > 1 {
+            let joined = audio_labels.iter().map(|l| format!("[{}]", l)).collect::<Vec<_>>().join("");
+            // normalize=0：保留 equal-power 合成（否则 amix 按输入数归一化会衰减交叉淡化）
+            // alimiter：equal-power 峰值可达 √2，限幅到 1.0 防 AAC 削波（对应 export.rs 的 clamp(-1,1)）
+            audio_nodes.push(format!("{}amix=inputs={}:normalize=0:duration=longest,alimiter=limit=1:asc=1[aout]", joined, audio_labels.len()));
             aout_label = "[aout]".to_string();
         }
-        nodes.extend(audio_parts);
-    } else if !video_clips.is_empty() {
-        // 无显式音频轨道：从所有视频输入提取音频，按各 clip 的 timeline_in 偏移后混音。
-        // 这样多 clip 工程（含转场）也能保留每段视频的原声，而非仅取第一个输入（旧 [0:a] 写法）。
-        // 每个输入音频经 anull/adelay 输出为滤镜标签，再统一 amix，避免 [0:a] 方括号被误判为滤镜标签而丢轨。
-        let mut audio_offsets: HashMap<usize, f64> = HashMap::new();
-        for (_, c) in &video_clips {
-            if let Some(&idx) = asset_to_idx.get(&c.asset_id) {
-                let e = audio_offsets.entry(idx).or_insert(f64::MAX);
-                if c.timeline_in < *e { *e = c.timeline_in; }
-            }
-        }
-        let mut audio_parts: Vec<String> = Vec::new();
-        let mut ainx: Vec<String> = Vec::new();
-        let mut ai = 0usize;
-        for (idx, off) in audio_offsets.iter() {
-            let alabel = format!("a{}", ai);
-            let delay_ms = (off * 1000.0).round() as i64;
-            let mut achain = format!("[{}:a]", idx);
-            if delay_ms > 0 { achain.push_str(&format!("adelay={}:all=1", delay_ms)); }
-            else { achain.push_str("anull"); }
-            achain.push_str(&format!("[{}]", alabel));
-            audio_parts.push(achain);
-            ainx.push(format!("[{}]", alabel));
-            ai += 1;
-        }
-        if ainx.len() == 1 {
-            aout_label = ainx[0].clone();
-        } else if ainx.len() > 1 {
-            audio_parts.push(format!("{}amix=inputs={}:duration=longest[aout]", ainx.join(""), ainx.len()));
-            aout_label = "[aout]".to_string();
-        }
-        nodes.extend(audio_parts);
+        nodes.extend(audio_nodes);
     }
     cmd.filter_graph = nodes.join(";");
     let mut map_labels: Vec<String> = Vec::new();
@@ -321,6 +294,87 @@ fn clip_transition(clip: &Clip) -> Option<(String, f64)> {
         return Some((style, dur));
     }
     None
+}
+
+/// 读取片段激活转场时长（顶层 `clip.transition` 优先，兼容 `filters[kind=transition]`），
+/// 无激活转场返回 None。数值夹到 [0.1, 5.0]（与视频 xfade 的 `xdur` 一致）。
+fn clip_transition_duration(clip: &Clip) -> Option<f64> {
+    clip_transition(clip).map(|(_, d)| d.min(5.0).max(0.1))
+}
+
+/// 返回片段的音频转场包络列表：`(tw0, dur, is_out)`。
+/// `is_out=true` → 出片段，cos 淡出；`false` → 入片段，sin 淡入。
+/// 判定与视频 xfade 完全一致：自身（或上一片段）有激活转场，且相邻片段 `gap <= 0`（重叠）。
+fn audio_transition_envelopes(clip: &Clip, track: Option<&Track>) -> Vec<(f64, f64, bool)> {
+    let mut v = Vec::new();
+    let Some(trk) = track else { return v; };
+    let mut clips: Vec<&Clip> = trk.clips.iter().collect();
+    clips.sort_by(|a, b| a.timeline_in.partial_cmp(&b.timeline_in).unwrap_or(std::cmp::Ordering::Equal));
+    let pos = match clips.iter().position(|c| c.id == clip.id) { Some(p) => p, None => return v };
+    // 出片段：自身有激活转场，且下一片段 gap<=0
+    if let Some(dur) = clip_transition_duration(clip) {
+        if pos + 1 < clips.len() {
+            let next = clips[pos + 1];
+            if next.timeline_in - clip.timeline_out <= 0.0 {
+                let tw0 = clip.timeline_out - dur;
+                v.push((tw0, dur, true));
+            }
+        }
+    }
+    // 入片段：上一片段有激活转场指向本片段，且 gap<=0
+    if pos > 0 {
+        let prev = clips[pos - 1];
+        if let Some(dur) = clip_transition_duration(prev) {
+            if clip.timeline_in - prev.timeline_out <= 0.0 {
+                let tw0 = prev.timeline_out - dur;
+                v.push((tw0, dur, false));
+            }
+        }
+    }
+    v
+}
+
+/// 构建单片段音频滤镜链：
+/// `[idx:a]` → atrim(源范围) → asetpts → atempo(变速) → volume(基础增益)
+/// → adelay(定位到主时间线) → 转场 equal-power 包络(cos/sin) → `[label]`
+///
+/// 构建单片段音频滤镜链：
+/// `[idx:a]` → atrim(源范围) → asetpts → atempo(变速) → volume(基础增益)
+/// → afade(转场 equal-power 包络) → adelay(定位到主时间线) → `[label]`
+///
+/// 关键：afade 放在 adelay **之前**，在片段自己的干净本地时间轴（asetpts 后固定 [0,dur]）上做淡变，
+/// 再用 adelay 把整段平移到主时间线。否则组合图里视频分支(xfade/overlay)会重定基音频 PTS，
+/// 导致无 adelay 的片段(如首片段 timeline_in=0)其 afade `st` 指向错误时间轴、淡变错位。
+/// afade 的 st 用本地时间 `tw0 - timeline_in`（即转场窗起点相对本片段起点的偏移）。
+fn build_clip_audio_node(c: &Clip, idx: usize, track_vol: f64, label: &str, envelopes: &[(f64, f64, bool)]) -> String {
+    let src_start = c.src_range.start;
+    let src_dur = (c.src_range.end - c.src_range.start).max(0.01);
+    // 注意：输入标签 `[idx:a]` 后必须直接接第一个滤镜（atrim），不能加逗号；
+    // 逗号仅用于分隔同一条链内的滤镜。错误写法 `[idx:a],atrim=...` 会在标签后产生
+    // 空滤镜 → ffmpeg 报 "No such filter: ''"（视频链 build_video_chain 无此逗号，故一直正常）。
+    let mut chain = format!("[{}:a]atrim=start={}:duration={}", idx, fmt(src_start), fmt(src_dur));
+    chain.push_str(",asetpts=PTS-STARTPTS");
+    if (c.speed - 1.0).abs() > 0.001 {
+        let tempo = c.speed.clamp(0.5, 2.0);
+        chain.push_str(&format!(",atempo={}", fmt(tempo)));
+    }
+    let vol = keyframed(c, "volume", c.volume).clamp(0.0, 2.0) * track_vol;
+    if (vol - 1.0).abs() > 0.01 {
+        chain.push_str(&format!(",volume={}", fmt(vol)));
+    }
+    // 转场 equal-power 包络（afade, curve=qsin）：out=cos 淡出 / in=sin 淡入，与 export.rs / 预览一致。
+    // 用本地时间轴 st = tw0 - timeline_in（转场窗起点相对本片段起点），置于 adelay 之前。
+    for (tw0, dur, is_out) in envelopes {
+        let st_local = (tw0 - c.timeline_in).max(0.0);
+        let fade_t = if *is_out { "out" } else { "in" };
+        chain.push_str(&format!(",afade=t={}:curve=qsin:st={}:d={}", fade_t, fmt(st_local), fmt(*dur)));
+    }
+    let delay_ms = (c.timeline_in * 1000.0).round() as i64;
+    if delay_ms > 0 {
+        chain.push_str(&format!(",adelay={}:all=1", delay_ms));
+    }
+    chain.push_str(&format!("[{}]", label));
+    chain
 }
 
 /// 解析工程 JSON → 构建 FFmpeg 命令字符串
