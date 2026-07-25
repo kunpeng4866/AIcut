@@ -212,13 +212,34 @@ export default function PreviewCanvas() {
     return result;
   })();
 
-  // 入片段「虚拟 timelineIn」映射：key=入片段 id，value=转场窗起点（outT - dur）。
-  // 转场让入片段提前 dur 秒显示，源时间应从转场窗起点起算而非真实 timelineIn（=outT），
-  // 保证转场窗内与窗后源位置连续（窗后从 dur*speed 衔接，不跳回开头）。
-  const incomingVirtualIn = new Map<string, number>();
+  // 入片段「虚拟 timelineIn」映射（贯穿入片段整个可见生命周期，不止转场窗内）：
+  // key=入片段 id，value=转场窗起点（outT - dur）。转场让入片段提前 dur 秒显示，
+  // 其源时间应从转场窗起点起算，而非真实 timelineIn（=outT）。
+  // 这样转场窗内（作为入片段叠加层）与窗后（成为活跃片段）源位置连续——
+  // 窗结束瞬间从 dur*speed 衔接，不跳回 src_range.start（避免「入片段开头反复循环播放」）。
+  // 遍历所有轨道（video/audio），凡挂有转场（非 none）的出片段，其同轨下一邻接片段即为入片段。
+  // 该映射与 currentTime 无关（出片段→入片段关系固定），每帧重建成本极低。
+  const incomingVirtualInMap = (() => {
+    const m = new Map<string, number>();
+    for (const track of project.tracks) {
+      if (track.visible === false) continue;
+      for (const clip of track.clips) {
+        const tr = clip.transition;
+        if (!tr || tr.transitionType === undefined || tr.transitionType === 'none') continue;
+        const dur = tr.duration && tr.duration > 0 ? tr.duration : 0.5;
+        const outT = clip.timelineOut;
+        const next = [...track.clips]
+          .filter((c) => c.id !== clip.id && c.timelineIn >= outT - 1e-4)
+          .sort((a, b) => a.timelineIn - b.timelineIn)[0];
+        if (next) m.set(next.id, outT - dur);
+      }
+    }
+    return m;
+  })();
 
   // 查找每个活跃"出片段"在转场窗内的入片段层（同轨下一片段），供实时预览叠加。
   // 与 activeVideoClips 同源（同一可见 video 轨反转序列），故第 i 个层对应第 i 个活跃片段。
+  // 入片段的「虚拟 timelineIn」已由上方 incomingVirtualInMap 统一提供（贯穿生命周期）。
   const activeTransitionLayers: { layer: TransitionPreviewLayer; asset: AssetConfig; outClip: ClipConfig }[] = (() => {
     const tracks = project.tracks
       .filter((t) => t.type === 'video' && t.visible !== false)
@@ -231,21 +252,11 @@ export default function PreviewCanvas() {
       if (!layer) continue;
       const asset = project.assets.find((a) => a.id === layer.clip.assetId);
       if (asset) {
-        // 入片段的「虚拟 timelineIn」= 转场窗起点（outT - dur）。转场让入片段提前 dur 秒显示，
-        // 其源时间应从转场窗起点起算，而非真实 timelineIn（=outT）。这样转场窗内与窗后
-        // 源位置连续，避免窗后突然跳回开头导致「入片段开头反复播放」。
-        const tr = clip.transition!;
-        const dur = tr.duration && tr.duration > 0 ? tr.duration : 0.5;
-        incomingVirtualIn.set(layer.clip.id, clip.timelineOut - dur);
         result.push({ layer, asset, outClip: clip });
       }
     }
     return result;
   })();
-  // 入片段「虚拟 timelineIn」映射：key=入片段 id，value=转场窗起点（outT - dur）。
-  // 供 seek effect 在转场窗内及窗后（入片段成为活跃片段）统一用虚拟 timelineIn 计算源时间，
-  // 保证转场窗结束时源位置从 dur*speed 连续衔接，而非跳回 src_range.start。
-  const incomingVirtualInMap = incomingVirtualIn;
 
   // 预加载列表：转场窗将在未来 2 秒内开始的入片段（同轨下一片段）。
   // 条件：currentTime >= outT - duration - 2.0 && currentTime < outT - duration
@@ -618,7 +629,10 @@ export default function PreviewCanvas() {
     activeAudioClips.forEach(({ clip }) => {
       const a = audioRefs.current.get(clip.id);
       if (!a) return;
-      const { srcT: targetTime } = clipSourceTime(currentTime, clip);
+      // 入片段（转场窗之前被提前显示）窗后用虚拟 timelineIn 计算源时间，保证与转场窗内连续，
+      // 不跳回素材开头（与视频入片段同源处理）。普通片段 virtualIn 为 undefined，走真实 timelineIn。
+      const virtualIn = incomingVirtualInMap.get(clip.id);
+      const { srcT: targetTime } = clipSourceTime(currentTime, clip, virtualIn);
       if (clipNeedsManualDrive(clip, currentTime)) {
         if (a.readyState >= 1 && !a.seeking) a.currentTime = Math.max(0, targetTime);
       } else {
@@ -889,7 +903,7 @@ export default function PreviewCanvas() {
               {/* 转场入片段隐藏 video：解码 + 供 WebGPU 取纹理（与出片段同步 seek） */}
               {activeTransitionLayers.map(({ layer, asset }) => (
                 <video
-                  key={`tr-${layer.clip.id}`}
+                  key={layer.clip.id}
                   ref={(el) => { if (el) videoRefs.current.set(layer.clip.id, el); else videoRefs.current.delete(layer.clip.id); }}
                   src={pathToUrl(asset.path)}
                   style={theme.hiddenMedia}
@@ -903,7 +917,7 @@ export default function PreviewCanvas() {
                 .filter(({ clip }) => !activeTransitionLayers.some((l) => l.layer.clip.id === clip.id))
                 .map(({ clip, asset }) => (
                   <video
-                    key={`tr-${clip.id}`}
+                    key={clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                     src={pathToUrl(asset.path)}
                     style={theme.hiddenMedia}
@@ -951,7 +965,7 @@ export default function PreviewCanvas() {
                 }
                 return (
                   <video
-                    key={`tr-${layer.clip.id}`}
+                    key={layer.clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(layer.clip.id, el); else videoRefs.current.delete(layer.clip.id); }}
                     src={pathToUrl(asset.path)}
                     style={tStyle}
@@ -966,7 +980,7 @@ export default function PreviewCanvas() {
                 .filter(({ clip }) => !activeTransitionLayers.some((l) => l.layer.clip.id === clip.id))
                 .map(({ clip, asset }) => (
                   <video
-                    key={`tr-${clip.id}`}
+                    key={clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                     src={pathToUrl(asset.path)}
                     style={theme.hiddenMedia}
