@@ -518,18 +518,47 @@ function parseShellArgs(cmd: string): string[] {
 function applyExportOptions(args: string[], options: ExportOptionsParam): string[] {
   const result = [...args];
 
-  // 分辨率：在输出路径前插入 -vf scale=-2:HEIGHT
+  // 分辨率：统一缩放输出高度。
+  // 注意：引擎生成的命令若已含 -filter_complex（简单/转场工程走 graph.rs），
+  // 不能再叠加简单 -vf（ffmpeg 禁止同一流既走 complex 又走 simple 滤镜），
+  // 否则报 "Simple and complex filtering cannot be used together"。
+  // 因此：有 -filter_complex 时把 scale 合并进滤镜图末尾节点；否则才用 -vf。
   if (options.resolution !== 'original') {
     const heights: Record<string, number> = { '1080p': 1080, '720p': 720, '480p': 480 };
     const h = heights[options.resolution];
     const scaleFilter = `scale=-2:${h}`;
-    const vfIdx = result.indexOf('-vf');
-    if (vfIdx >= 0 && vfIdx + 1 < result.length) {
-      // 已有 -vf，追加 scale 滤镜
-      result[vfIdx + 1] = `${result[vfIdx + 1]},${scaleFilter}`;
+    const fcIdx = result.indexOf('-filter_complex');
+    if (fcIdx >= 0 && fcIdx + 1 < result.length) {
+      // 合并进 filter_complex 末尾输出节点，避免与 -vf 冲突
+      const fc = result[fcIdx + 1];
+      const m = fc.match(/\[([^\]]+)\]\s*$/);
+      if (m) {
+        const outLabel = m[1];
+        const scaledLabel = '__scaled__';
+        result[fcIdx + 1] = fc.replace(/\[([^\]]+)\]\s*$/, `[$1];[$1]${scaleFilter}[${scaledLabel}]`);
+        // 同步更新 -map 对该输出节点的引用（-map 可能是合并形式如 [va1][0:a]）
+        for (let i = 0; i < result.length - 1; i++) {
+          if (result[i] === '-map' && result[i + 1].includes(`[${outLabel}]`)) {
+            result[i + 1] = result[i + 1].split(`[${outLabel}]`).join(`[${scaledLabel}]`);
+          }
+        }
+      } else {
+        // 滤镜图末尾无命名输出（异常），降级用原 -vf 方式
+        const vfIdx = result.indexOf('-vf');
+        if (vfIdx >= 0 && vfIdx + 1 < result.length) {
+          result[vfIdx + 1] = `${result[vfIdx + 1]},${scaleFilter}`;
+        } else {
+          result.splice(result.length - 1, 0, '-vf', scaleFilter);
+        }
+      }
     } else {
-      // 没有 -vf，在输出路径（最后一个参数）前插入
-      result.splice(result.length - 1, 0, '-vf', scaleFilter);
+      // 无 filter_complex：简单路径，直接用 -vf
+      const vfIdx = result.indexOf('-vf');
+      if (vfIdx >= 0 && vfIdx + 1 < result.length) {
+        result[vfIdx + 1] = `${result[vfIdx + 1]},${scaleFilter}`;
+      } else {
+        result.splice(result.length - 1, 0, '-vf', scaleFilter);
+      }
     }
   }
 
