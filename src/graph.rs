@@ -69,15 +69,15 @@ fn keyframed(clip: &Clip, path: &str, base: f64) -> f64 {
         .unwrap_or(base)
 }
 
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>) -> Option<String> {
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, idx, w, h, &label);
+    let chain = build_video_chain(c, idx, w, h, &label, fps);
     nodes.push(chain);
     Some(label)
 }
 
-fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str) -> String {
+fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32) -> String {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
@@ -100,6 +100,9 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str) -> Strin
     }
     let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
     if opacity < 1.0 { chain.push_str(&format!(",colorchannelmixer=aa={}", fmt(opacity))); }
+    // 统一输出帧率到画布 fps：xfade/overlay 要求各路输入帧率一致，否则 filter 配置失败
+    // （如 24fps 与 30fps 素材直接 xfade 会报 framesync 错误）。放在变换链末尾、打标签前。
+    chain.push_str(&format!(",fps={}", fps));
     chain.push_str(&format!("[{}]", label));
     chain
 }
@@ -170,21 +173,21 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c = clips[0];
                 let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => { vci += 1; continue; } };
                 let src = format!("vs{}", vci);
-                let chain = build_video_chain(c, idx, w, h, &src);
+                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps);
                 nodes.push(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
-                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, w, h, &mut nodes) else { vci += 1; continue; };
+                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                 vci += 1;
                 for ci in 1..clips.len() {
                     let prev = clips[ci - 1]; let curr = clips[ci];
                     let gap = curr.timeline_in - prev.timeline_out;
                     let has_transition = prev.filters.iter().any(|f| f.kind == "transition" && f.enabled)
                         || curr.filters.iter().any(|f| f.kind == "transition" && f.enabled);
-                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes) else { vci += 1; continue; };
+                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
                     if has_transition && gap <= 0.0 {
                         let xdur = (-gap).min(1.0).max(0.1);
