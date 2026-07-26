@@ -842,7 +842,7 @@ def analyze(input_path: str, opts: dict) -> dict:
     opts = opts or {}
 
     model_size = opts.get("modelSize", "base")
-    use_demucs = bool(opts.get("useDemucs", True))
+    use_demucs = bool(opts.get("useDemucs", False))
     vad_threshold = float(opts.get("vadThreshold", 0.25))
     min_gap = float(opts.get("minGap", 0.18))
     word_pad = float(opts.get("wordPad", 0.04))

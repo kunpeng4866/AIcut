@@ -68,7 +68,7 @@ export default function SpeechPanel() {
 
   // ── 选项（本地状态，带默认值）──
   const [modelSize, setModelSize] = useState<SpeechEditOptions['modelSize']>('base');
-  const [useDemucs, setUseDemucs] = useState(true);       // 声源分离降噪
+  const [useDemucs, setUseDemucs] = useState(false);      // 声源分离（默认关：口播清洗直接用原素材音频，避免 Demucs 误分配导致静音；需保留背景音乐时手动开启）
   const [vadThreshold, setVadThreshold] = useState(0.25);  // VAD 灵敏度
   const [minGap, setMinGap] = useState(0.18);             // 最小停顿
   const [wordPad, setWordPad] = useState(0.04);           // 词边界 padding
