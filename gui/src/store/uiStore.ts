@@ -23,6 +23,11 @@ interface UIState {
   previewWidth: number;
   previewHeight: number;
 
+  // 口播剪辑：分析后在原素材时间轴上叠加「保留(绿)/删除(红)」标记
+  speechOverlay: { assetPath: string; keepSegments: [number, number][]; duration: number } | null;
+  setSpeechOverlay: (o: { assetPath: string; keepSegments: [number, number][]; duration: number }) => void;
+  clearSpeechOverlay: () => void;
+
   // 可拖拽调节的面板尺寸
   leftPanelWidth: number;    // 左面板宽度（默认 280）
   rightPanelWidth: number;   // 右面板宽度（默认 280）
@@ -61,6 +66,10 @@ export const useUIStore = create<UIState>((set) => ({
 
   previewWidth: 1920,
   previewHeight: 1080,
+
+  speechOverlay: null,
+  setSpeechOverlay: (o) => set({ speechOverlay: o }),
+  clearSpeechOverlay: () => set({ speechOverlay: null }),
 
   leftPanelWidth: 280,
   rightPanelWidth: 280,

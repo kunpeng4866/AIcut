@@ -22,3 +22,11 @@ tmp_corrupted_backup/
 
 # 测试导出产物（生成物，非源码）
 *.mp4
+
+# 口播剪辑：Demucs 分离出的 stem 缓存（生成物，非源码）
+.aicut_speech/
+
+# Python 缓存
+__pycache__/
+**/__pycache__/
+*.pyc

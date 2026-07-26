@@ -140,6 +140,7 @@ export interface SpeechEditOptions {
   normalize: boolean;        // 响度归一(LUFS)
   fillers: boolean;          // 删语气词废话
   keepNonspeech?: boolean;   // 保留背景音乐/环境音（默认 true：只删静音/语气词/气声/瞬态，不动音乐；false=紧凑模式，连非人声一起丢）
+  trimSilence?: boolean;     // 修剪首尾静音（默认 true：删开头/结尾的低能量静音段）
   exclude?: [number, number][]; // 手动排除区间(秒) [start,end]
 }
 
@@ -154,6 +155,10 @@ export interface SpeechEditResult {
   detail: SpeechEditDetailItem[];         // 删除原因分类
   totalRemovedSec: number;                // 删除总时长
   ratio: number;                          // 压缩比例 0~1
+  separated?: boolean;                    // 是否成功做了声源分离（人声/伴奏各自独立）
+  vocalPath?: string;                     // 分离出的人声 stem 路径（separated 时存在）
+  accompPath?: string;                    // 分离出的伴奏 stem 路径（separated 时存在）
+  musicSegments?: [number, number][];     // 非语音但含音乐/环境音的区间（秒），assemble 时作为「纯伴奏桥接段」保留，gap 音乐不丢
 }
 
 // assemble（生成清洗文件）的输出
@@ -171,6 +176,10 @@ export interface SpeechAssembleOptions {
   declick?: boolean;    // 去咔哒声（ffmpeg adeclick 滤镜，去除叠在人声里的爆音/咔哒）
   deess?: boolean;      // 去齿音（ffmpeg highshelf 近似）
   normalize?: boolean;  // 响度归一（ffmpeg loudnorm）
+  separated?: boolean;  // 是否使用分离 stem 重组（cleaned 人声 + 原伴奏混回，音乐不丢）
+  vocalPath?: string;   // 人声 stem 路径（separated 时提供）
+  accompPath?: string;  // 伴奏 stem 路径（separated 时提供）
+  musicSegments?: [number, number][]; // 纯伴奏桥接段（separated 时与 keepSegments 交替拼接，gap 音乐不丢）
 }
 
 export interface SpeechAPI {

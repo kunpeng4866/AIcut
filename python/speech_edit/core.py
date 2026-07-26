@@ -111,12 +111,19 @@ def _has_video(path: str) -> bool:
 # [1] Demucs 声源分离（分析辅助；失败回退原始音频）
 # ══════════════════════════════════════════════════════
 
-def neural_separate(wav16_path: str, out_dir: str):
-    """用 Demucs 分离人声。成功返回 voice stem 路径，失败返回 None。"""
+def neural_separate(wav16_path: str, out_dir: str, cache_dir: str):
+    """用 Demucs 分离人声(vocals)与伴奏(no_vocals)。
+
+    成功返回 (vocals_path, accomp_path)，失败返回 (None, None)。
+
+    Demucs 原生输出 44.1k 的 `htdemucs/src/vocals.wav` 与 `htdemucs/src/no_vocals.wav`，
+    二者被 COPY 到 cache_dir（持久目录）并命名为 `<base>_vocals.wav` / `<base>_no_vocals.wav`，
+    **保持 Demucs 原生采样率（不做 16k resample）**。16k 人声仅由 analyze 在分析前现做 resample。
+    """
     try:
         import importlib.util as u
         if not u.find_spec("demucs"):
-            return None
+            return None, None
         py = sys.executable
         work = os.path.join(out_dir, "_demucs")
         os.makedirs(work, exist_ok=True)
@@ -129,15 +136,19 @@ def neural_separate(wav16_path: str, out_dir: str):
                             encoding="utf-8", errors="replace", env=env)
         if cp.returncode != 0:
             raise RuntimeError(f"demucs exit={cp.returncode}")
-        got = os.path.join(work, "htdemucs", "src", "vocals.wav")
-        if os.path.exists(got):
-            out = os.path.join(work, "voice.wav")
-            _run_ffmpeg(["-i", got, "-ac", "1", "-ar", "16000", out])
-            print("  [OK] Demucs 人声分离完成", flush=True)
-            return out
+        base = os.path.splitext(os.path.basename(wav16_path))[0]
+        got_v = os.path.join(work, "htdemucs", "src", "vocals.wav")
+        got_a = os.path.join(work, "htdemucs", "src", "no_vocals.wav")
+        if os.path.exists(got_v) and os.path.exists(got_a):
+            vdst = os.path.join(cache_dir, f"{base}_vocals.wav")
+            adst = os.path.join(cache_dir, f"{base}_no_vocals.wav")
+            shutil.copyfile(got_v, vdst)
+            shutil.copyfile(got_a, adst)
+            print("  [OK] Demucs 声源分离完成（vocals + no_vocals @44.1k 已缓存）", flush=True)
+            return vdst, adst
     except Exception as e:
         print(f"  [SKIP] Demucs 不可用({e})，跳过声源分离", flush=True)
-    return None
+    return None, None
 
 
 # ══════════════════════════════════════════════════════
@@ -358,12 +369,17 @@ def detect_gap_breath(wav_path: str, gaps: list, words: list,
 # ══════════════════════════════════════════════════════
 
 def detect_transients(wav_path: str, gaps: list, words: list,
-                      word_pad: float = 0.06, crest_thr: float = 6.0,
+                      word_pad: float = 0.06, crest_thr: float = 4.0,
                       flat_thr: float = 0.4, min_dur: float = 0.008,
                       max_dur: float = 0.12) -> list:
     """
-    在词间隙中用 5ms 精细窗口检测宽带瞬态（咂嘴/口齿音/mic磕碰）。
+    在词间隙中用 5ms 精细窗口检测宽带瞬态（咂嘴/口齿音/mic磕碰/咔哒声）。
     crest factor(峰值/RMS) 高 + 频谱平坦度高 = 瞬态噪声。
+
+    音乐门（修复 #1 漏抓根因）：旧逻辑对「整段间隙」先算一次频谱平坦度，若
+    <0.25 就整段 continue 跳过——导致音乐感长间隙里的咔哒被整段漏掉。现改为
+    **逐 5ms 窗口**判断：仅当该窗口平坦度 < 0.2（确为音乐/音色）才跳过该窗口，
+    非音乐窗口里 crest 高的瞬态照样抓到。
     """
     au, sr = _read_wav(wav_path)
     prot = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad) for w in words])
@@ -381,32 +397,34 @@ def detect_transients(wav_path: str, gaps: list, words: list,
 
     win = int(0.005 * sr)
     hop = max(1, win // 2)
+    flat_nfft = 64
     transients = []
     for gs, ge in effective:
         if ge - gs < min_dur:
-            continue
-        # 音乐感知门：间隙若是音色(音乐)，其瞬态也是音乐的，整体跳过
-        if _spectral_flatness(au, gs, ge, sr) < 0.25:
             continue
         a, b = int(gs * sr), int(ge * sr)
         for i in range(a, b - win, hop):
             seg = au[i:i + win]
             if seg.size < win // 2:
                 continue
+            # 逐窗口频谱平坦度（音乐门）
+            flatness = 1.0
+            if seg.size >= flat_nfft:
+                win_hann = seg[:flat_nfft] * np.hanning(flat_nfft)
+                mag = np.abs(np.fft.rfft(win_hann)) + 1e-12
+                geo = float(np.exp(np.mean(np.log(mag))))
+                ari = float(np.mean(mag))
+                flatness = geo / ari
+            # 该窗口是音乐/音色（平坦度低）→ 其瞬态属音乐，跳过本窗口
+            if flatness < 0.2:
+                continue
             peak = float(np.abs(seg).max()) + 1e-10
             rms = float(np.sqrt(np.mean(seg ** 2))) + 1e-10
             crest = peak / rms
             if crest < crest_thr:
                 continue
-            nfft = 64
-            if seg.size >= nfft:
-                win_hann = seg[:nfft] * np.hanning(nfft)
-                mag = np.abs(np.fft.rfft(win_hann)) + 1e-12
-                geo = float(np.exp(np.mean(np.log(mag))))
-                ari = float(np.mean(mag))
-                flatness = geo / ari
-                if flatness > flat_thr:
-                    transients.append((i / sr, (i + win) / sr))
+            if flatness > flat_thr:
+                transients.append((i / sr, (i + win) / sr))
 
     merged = _union(transients)
     return [(s, e) for s, e in merged if min_dur <= e - s <= max_dur]
@@ -748,6 +766,42 @@ def _apply_min_gap(remove_list: list, min_gap: float) -> list:
     return [(s, e) for s, e in remove_list if (e - s) >= min_gap]
 
 
+def _head_tail_trim(wav16_path: str, silence_thr: float = 0.008, pad: float = 0.05,
+                    max_tail: float = 3.0) -> tuple:
+    """用 16k 原始音频包络估计首尾静音裁剪点。
+
+    返回 (head_trim, tail_trim)：
+      head_trim = 首个 RMS 超过静音阈值的点 - pad（clamp >= 0）；
+      tail_trim  = dur - (最后 RMS 超过阈值的点 + pad)，并钳制 <= max_tail（避免误删长音乐尾）。
+    全程无声则返回 (0.0, 0.0)。
+    """
+    try:
+        au, sr = _read_wav(wav16_path)
+    except Exception:
+        return 0.0, 0.0
+    dur = len(au) / sr
+    if au.size == 0:
+        return 0.0, 0.0
+    win = max(1, int(0.01 * sr))
+    hop = max(1, win // 2)
+    n = (len(au) - win) // hop + 1
+    if n <= 0:
+        return 0.0, 0.0
+    rms = np.array([float(np.sqrt(np.mean(au[i:i + win] ** 2)))
+                    for i in range(0, len(au) - win, hop)])
+    t = np.arange(n) * hop / sr
+
+    above = np.where(rms > silence_thr)[0]
+    if above.size == 0:
+        return 0.0, 0.0
+
+    head_trim = max(0.0, t[above[0]] - pad)
+    tail_keep = min(dur, t[above[-1]] + pad)
+    tail_trim = max(0.0, dur - tail_keep)
+    tail_trim = min(tail_trim, max_tail)
+    return head_trim, tail_trim
+
+
 def analyze(input_path: str, opts: dict) -> dict:
     """
     口播剪辑决策层：分析媒体文件，返回编辑计划（JSON 友好 dict）。
@@ -766,10 +820,11 @@ def analyze(input_path: str, opts: dict) -> dict:
           fillers     (bool, 默认 True)     是否删除填充词
           keepNonspeech(bool, 默认 True)    保留非语音内容：True=保留背景音乐/环境音，
                                             仅删语音内填充/呼吸；False=仅保留 VAD 语音段（紧凑旁白）
+          trimSilence(bool, 默认 True)      裁剪首尾低能量静音段（基于原始 16k 包络）
           exclude     (list, 默认 [])       人工排除区 [[s,e], ...]（并入删除集）
           denoise/deess/normalize : 仅被 Rust 生成阶段使用，analyze 忽略
 
-    返回（契约，必须包含且仅包含以下键）
+    返回（契约，必须包含以下键）
     ----------------------------------------------
       duration        : float   媒体时长（秒）
       sampleRate      : int     16000
@@ -778,6 +833,11 @@ def analyze(input_path: str, opts: dict) -> dict:
       detail          : [{type,start,end}, ...]  每段删除区的类型化描述
       totalRemovedSec : float
       ratio           : float   0..1
+      separated       : bool    是否成功做了 Demucs 声源分离
+    分离成功时额外返回（可选键）：
+      vocalPath       : str    人声 stem 路径（44.1k，已缓存到 .aicut_speech）
+      accompPath      : str    伴奏 stem 路径（no_vocals，44.1k）
+      musicSegments   : [[s,e], ...]  非语音但含音乐/环境音的区间（纯伴奏桥接段，gap 音乐保留）
     """
     opts = opts or {}
 
@@ -788,6 +848,7 @@ def analyze(input_path: str, opts: dict) -> dict:
     word_pad = float(opts.get("wordPad", 0.04))
     do_fillers = bool(opts.get("fillers", True))
     keep_nonspeech = bool(opts.get("keepNonspeech", True))
+    trim_silence = bool(opts.get("trimSilence", True))
     exclude = opts.get("exclude", []) or []
 
     # 仅接受，不在此处使用（输出生成由 Rust 负责）
@@ -808,12 +869,23 @@ def analyze(input_path: str, opts: dict) -> dict:
         print(f"[准备] {dur:.1f}s, 16kHz mono", flush=True)
 
         # ── [1] Demucs 声源分离（可选，失败回退原音频）──
+        # cache_dir：持久目录（analyze 负责创建），跨运行缓存 44.1k stem
+        cache_dir = os.path.join(os.path.dirname(input_path), ".aicut_speech")
+        os.makedirs(cache_dir, exist_ok=True)
+
         work_wav = wav16
+        voice = accomp = None
+        separated = False
         if use_demucs:
             print("[1/6] Demucs 声源分离…", flush=True)
-            voice = neural_separate(wav16, tmp)
-            if voice:
-                work_wav = voice
+            voice, accomp = neural_separate(wav16, tmp, cache_dir)
+            if voice and accomp:
+                # 把 44.1k 人声 resample 成 16k 单声道供后续分析（音乐不进检测）
+                work16 = os.path.join(tmp, "_work_vocals.wav")
+                _run_ffmpeg(["-i", voice, "-ac", "1", "-ar", "16000", work16])
+                work_wav = work16
+                separated = True
+                print("  [OK] 分离成功：分析在 16k 人声上做，音乐作为独立 stem 保留", flush=True)
             else:
                 print("  跳过（Demucs 不可用），使用原始音频", flush=True)
         else:
@@ -908,6 +980,19 @@ def analyze(input_path: str, opts: dict) -> dict:
         if not keep:
             keep = [(0.0, dur)]
 
+        # ── [D] 首尾静音裁剪(trimSilence) ──
+        # 用原始 16k 音频(wav16)包络估计首尾静音边界；无论是否分离都用原始音频。
+        head_trim, tail_trim = _head_tail_trim(wav16, silence_thr=0.008, pad=0.05)
+        if trim_silence:
+            trimmed = []
+            for s, e in keep:
+                ns = max(float(s), head_trim)
+                ne = min(float(e), dur - tail_trim)
+                if ne - ns > 1e-3:
+                    trimmed.append((ns, ne))
+            if trimmed:
+                keep = _union(trimmed)
+
         # 钳制到 [0, dur] 并丢弃零长段
         keep_clamped = []
         for s, e in keep:
@@ -918,6 +1003,36 @@ def analyze(input_path: str, opts: dict) -> dict:
         keep = _union(keep_clamped)
         if not keep:
             keep = [(0.0, dur)]
+
+        # ── [E] musicSegments（仅分离成功时）：保留 gap 内的音乐/环境音 ──
+        # 取 [head_trim, dur - tail_trim] 内 keep 的补集得到候选 gap；
+        # 若伴奏(accomp)在该区间 RMS 能量 > 0.01（真有音乐而非静音），则作为
+        # 纯伴奏桥接段保留，gap 音乐不被删除。
+        music_segments = []
+        if separated and voice and accomp:
+            try:
+                au_a, sr_a = _read_wav(accomp)
+                lo, hi = head_trim, dur - tail_trim
+                cand = []
+                cur = lo
+                for s, e in _union(keep):
+                    if e <= cur:
+                        continue
+                    if s - cur > 1e-3:
+                        cand.append((cur, s))
+                    cur = max(cur, e)
+                if hi - cur > 1e-3:
+                    cand.append((cur, hi))
+                for gs, ge in cand:
+                    a, b = int(gs * sr_a), int(ge * sr_a)
+                    if b <= a:
+                        continue
+                    seg = au_a[a:b]
+                    rms = float(np.sqrt(np.mean(seg ** 2)))
+                    if rms > 0.01:
+                        music_segments.append([float(gs), float(ge)])
+            except Exception as e:
+                print(f"  [WARN] musicSegments 计算失败({e})", flush=True)
 
         # ── detail：类型化删除明细（与 keep 互为补集）──
         detail = []
@@ -942,7 +1057,7 @@ def analyze(input_path: str, opts: dict) -> dict:
         print(f"  删除合计: {total_removed:.1f}s ({ratio*100:.0f}%)", flush=True)
         print(f"  保留段: {len(keep)} 段", flush=True)
 
-        return {
+        result = {
             "duration": round(dur, 6),
             "sampleRate": 16000,
             "words": [{"word": w["word"], "start": float(w["start"]), "end": float(w["end"])}
@@ -952,7 +1067,13 @@ def analyze(input_path: str, opts: dict) -> dict:
                         "end": round(float(d["end"]), 6)} for d in detail],
             "totalRemovedSec": round(total_removed, 6),
             "ratio": round(ratio, 6),
+            "separated": bool(separated),
         }
+        if separated and voice and accomp:
+            result["vocalPath"] = voice
+            result["accompPath"] = accomp
+            result["musicSegments"] = music_segments
+        return result
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

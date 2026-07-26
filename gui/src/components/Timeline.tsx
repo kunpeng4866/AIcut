@@ -342,6 +342,35 @@ function FadeHandles({ clip, track, zoom, width }: {
   );
 }
 
+// 口播剪辑：绿(保留)/红(删除) 交界处的悬停边界标记。
+// 容器 pointer-events:none，仅此细标记可捕获悬停显示节点时间。
+function SpeechBoundaryMarker({ x, t }: { x: number; t: number }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={`${t.toFixed(2)}s`}
+      style={{
+        position: 'absolute', left: x, top: 0, width: 10, height: '100%',
+        transform: 'translateX(-5px)', pointerEvents: 'auto', cursor: 'help', zIndex: 6,
+      }}
+    >
+      {/* 细竖线（可见），命中区为外侧 10px 整列 */}
+      <div style={{ position: 'absolute', left: '50%', top: 0, width: 2, height: '100%', transform: 'translateX(-1px)', background: 'rgba(255,255,255,0.75)' }} />
+      {hover && (
+        <div style={{
+          position: 'absolute', top: 2, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(0,0,0,0.85)', color: '#fff', fontSize: 10, lineHeight: '14px',
+          padding: '1px 5px', borderRadius: 3, whiteSpace: 'nowrap', zIndex: 12, pointerEvents: 'none',
+        }}>
+          {t.toFixed(2)}s
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, playhead, clipsOnTrack, sameTypeTrackIds, onSelect, onSplit, onMove, onMoveToTrack, onResize, onContext }: ClipItemProps) {
   const left = clip.timelineIn * zoom;
   const width = Math.max(4, (clip.timelineOut - clip.timelineIn) * zoom);
@@ -353,6 +382,43 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
   const audioUrl = isAudio && asset?.path ? pathToUrl(asset.path) : null;
   const { peaks: wavePeaks, loading: waveLoading } = useWaveform(audioUrl, isAudio ? clip.assetId : null);
   const totalDuration = asset?.duration || clip.src_range.end;
+
+  // 口播剪辑叠加（客户 #3）：speechOverlay 与当前片段同源时绘制绿(保留)/红(删除) 标记。
+  const speechOverlay = useUIStore((s) => s.speechOverlay);
+  const showOverlay = speechOverlay && asset?.path === speechOverlay.assetPath;
+
+  // 把 keepSegments(源媒体绝对秒，与 src_range 同基准) 映射到片段渲染宽度内的 px。
+  // 与 WaveformCanvas 共用同一宽度基准 width，保证和波形对齐。
+  const overlayBlocks = (() => {
+    const empty = { keeps: [] as { left: number; w: number; s: number }[], reds: [] as { left: number; w: number }[], bounds: [] as { x: number; t: number }[] };
+    if (!showOverlay || !speechOverlay) return empty;
+    const srcStart = clip.src_range.start;
+    const srcEnd = clip.src_range.end;
+    const srcLen = srcEnd - srcStart || 1;
+    const toFrac = (sec: number) => clamp((sec - srcStart) / srcLen, 0, 1);
+    const keepsSorted = [...speechOverlay.keepSegments].sort((a, b) => a[0] - b[0]);
+    const keeps: { left: number; w: number; s: number }[] = [];
+    const reds: { left: number; w: number }[] = [];
+    const bounds: { x: number; t: number }[] = [];
+    let cursor = srcStart;
+    for (const [s, e] of keepsSorted) {
+      const fs = toFrac(s);
+      const fe = toFrac(e);
+      keeps.push({ left: fs * width, w: (fe - fs) * width, s });
+      bounds.push({ x: fs * width, t: s });
+      bounds.push({ x: fe * width, t: e });
+      if (s > cursor) {
+        const rs = toFrac(cursor);
+        reds.push({ left: rs * width, w: (toFrac(s) - rs) * width });
+      }
+      cursor = Math.max(cursor, e);
+    }
+    if (cursor < srcEnd) {
+      const rs = toFrac(cursor);
+      reds.push({ left: rs * width, w: (toFrac(srcEnd) - rs) * width });
+    }
+    return { keeps, reds, bounds };
+  })();
 
   // Begin a move / left-resize / right-resize drag operation.
   const startDrag = (e: React.MouseEvent, mode: 'move' | 'left' | 'right') => {
@@ -468,6 +534,20 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
         </div>
       )}
       <FadeHandles clip={clip} track={track} zoom={zoom} width={width} />
+      {/* 口播剪辑叠加：绿=保留 / 红=删除；容器不拦截交互，仅边界标记可悬停 */}
+      {showOverlay && (
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
+          {overlayBlocks.reds.map((r, i) => (
+            <div key={`ov-r-${i}`} style={{ position: 'absolute', top: 0, height: '100%', left: r.left, width: Math.max(0, r.w), background: 'rgba(233,69,96,0.45)' }} />
+          ))}
+          {overlayBlocks.keeps.map((k, i) => (
+            <div key={`ov-k-${i}`} style={{ position: 'absolute', top: 0, height: '100%', left: k.left, width: Math.max(0, k.w), background: 'rgba(60,200,100,0.45)' }} />
+          ))}
+          {overlayBlocks.bounds.map((b, i) => (
+            <SpeechBoundaryMarker key={`ov-b-${i}`} x={b.x} t={b.t} />
+          ))}
+        </div>
+      )}
       <span style={{ position: 'absolute', top: 2, left: 8, fontSize: 11, color: '#eee', pointerEvents: 'none' }}>
         {clip.assetId}
       </span>
@@ -501,7 +581,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 
 export default function Timeline() {
   const { project, addTrack, insertTrackAt, addClip, removeClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
-  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel } = useUIStore();
+  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, speechOverlay } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; clipId: string } | null>(null);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
@@ -805,6 +885,13 @@ export default function Timeline() {
             </div>
           ))}
           <div style={{ height: 28 }} />
+          {/* 口播剪辑图例（绿=保留 / 红=删除），低调放左侧 */}
+          {speechOverlay && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '4px 6px', fontSize: 10, color: '#ccc', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><span style={{ width: 9, height: 9, background: 'rgba(60,200,100,0.7)', borderRadius: 2, display: 'inline-block' }} />保留</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><span style={{ width: 9, height: 9, background: 'rgba(233,69,96,0.7)', borderRadius: 2, display: 'inline-block' }} />删除</span>
+            </div>
+          )}
         </div>
 
         {/* Right column: scrollable timeline track area */}

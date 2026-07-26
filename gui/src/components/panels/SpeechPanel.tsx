@@ -53,6 +53,8 @@ export default function SpeechPanel() {
   // ── 选中素材（镜像 AIPanel 逻辑）──
   const assets = useProjectStore((s) => s.project.assets);
   const selectedClipId = useUIStore((s) => s.selectedClipId);
+  const setSpeechOverlay = useUIStore((s) => s.setSpeechOverlay);
+  const clearSpeechOverlay = useUIStore((s) => s.clearSpeechOverlay);
   const selectedAsset = (() => {
     if (!selectedClipId) return null;
     const clip = useProjectStore
@@ -73,6 +75,7 @@ export default function SpeechPanel() {
   const [deess, setDeess] = useState(false);              // 去齿音
   const [normalize, setNormalize] = useState(false);      // 响度归一
   const [keepNonspeech, setKeepNonspeech] = useState(true); // 保留背景音乐/环境音
+  const [trimSilence, setTrimSilence] = useState(true);      // 修剪首尾静音
 
   // ── assemble 选项 ──
   const [declick, setDeclick] = useState(true);          // 去咔哒声(爆音)
@@ -102,11 +105,17 @@ export default function SpeechPanel() {
         normalize,
         fillers,
         keepNonspeech,
+        trimSilence,
       };
       const res = await window.aicut.speech.analyze(selectedAsset.path, JSON.stringify(opts));
       if (res.success && res.data) {
         setResult(res.data);
         setError(null);
+        setSpeechOverlay({
+          assetPath: selectedAsset.path,
+          keepSegments: res.data.keepSegments,
+          duration: res.data.duration,
+        });
       } else {
         setResult(null);
         setError(res.error || '分析失败');
@@ -134,9 +143,13 @@ export default function SpeechPanel() {
         declick,
         deess,
         normalize,
+        ...('separated' in result && result.separated
+          ? { separated: true, vocalPath: result.vocalPath, accompPath: result.accompPath, musicSegments: result.musicSegments }
+          : {}),
       };
       const res2 = await window.aicut.speech.assemble(original.path, JSON.stringify(asmOpts));
       if (res2.success && res2.data) {
+        clearSpeechOverlay();
         const asset = {
           id: uid('asset'),
           type: original.type, // 'video' | 'audio'
@@ -232,6 +245,10 @@ export default function SpeechPanel() {
               <input type="checkbox" checked={keepNonspeech} onChange={(e) => setKeepNonspeech(e.target.checked)} />
               保留背景音乐/环境音
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={trimSilence} onChange={(e) => setTrimSilence(e.target.checked)} />
+              修剪首尾静音
+            </label>
 
             {/* 滑块：VAD 灵敏度 */}
             <SliderRow label="VAD 灵敏度" value={vadThreshold} min={0.05} max={0.6} step={0.05}
@@ -266,6 +283,19 @@ export default function SpeechPanel() {
           >
             {loading ? '分析中…（whisper 首次可能较慢）' : '分析'}
           </button>
+
+          {result && (
+            <button
+              onClick={clearSpeechOverlay}
+              style={{
+                width: '100%', padding: '8px 10px', marginBottom: 8,
+                background: C.panel, color: C.textSub,
+                border: `1px solid ${C.border}`, borderRadius: 4, cursor: 'pointer', fontSize: 12,
+              }}
+            >
+              清除标记
+            </button>
+          )}
 
           {error && (
             <div style={{ color: '#ff6b6b', marginBottom: 8, fontSize: 12 }}>错误：{error}</div>

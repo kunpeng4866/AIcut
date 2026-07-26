@@ -47,6 +47,18 @@ struct SpeechAssembleOptions {
     declick: Option<bool>,
     #[serde(default)]
     normalize: Option<bool>,
+    /// 是否使用分离 stem 重组（Demucs 成功分离出人声/伴奏时）。
+    #[serde(default)]
+    separated: Option<bool>,
+    /// 分离出的人声 stem 路径（separated 时提供）。
+    #[serde(default)]
+    vocal_path: Option<String>,
+    /// 分离出的伴奏 stem 路径（separated 时提供）。
+    #[serde(default)]
+    accomp_path: Option<String>,
+    /// 纯伴奏桥接段（separated 时与 keep_segments 交替拼接，gap 音乐不丢）。
+    #[serde(default)]
+    music_segments: Option<Vec<(f64, f64)>>,
 }
 
 fn default_crossfade_ms() -> f64 {
@@ -62,6 +74,11 @@ fn ffmpeg_exe() -> String {
 /// ffprobe 可执行文件：优先环境变量 `AICUT_FFPROBE`，否则走 PATH 上的 `ffprobe`。
 fn ffprobe_exe() -> String {
     std::env::var("AICUT_FFPROBE").unwrap_or_else(|_| "ffprobe".to_string())
+}
+
+/// 文件路径是否存在（用于判断分离 stem 是否已就绪）。
+fn file_exists(p: &str) -> bool {
+    std::path::Path::new(p).exists()
 }
 
 /// 探测输入媒体是否包含视频流（crossfade 路径决定是否拼接视频）。
@@ -172,6 +189,16 @@ pub fn speech_analyze(input: &str, opts_json: &str) -> Result<Value, AppError> {
 pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> {
     let opts: SpeechAssembleOptions = serde_json::from_str(opts_json)
         .map_err(|e| AppError::Render(format!("assemble 选项解析失败: {}", e)))?;
+
+    // 分离重组路径：Demucs 成功分离出人声/伴奏 stem 时，保留说话段落间的背景音乐，
+    // 而不是把音乐删掉（对应客户投诉 #2）。要求 separated 为真且两个 stem 文件都存在；
+    // 否则回退到原有「切割 input 再 concat」路径。
+    let take_separated = opts.separated == Some(true)
+        && opts.vocal_path.as_deref().map(file_exists).unwrap_or(false)
+        && opts.accomp_path.as_deref().map(file_exists).unwrap_or(false);
+    if take_separated {
+        return speech_assemble_separated(input, &opts);
+    }
 
     if opts.keep_segments.is_empty() {
         return Err(AppError::Render("keepSegments 为空，没有可保留的片段".into()));
@@ -400,6 +427,173 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
 
     Ok(json!({
         "outputPath": output_path,
+        "duration": out_duration,
+        "ok": true
+    }))
+}
+
+/// 分离重组路径：用 Demucs 分离出的人声/伴奏 stem 重建音频，保留说话段落间的背景音乐。
+///
+/// 与原有「切割 input 再 concat」路径不同，这里音频完全由 stem 重建；当 `input` 含视频流时，
+/// 原视频流被重新封装（音频被替换），并用 `-shortest` 将视频裁到新音频长度。
+///
+/// ffmpeg 滤镜图语法铁律：输入标签 `[1]`/`[2]` 后必须紧跟第一个滤镜、不能加逗号
+/// （`[1]atrim=...` ✅，不是 `[1],atrim=...`）；逗号只分隔同链内滤镜。原视频用 `[0:v]`，
+/// 不要 map `[0:a]`（原音频丢弃）。
+fn speech_assemble_separated(input: &str, opts: &SpeechAssembleOptions) -> Result<Value, AppError> {
+    let vocal = opts.vocal_path.as_deref().unwrap();
+    let accomp = opts.accomp_path.as_deref().unwrap();
+
+    let ff = ffmpeg_exe();
+    let has_video = has_video_stream(input)?;
+
+    let declick = opts.declick.unwrap_or(false);
+    let deess = opts.deess.unwrap_or(false);
+    let normalize = opts.normalize.unwrap_or(false);
+    let cf = opts.crossfade_ms / 1000.0;
+
+    // 构造按时间升序的音频段：
+    //   - 每个 keep_segment  → 混合段   = amix(vocal 截[s,e], accomp 截[s,e])
+    //   - 每个 music_segment → 纯伴奏段 = accomp 截[s,e]
+    // 这些段已由 Python 侧钳制到修剪后的时间轴，按时间顺序铺满编辑后的音频。
+    #[derive(Clone, Copy)]
+    enum SegKind {
+        Mix,
+        Accomp,
+    }
+    let mut segs: Vec<(SegKind, f64, f64)> = Vec::new();
+    for &(s, e) in &opts.keep_segments {
+        segs.push((SegKind::Mix, s, e));
+    }
+    if let Some(music) = &opts.music_segments {
+        for &(s, e) in music {
+            segs.push((SegKind::Accomp, s, e));
+        }
+    }
+    segs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = segs.len();
+    if n == 0 {
+        return Err(AppError::Render(
+            "分离路径没有可用音频段（keepSegments 与 musicSegments 均为空）".into(),
+        ));
+    }
+
+    let mut fc = String::new();
+    let mut audio_labels: Vec<String> = Vec::with_capacity(n);
+
+    for (i, seg) in segs.iter().enumerate() {
+        let (kind, s, e) = *seg;
+        let lbl = format!("a{}", i);
+        match kind {
+            SegKind::Mix => {
+                // 人声 stem 截 [s,e] + 伴奏 stem 截 [s,e]，混回为人声+音乐的混合段。
+                fc.push_str(&format!(
+                    "[1]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[vt{}];",
+                    s, e, i
+                ));
+                fc.push_str(&format!(
+                    "[2]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[at{}];",
+                    s, e, i
+                ));
+                fc.push_str(&format!(
+                    "[vt{}][at{}]amix=inputs=2:duration=longest[{}];",
+                    i, i, lbl
+                ));
+            }
+            SegKind::Accomp => {
+                // 纯伴奏桥接段（说话段落间的背景音乐）。
+                fc.push_str(&format!(
+                    "[2]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[{}];",
+                    s, e, lbl
+                ));
+            }
+        }
+        audio_labels.push(lbl);
+    }
+
+    // 按时间顺序对音频段做过渡链。
+    let use_crossfade = opts.crossfade_ms > 0.0 && n >= 2;
+    let mut last = audio_labels[0].clone();
+    if n == 1 {
+        // 单段：直接使用该段标签，无需过渡。
+    } else if use_crossfade {
+        for k in 1..n {
+            let lbl = format!("af{}", k);
+            fc.push_str(&format!(
+                "[{}][{}]acrossfade=d={:.6}[{}];",
+                last, audio_labels[k], cf, lbl
+            ));
+            last = lbl;
+        }
+    } else {
+        // crossfade_ms==0 且段数>=2：用 concat 直连（无重叠），保持段落顺序。
+        let ins: String = audio_labels.iter().map(|l| format!("[{}]", l)).collect();
+        let lbl = "afc".to_string();
+        fc.push_str(&format!("{}concat=n={}:v=0:a=1[{}];", ins, n, lbl));
+        last = lbl;
+    }
+
+    // 末级统一施加 de-ess / declick / normalize（仅启用项），否则 anull 透传。
+    if let Some(af) = audio_post_filters(declick, deess, normalize) {
+        fc.push_str(&format!("[{}]{}[aout];", last, af));
+    } else {
+        fc.push_str(&format!("[{}]anull[aout];", last));
+    }
+    if fc.ends_with(';') {
+        fc.pop();
+    }
+
+    let mut args: Vec<String> = vec!["-y".into()];
+    // 输入顺序：idx0 = 原 input（仅用其视频），idx1 = 人声 stem，idx2 = 伴奏 stem。
+    args.push("-i".into());
+    args.push(input.to_string());
+    args.push("-i".into());
+    args.push(vocal.to_string());
+    args.push("-i".into());
+    args.push(accomp.to_string());
+    args.push("-filter_complex".into());
+    args.push(fc);
+    args.push("-map".into());
+    if has_video {
+        // 注意：直接引用输入流用裸写法 `0:v`（无方括号）；方括号会被当成滤镜图输出标签而报错。
+        args.push("0:v".into());
+        args.push("-map".into());
+    }
+    args.push("[aout]".into());
+    args.push("-c:v".into());
+    args.push("libx264".into());
+    args.push("-pix_fmt".into());
+    args.push("yuv420p".into());
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-shortest".into());
+    args.push(opts.output_path.clone());
+
+    let out = Command::new(&ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(AppError::Render(format!(
+            "分离重组合成失败 (退出码 {:?}): {}",
+            out.status.code(),
+            stderr.chars().take(800).collect::<String>()
+        )));
+    }
+
+    // 输出时长 = 各段时长之和；crossfade 时减去 (段数-1)*cf 的重叠量。
+    let durs: Vec<f64> = segs.iter().map(|&(_, s, e)| (e - s).max(0.0)).collect();
+    let total: f64 = durs.iter().sum();
+    let out_duration = if use_crossfade {
+        total - (n - 1) as f64 * cf
+    } else {
+        total
+    };
+
+    Ok(json!({
+        "outputPath": opts.output_path.clone(),
         "duration": out_duration,
         "ok": true
     }))
