@@ -342,18 +342,44 @@ function FadeHandles({ clip, track, zoom, width }: {
   );
 }
 
-// 口播剪辑：绿(保留)/红(删除) 交界处的悬停边界标记。
-// 容器 pointer-events:none，仅此细标记可捕获悬停显示节点时间。
-function SpeechBoundaryMarker({ x, t }: { x: number; t: number }) {
+// 口播剪辑：绿(保留)/红(删除) 交界处的悬停边界标记，可左右拖动精修。
+// 容器 pointer-events:none，仅此细标记可捕获交互。拖动只更新 speechOverlay.keepSegments（UI 状态，不入工程快照）。
+function SpeechBoundaryMarker({ x, t, orig, end, min, max, pxPerSec }: { x: number; t: number; orig: number; end: 'start' | 'end'; min: number; max: number; pxPerSec: number }) {
   const [hover, setHover] = useState(false);
+  const setSegs = useUIStore((s) => s.setSpeechOverlaySegments);
+  const dragRef = useRef<{ startX: number; t0: number } | null>(null);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.stopPropagation(); // 防止触发片段整体拖动 startDrag
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    dragRef.current = { startX: e.clientX, t0: t };
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    let tn = dragRef.current.t0 + (e.clientX - dragRef.current.startX) / pxPerSec;
+    tn = Math.max(min, Math.min(max, tn)); // 钳制：不越过相邻段、不反向
+    tn = Math.round(tn * 1000) / 1000; // 1ms 量化
+    const cur = useUIStore.getState().speechOverlay?.keepSegments;
+    if (!cur) return;
+    const next = cur.map((sg, i) => (i === orig ? (end === 'start' ? [tn, sg[1]] : [sg[0], tn]) : sg)) as [number, number][];
+    setSegs(next);
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    dragRef.current = null;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+  };
+
   return (
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
       title={`${t.toFixed(2)}s`}
       style={{
         position: 'absolute', left: x, top: 0, width: 10, height: '100%',
-        transform: 'translateX(-5px)', pointerEvents: 'auto', cursor: 'help', zIndex: 6,
+        transform: 'translateX(-5px)', pointerEvents: 'auto', cursor: 'ew-resize', zIndex: 6,
       }}
     >
       {/* 细竖线（可见），命中区为外侧 10px 整列 */}
@@ -390,29 +416,36 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
   // 把 keepSegments(源媒体绝对秒，与 src_range 同基准) 映射到片段渲染宽度内的 px。
   // 与 WaveformCanvas 共用同一宽度基准 width，保证和波形对齐。
   const overlayBlocks = (() => {
-    const empty = { keeps: [] as { left: number; w: number; s: number }[], reds: [] as { left: number; w: number }[], bounds: [] as { x: number; t: number }[] };
+    const MIN = 0.05; // 单段最短 50ms，防拖成 0 或反向
+    const empty = {
+      keeps: [] as { left: number; w: number; s: number }[],
+      reds: [] as { left: number; w: number }[],
+      bounds: [] as { x: number; t: number; seg: number; end: 'start' | 'end'; min: number; max: number; orig: number }[],
+    };
     if (!showOverlay || !speechOverlay) return empty;
     const srcStart = clip.src_range.start;
     const srcEnd = clip.src_range.end;
     const srcLen = srcEnd - srcStart || 1;
     const toFrac = (sec: number) => clamp((sec - srcStart) / srcLen, 0, 1);
-    const keepsSorted = [...speechOverlay.keepSegments].sort((a, b) => a[0] - b[0]);
+    const keepsSorted = speechOverlay.keepSegments.map((sg, i) => ({ sg, i })).sort((a, b) => a.sg[0] - b.sg[0]);
     const keeps: { left: number; w: number; s: number }[] = [];
     const reds: { left: number; w: number }[] = [];
-    const bounds: { x: number; t: number }[] = [];
+    const bounds: { x: number; t: number; seg: number; end: 'start' | 'end'; min: number; max: number; orig: number }[] = [];
     let cursor = srcStart;
-    for (const [s, e] of keepsSorted) {
+    keepsSorted.forEach((item, idx) => {
+      const [s, e] = item.sg;
+      const orig = item.i;
       const fs = toFrac(s);
       const fe = toFrac(e);
       keeps.push({ left: fs * width, w: (fe - fs) * width, s });
-      bounds.push({ x: fs * width, t: s });
-      bounds.push({ x: fe * width, t: e });
+      bounds.push({ x: fs * width, t: s, seg: idx, end: 'start', min: idx > 0 ? keepsSorted[idx - 1].sg[1] : srcStart, max: e - MIN, orig });
+      bounds.push({ x: fe * width, t: e, seg: idx, end: 'end', min: s + MIN, max: idx < keepsSorted.length - 1 ? keepsSorted[idx + 1].sg[0] : srcEnd, orig });
       if (s > cursor) {
         const rs = toFrac(cursor);
         reds.push({ left: rs * width, w: (toFrac(s) - rs) * width });
       }
       cursor = Math.max(cursor, e);
-    }
+    });
     if (cursor < srcEnd) {
       const rs = toFrac(cursor);
       reds.push({ left: rs * width, w: (toFrac(srcEnd) - rs) * width });
@@ -544,7 +577,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
             <div key={`ov-k-${i}`} style={{ position: 'absolute', top: 0, height: '100%', left: k.left, width: Math.max(0, k.w), background: 'rgba(60,200,100,0.45)' }} />
           ))}
           {overlayBlocks.bounds.map((b, i) => (
-            <SpeechBoundaryMarker key={`ov-b-${i}`} x={b.x} t={b.t} />
+            <SpeechBoundaryMarker key={`ov-b-${i}`} x={b.x} t={b.t} orig={b.orig} end={b.end} min={b.min} max={b.max} pxPerSec={zoom} />
           ))}
         </div>
       )}

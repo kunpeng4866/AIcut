@@ -26,6 +26,8 @@ interface UIState {
   // 口播剪辑：分析后在原素材时间轴上叠加「保留(绿)/删除(红)」标记
   speechOverlay: { assetPath: string; keepSegments: [number, number][]; duration: number } | null;
   setSpeechOverlay: (o: { assetPath: string; keepSegments: [number, number][]; duration: number }) => void;
+  // 人工精修：仅更新 keepSegments（拖动边界时每帧调用，纯 UI 状态、不入工程历史）
+  setSpeechOverlaySegments: (segs: [number, number][]) => void;
   clearSpeechOverlay: () => void;
 
   // 可拖拽调节的面板尺寸
@@ -69,6 +71,7 @@ export const useUIStore = create<UIState>((set) => ({
 
   speechOverlay: null,
   setSpeechOverlay: (o) => set({ speechOverlay: o }),
+  setSpeechOverlaySegments: (segs) => set((s) => s.speechOverlay ? { speechOverlay: { ...s.speechOverlay, keepSegments: segs } } : {}),
   clearSpeechOverlay: () => set({ speechOverlay: null }),
 
   leftPanelWidth: 280,

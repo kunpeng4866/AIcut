@@ -55,6 +55,7 @@ export default function SpeechPanel() {
   const selectedClipId = useUIStore((s) => s.selectedClipId);
   const setSpeechOverlay = useUIStore((s) => s.setSpeechOverlay);
   const clearSpeechOverlay = useUIStore((s) => s.clearSpeechOverlay);
+  const speechOverlay = useUIStore((s) => s.speechOverlay);
   const selectedAsset = (() => {
     if (!selectedClipId) return null;
     const clip = useProjectStore
@@ -83,6 +84,8 @@ export default function SpeechPanel() {
 
   // ── 结果 / 状态 ──
   const [result, setResult] = useState<SpeechEditResult | null>(null);
+  // 实时片段：用户在时间轴拖动精修后的值优先（speechOverlay），否则回退到分析原始值
+  const liveKeepSegments = speechOverlay?.keepSegments ?? result?.keepSegments ?? [];
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -137,7 +140,7 @@ export default function SpeechPanel() {
       const original = selectedAsset;
       const outputPath = original.path.replace(/\.[^.]+$/, '_speechcut.mp4'); // 写到源文件旁边
       const asmOpts: SpeechAssembleOptions = {
-        keepSegments: result.keepSegments,
+        keepSegments: liveKeepSegments,
         outputPath,
         crossfadeMs,
         declick,
@@ -188,7 +191,7 @@ export default function SpeechPanel() {
   };
 
   // 删除区间（保留备用；当前可视化直接用 keepSegments 与 detail）
-  const removed = result ? removedSpans(result.keepSegments, result.duration) : [];
+  const removed = result ? removedSpans(liveKeepSegments, result.duration) : [];
 
   return (
     <div style={{ padding: 12, color: C.textMain, fontSize: 13, height: '100%', overflowY: 'auto', boxSizing: 'border-box' }}>
@@ -324,7 +327,7 @@ export default function SpeechPanel() {
                 </div>
                 {/* 时间轴条（红底=删除，绿块=保留） */}
                 <div style={{ position: 'relative', flex: 1, height: 32, borderRadius: 6, overflow: 'hidden', background: C.removed }}>
-                  {result.keepSegments.map(([s, e], i) => (
+                  {liveKeepSegments.map(([s, e], i) => (
                     <div key={i} title={`保留 ${s.toFixed(2)}–${e.toFixed(2)}s`} style={{
                       position: 'absolute', top: 0, bottom: 0,
                       left: `${(s / result.duration) * 100}%`,
