@@ -139,6 +139,7 @@ export interface SpeechEditOptions {
   deess: boolean;            // 去齿音
   normalize: boolean;        // 响度归一(LUFS)
   fillers: boolean;          // 删语气词废话
+  keepNonspeech?: boolean;   // 保留背景音乐/环境音（默认 true：只删静音/语气词/气声/瞬态，不动音乐；false=紧凑模式，连非人声一起丢）
   exclude?: [number, number][]; // 手动排除区间(秒) [start,end]
 }
 
@@ -166,7 +167,8 @@ export interface SpeechAssembleResult {
 export interface SpeechAssembleOptions {
   keepSegments: [number, number][];
   outputPath: string;
-  crossfadeMs?: number; // 段间过渡(ms)，默认 0（v1 不做交叉淡化，保证正确性）
+  crossfadeMs?: number; // 段间过渡(ms)，默认 20（assemble 用 ffmpeg acrossfade/xfade 做交叉淡化，消除硬切接缝的卡顿）
+  declick?: boolean;    // 去咔哒声（ffmpeg adeclick 滤镜，去除叠在人声里的爆音/咔哒）
   deess?: boolean;      // 去齿音（ffmpeg highshelf 近似）
   normalize?: boolean;  // 响度归一（ffmpeg loudnorm）
 }

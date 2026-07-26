@@ -37,18 +37,74 @@ struct SpeechEditOptions {
 struct SpeechAssembleOptions {
     keep_segments: Vec<(f64, f64)>,
     output_path: String,
-    #[serde(default)]
-    crossfade_ms: Option<u64>,
+    /// 交叉淡入淡出时长（毫秒）。默认 20ms：>0 且保留片段数 >= 2 时启用 crossfade。
+    #[serde(default = "default_crossfade_ms")]
+    crossfade_ms: f64,
     #[serde(default)]
     deess: Option<bool>,
+    /// 去除语音中的咔哒/爆音（adeclick 滤镜）。
+    #[serde(default)]
+    declick: Option<bool>,
     #[serde(default)]
     normalize: Option<bool>,
+}
+
+fn default_crossfade_ms() -> f64 {
+    20.0
 }
 
 /// ffmpeg 可执行文件：优先环境变量 `AICUT_FFMPEG`，否则走 PATH 上的 `ffmpeg`
 /// （与引擎其余部分保持一致 —— `src/ffmpeg.rs` 同样以 `"ffmpeg"` 字面量启动）。
 fn ffmpeg_exe() -> String {
     std::env::var("AICUT_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string())
+}
+
+/// ffprobe 可执行文件：优先环境变量 `AICUT_FFPROBE`，否则走 PATH 上的 `ffprobe`。
+fn ffprobe_exe() -> String {
+    std::env::var("AICUT_FFPROBE").unwrap_or_else(|_| "ffprobe".to_string())
+}
+
+/// 探测输入媒体是否包含视频流（crossfade 路径决定是否拼接视频）。
+fn has_video_stream(input: &str) -> Result<bool, AppError> {
+    let probe = ffprobe_exe();
+    let out = Command::new(&probe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            input,
+        ])
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffprobe ({}): {}", probe, e)))?;
+    if !out.status.success() {
+        // ffprobe 失败时保守地当作无视频，避免阻断合成。
+        return Ok(false);
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    Ok(s.contains("video"))
+}
+
+/// 构造音频后处理滤镜链（仅包含启用项）。
+/// 返回 `None` 表示没有任何启用项（调用方应使用 `anull` 透传）。
+fn audio_post_filters(declick: bool, deess: bool, normalize: bool) -> Option<String> {
+    let mut af: Vec<String> = Vec::new();
+    if declick {
+        af.push("adeclick".to_string());
+    }
+    if deess {
+        af.push("highshelf=f=8000:g=-6".to_string());
+    }
+    if normalize {
+        af.push("loudnorm=I=-16:TP=-1.5:LRA=11".to_string());
+    }
+    if af.is_empty() {
+        None
+    } else {
+        Some(af.join(","))
+    }
 }
 
 /// 解析 bridge.py 路径：
@@ -83,6 +139,9 @@ pub fn speech_analyze(input: &str, opts_json: &str) -> Result<Value, AppError> {
     let output = Command::new(&py)
         .env("PYTHONIOENCODING", "utf-8") // Windows 下管道 stdout 默认按本地 codepage，中文会乱码/解析失败
         .env("PYTHONUTF8", "1")
+        // Windows 上 torch/whisper 多 OpenMP 线程易触发 0xC0000005 访问冲突 segfault，限单线程保稳定
+        .env("OMP_NUM_THREADS", "1")
+        .env("MKL_NUM_THREADS", "1")
         .arg(bridge_str)
         .arg(input)
         .arg(opts_json)
@@ -118,6 +177,14 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         return Err(AppError::Render("keepSegments 为空，没有可保留的片段".into()));
     }
 
+    // 音频后处理开关（默认关闭）。
+    let declick = opts.declick.unwrap_or(false);
+    let deess = opts.deess.unwrap_or(false);
+    let normalize = opts.normalize.unwrap_or(false);
+
+    // 是否走 crossfade 路径：时长 > 0 且保留片段 >= 2。
+    let use_crossfade = opts.crossfade_ms > 0.0 && opts.keep_segments.len() >= 2;
+
     let ff = ffmpeg_exe();
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -144,6 +211,9 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             format!("{:.6}", e),
             "-i".into(),
             input.to_string(),
+            // 强制固定帧率，保证 crossfade/xfade 输入帧率一致。
+            "-r".into(),
+            "30".into(),
             "-c:v".into(),
             "libx264".into(),
             "-pix_fmt".into(),
@@ -152,17 +222,17 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             "aac".into(),
         ];
 
-        // 音频后处理滤镜：de-ess / loudnorm（两者可串联，逗号分隔避免冲突）。
-        let mut af: Vec<String> = Vec::new();
-        if opts.deess.unwrap_or(false) {
-            af.push("highshelf=f=8000:g=-6".to_string());
-        }
-        if opts.normalize.unwrap_or(false) {
-            af.push("loudnorm=I=-16:TP=-1.5:LRA=11".to_string());
-        }
-        if !af.is_empty() {
+        // 音频后处理滤镜（declick / de-ess / loudnorm）。
+        // 注意：仅在非 crossfade 路径把它烘焙进片段；crossfade 路径会在
+        // filter_complex 末级统一施加，避免重复处理音频。
+        let af_opt: Option<String> = if use_crossfade {
+            None
+        } else {
+            audio_post_filters(declick, deess, normalize)
+        };
+        if let Some(af) = af_opt {
             args.push("-af".into());
-            args.push(af.join(","));
+            args.push(af);
         }
 
         args.push(seg_str.into());
@@ -186,64 +256,151 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         seg_paths.push(seg_path);
     }
 
-    // 写 ffmpeg concat demuxer 列表文件（绝对路径，正斜杠以兼容 Windows）。
-    let list_path = temp_dir.join(format!("aicut_speech_list_{}.txt", pid));
-    {
-        let mut list_content = String::new();
+    // 根据是否启用 crossfade 选择合成路径。
+    let (output_path, out_duration) = if use_crossfade {
+        // ---- 交叉淡入淡出路径：消除拼接处的硬切「卡顿」 ----
+        let has_video = has_video_stream(input)?;
+        let cf = opts.crossfade_ms / 1000.0;
+        let durs: Vec<f64> = segments.iter().map(|(s, e)| (e - s).max(0.0)).collect();
+        let n = segments.len();
+
+        let mut fc = String::new();
+
+        // 音频 crossfade 链（始终构建）。
+        let mut last_a = "0:a".to_string();
+        for k in 1..n {
+            let lbl = format!("a0{}", k);
+            fc.push_str(&format!("[{}][{}:a]acrossfade=d={:.6}[{}];", last_a, k, cf, lbl));
+            last_a = lbl;
+        }
+
+        // 视频 xfade 链（仅当输入含视频流）。
+        if has_video {
+            let mut last_v = "0:v".to_string();
+            let mut acc = 0.0_f64;
+            for k in 1..n {
+                acc += durs[k - 1];
+                let off = acc - (k as f64) * cf;
+                let lbl = format!("v0{}", k);
+                fc.push_str(&format!(
+                    "[{}][{}:v]xfade=transition=fade:duration={:.6}:offset={:.6}[{}];",
+                    last_v, k, cf, off, lbl
+                ));
+                last_v = lbl;
+            }
+        }
+
+        // 末级音频统一施加 de-ess / declick / normalize（仅启用项）。
+        if let Some(af) = audio_post_filters(declick, deess, normalize) {
+            fc.push_str(&format!("[{}]{}[aout];", last_a, af));
+        } else {
+            fc.push_str(&format!("[{}]anull[aout];", last_a));
+        }
+        if fc.ends_with(';') {
+            fc.pop();
+        }
+
+        let mut args: Vec<String> = vec!["-y".into()];
         for p in &seg_paths {
-            let p_str = p.to_string_lossy().replace('\\', "/");
-            list_content.push_str(&format!("file '{}'\n", p_str));
+            args.push("-i".into());
+            args.push(p.to_string_lossy().replace('\\', "/"));
         }
-        if let Err(e) = std::fs::write(&list_path, list_content) {
-            cleanup(&seg_paths, Some(&list_path));
-            return Err(AppError::Render(format!("写入 concat 列表失败: {}", e)));
+        args.push("-filter_complex".into());
+        args.push(fc);
+        args.push("-map".into());
+        args.push("[aout]".into());
+        if has_video {
+            args.push("-map".into());
+            args.push(format!("[v0{}]", n - 1));
         }
-    }
+        args.push("-c:v".into());
+        args.push("libx264".into());
+        args.push("-pix_fmt".into());
+        args.push("yuv420p".into());
+        args.push("-c:a".into());
+        args.push("aac".into());
+        args.push(opts.output_path.clone());
 
-    let list_str = list_path
-        .to_str()
-        .ok_or_else(|| AppError::Render("列表路径包含非 UTF-8 字符".into()))?;
+        let out = Command::new(&ff)
+            .args(&args)
+            .output()
+            .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            cleanup(&seg_paths, None);
+            return Err(AppError::Render(format!(
+                "crossfade 合成失败 (退出码 {:?}): {}",
+                out.status.code(),
+                stderr.chars().take(800).collect::<String>()
+            )));
+        }
 
-    // 片段已统一编码，使用 `-c copy` 直拷，快速且安全。
-    let concat_args: Vec<String> = vec![
-        "-y".into(),
-        "-f".into(),
-        "concat".into(),
-        "-safe".into(),
-        "0".into(),
-        "-i".into(),
-        list_str.into(),
-        "-c".into(),
-        "copy".into(),
-        opts.output_path.clone(),
-    ];
+        cleanup(&seg_paths, None);
+        // crossfade 后总时长 = 各段时长之和减去 (段数-1) * 交叉时长。
+        let out_duration = durs.iter().sum::<f64>() - (n - 1) as f64 * cf;
+        (opts.output_path.clone(), out_duration)
+    } else {
+        // ---- 原 concat-demuxer 路径（行为不变） ----
+        // 写 ffmpeg concat demuxer 列表文件（绝对路径，正斜杠以兼容 Windows）。
+        let list_path = temp_dir.join(format!("aicut_speech_list_{}.txt", pid));
+        {
+            let mut list_content = String::new();
+            for p in &seg_paths {
+                let p_str = p.to_string_lossy().replace('\\', "/");
+                list_content.push_str(&format!("file '{}'\n", p_str));
+            }
+            if let Err(e) = std::fs::write(&list_path, list_content) {
+                cleanup(&seg_paths, Some(&list_path));
+                return Err(AppError::Render(format!("写入 concat 列表失败: {}", e)));
+            }
+        }
 
-    let out = Command::new(&ff)
-        .args(&concat_args)
-        .output()
-        .map_err(|e| {
+        let list_str = list_path
+            .to_str()
+            .ok_or_else(|| AppError::Render("列表路径包含非 UTF-8 字符".into()))?;
+
+        // 片段已统一编码，使用 `-c copy` 直拷，快速且安全。
+        let concat_args: Vec<String> = vec![
+            "-y".into(),
+            "-f".into(),
+            "concat".into(),
+            "-safe".into(),
+            "0".into(),
+            "-i".into(),
+            list_str.into(),
+            "-c".into(),
+            "copy".into(),
+            opts.output_path.clone(),
+        ];
+
+        let out = Command::new(&ff)
+            .args(&concat_args)
+            .output()
+            .map_err(|e| {
+                cleanup(&seg_paths, Some(&list_path));
+                AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e))
+            });
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => return Err(e),
+        };
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
             cleanup(&seg_paths, Some(&list_path));
-            AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e))
-        });
-    let out = match out {
-        Ok(o) => o,
-        Err(e) => return Err(e),
-    };
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(AppError::Render(format!(
+                "concat 合成失败 (退出码 {:?}): {}",
+                out.status.code(),
+                stderr.chars().take(800).collect::<String>()
+            )));
+        }
+
         cleanup(&seg_paths, Some(&list_path));
-        return Err(AppError::Render(format!(
-            "concat 合成失败 (退出码 {:?}): {}",
-            out.status.code(),
-            stderr.chars().take(800).collect::<String>()
-        )));
-    }
-
-    cleanup(&seg_paths, Some(&list_path));
+        (opts.output_path.clone(), duration)
+    };
 
     Ok(json!({
-        "outputPath": opts.output_path,
-        "duration": duration,
+        "outputPath": output_path,
+        "duration": out_duration,
         "ok": true
     }))
 }

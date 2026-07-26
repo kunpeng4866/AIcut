@@ -234,6 +234,23 @@ def _sustained_voiced(audio: np.ndarray, s: float, e: float, sr: int,
     return best * frame / sr
 
 
+def _spectral_flatness(audio: np.ndarray, s: float, e: float, sr: int) -> float:
+    """幅度谱的几何均值/算术均值（频谱平坦度）。
+
+    低 → 音色/谐波明显（音乐、歌唱、持续音）；高 → 类似白噪声（呼吸、咳嗽、瞬态）。
+    """
+    a, b = int(s * sr), int(e * sr)
+    seg = audio[a:b]
+    if seg.size < 256:
+        return 1.0
+    win = seg * np.hanning(seg.size)
+    nfft = 1 << int(np.ceil(np.log2(max(seg.size, 256))))
+    mag = np.abs(np.fft.rfft(win, n=nfft)) + 1e-12
+    geo = float(np.exp(np.mean(np.log(mag))))
+    ari = float(np.mean(mag))
+    return geo / ari
+
+
 # ══════════════════════════════════════════════════════
 # [4a] 文本填充词匹配
 # ══════════════════════════════════════════════════════
@@ -322,6 +339,13 @@ def detect_gap_breath(wav_path: str, gaps: list, words: list,
     for gs, ge in effective:
         if ge - gs < min_dur:
             continue
+        # 音乐感知门：跳过明显是音乐/环境音而非呼吸/咳嗽的间隙
+        if ge - gs > 0.5:
+            continue
+        if _spectral_flatness(au, gs, ge, sr) < 0.2:
+            continue
+        if _sustained_voiced(au, gs, ge, sr) > 0.06:
+            continue
         hf, zcr = _region_breath(au, gs, ge, sr)
         vo = _sustained_voiced(au, gs, ge, sr)
         if hf > hf_thr and zcr > zcr_thr and vo < 0.06:
@@ -360,6 +384,9 @@ def detect_transients(wav_path: str, gaps: list, words: list,
     transients = []
     for gs, ge in effective:
         if ge - gs < min_dur:
+            continue
+        # 音乐感知门：间隙若是音色(音乐)，其瞬态也是音乐的，整体跳过
+        if _spectral_flatness(au, gs, ge, sr) < 0.25:
             continue
         a, b = int(gs * sr), int(ge * sr)
         for i in range(a, b - win, hop):
@@ -737,6 +764,8 @@ def analyze(input_path: str, opts: dict) -> dict:
           minGap      (float, 默认 0.18)    最短可切除静音间隙（s）
           wordPad     (float, 默认 0.04)    词保护边距（s）
           fillers     (bool, 默认 True)     是否删除填充词
+          keepNonspeech(bool, 默认 True)    保留非语音内容：True=保留背景音乐/环境音，
+                                            仅删语音内填充/呼吸；False=仅保留 VAD 语音段（紧凑旁白）
           exclude     (list, 默认 [])       人工排除区 [[s,e], ...]（并入删除集）
           denoise/deess/normalize : 仅被 Rust 生成阶段使用，analyze 忽略
 
@@ -758,6 +787,7 @@ def analyze(input_path: str, opts: dict) -> dict:
     min_gap = float(opts.get("minGap", 0.18))
     word_pad = float(opts.get("wordPad", 0.04))
     do_fillers = bool(opts.get("fillers", True))
+    keep_nonspeech = bool(opts.get("keepNonspeech", True))
     exclude = opts.get("exclude", []) or []
 
     # 仅接受，不在此处使用（输出生成由 Rust 负责）
@@ -852,10 +882,27 @@ def analyze(input_path: str, opts: dict) -> dict:
                 manual.append((s, e))
         manual = _union(manual)
 
-        # ── 合并所有删除区 → 最终保留段（=删除集的精确补集）──
-        all_remove = _union(text_fillers + isolated + gap_breath +
-                            transients + intra_fillers + manual)
-        keep = _complement(all_remove, dur, min_keep=0.0)
+        # ── 合并所有删除区 → 最终保留段 ──
+        # keepNonspeech=True（默认）：删除集的补集 = 保留背景音乐/环境音，仅删语音内噪声
+        # keepNonspeech=False（紧凑）：仅保留 VAD 语音段，段内再挖除各类填充/噪声，
+        #   非语音间隙（静音+音乐）整体丢弃。
+        if keep_nonspeech:
+            all_remove = _union(text_fillers + isolated + gap_breath +
+                                transients + intra_fillers + manual)
+            keep = _complement(all_remove, dur, min_keep=0.0)
+        else:
+            keep = []
+            for (vs, ve) in speech_regs:
+                rm = [(s, e) for (s, e) in
+                      (text_fillers + isolated + gap_breath + transients +
+                       intra_fillers + manual)
+                      if e > vs and s < ve]
+                if not rm:
+                    keep.append((vs, ve))
+                    continue
+                seg = _complement(rm, ve - vs, min_keep=0.0)
+                keep.extend((vs + ss, vs + ee) for (ss, ee) in seg)
+            keep = _union(keep)
 
         # 兜底：若全部被删，则保留整段（避免空输出）
         if not keep:
