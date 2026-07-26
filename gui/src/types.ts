@@ -127,6 +127,57 @@ export interface AsrAPI {
   }>;
 }
 
+// ── 口播剪辑（speech auto-editing） ──
+// 输入选项：与 Python bridge / Rust speech_analyze 的 --opts JSON 字段对齐
+export interface SpeechEditOptions {
+  modelSize?: 'tiny' | 'base' | 'small' | 'medium' | 'large'; // whisper 尺寸，默认 base
+  useDemucs: boolean;        // 声源分离降噪
+  vadThreshold: number;      // VAD 灵敏度 0~1，默认 0.25
+  minGap: number;            // 最小停顿(秒)，默认 0.18
+  wordPad: number;           // 词边界 padding(秒)，默认 0.04
+  denoise: boolean;          // 去齿音/响度归一（降噪增强）
+  deess: boolean;            // 去齿音
+  normalize: boolean;        // 响度归一(LUFS)
+  fillers: boolean;          // 删语气词废话
+  exclude?: [number, number][]; // 手动排除区间(秒) [start,end]
+}
+
+// 输出：与 W1 决策层 keep_segments + detail 对齐
+export interface SpeechEditWord { word: string; start: number; end: number }
+export interface SpeechEditDetailItem { type: string; start: number; end: number }
+export interface SpeechEditResult {
+  duration: number;                       // 原媒体时长(秒)
+  sampleRate: number;                     // 采样率
+  words: SpeechEditWord[];                // 逐词时间戳
+  keepSegments: [number, number][];       // ★ 核心编辑方案（相对原媒体的保留秒区间）
+  detail: SpeechEditDetailItem[];         // 删除原因分类
+  totalRemovedSec: number;                // 删除总时长
+  ratio: number;                          // 压缩比例 0~1
+}
+
+// assemble（生成清洗文件）的输出
+export interface SpeechAssembleResult {
+  outputPath: string;   // 新生成文件绝对路径
+  duration: number;     // 新文件时长(秒)
+  ok: boolean;
+}
+
+// assemble 的 --opts JSON 字段
+export interface SpeechAssembleOptions {
+  keepSegments: [number, number][];
+  outputPath: string;
+  crossfadeMs?: number; // 段间过渡(ms)，默认 0（v1 不做交叉淡化，保证正确性）
+  deess?: boolean;      // 去齿音（ffmpeg highshelf 近似）
+  normalize?: boolean;  // 响度归一（ffmpeg loudnorm）
+}
+
+export interface SpeechAPI {
+  // analyze: 输入媒体路径 + 选项 JSON → 返回编辑方案
+  analyze: (input: string, optsJson: string) => Promise<{ success: boolean; data?: SpeechEditResult; error?: string }>;
+  // assemble: 输入媒体路径 + {keepSegments, outputPath, crossfadeMs} JSON → 生成新文件
+  assemble: (input: string, optsJson: string) => Promise<{ success: boolean; data?: SpeechAssembleResult; error?: string }>;
+}
+
 declare global { interface Window { aicut: AicutAPI } }
 export interface AicutAPI {
   // 引擎
@@ -150,6 +201,8 @@ export interface AicutAPI {
   ai: AiAPI;
   // ASR 本地语音转写
   asr: AsrAPI;
+  // 口播剪辑
+  speech: SpeechAPI;
   // 插件
   listPlugins(): Promise<string>;
   scanPlugins(): Promise<number>;

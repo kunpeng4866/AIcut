@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod provider;
 pub mod plugin;
 pub mod tts;
+pub mod speech;
 pub mod timeline;
 pub mod clock;
 pub mod pipeline;
@@ -180,7 +181,19 @@ pub fn export_project(project_json: &str, output_path: &str) -> Result<(), Strin
     Ok(())
 }
 
-// ════════════════════ N-API 绑定（条件编译） ════════════════════
+// ════════════════════ 口播剪辑 API ════════════════════
+
+/// 语音分析：调用 Python 桥分析音频，返回分段/静音/填充词等 JSON。
+pub fn speech_analyze(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
+    speech::speech_analyze(input, opts_json)
+}
+
+/// 口播合成：按保留区间切割并用 ffmpeg concat 合成最终视频。
+pub fn speech_assemble(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
+    speech::speech_assemble(input, opts_json)
+}
+
+// ═══════════════════��� N-API 绑定（条件编译） ════════════════════
 
 /// N-API 导出层。需 `cargo build --features napi` 激活。
 /// 网络不可用时使用默认 pure Rust 模式。
@@ -208,6 +221,20 @@ mod napi_bindings {
         let overlay = crate::ai::generate_subtitles_sync(&transcript, &lang)
             .map_err(|e| napi::Error::from_reason(e))?;
         serde_json::to_string(&overlay).map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    #[napi]
+    pub fn speech_analyze(input: String, opts: String) -> napi::Result<String> {
+        crate::speech_analyze(&input, &opts)
+            .map(|v| serde_json::to_string(&v).unwrap_or_default())
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    #[napi]
+    pub fn speech_assemble(input: String, opts: String) -> napi::Result<String> {
+        crate::speech_assemble(&input, &opts)
+            .map(|v| serde_json::to_string(&v).unwrap_or_default())
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 }
 

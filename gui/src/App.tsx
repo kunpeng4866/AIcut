@@ -11,6 +11,7 @@ import TextPanel from './components/panels/TextPanel';
 import AudioPanel from './components/panels/AudioPanel';
 import StickerPanel from './components/panels/StickerPanel';
 import EffectsPanel from './components/panels/EffectsPanel';
+import SpeechPanel from './components/panels/SpeechPanel';
 import PreviewCanvas from './components/PreviewCanvas';
 import ErrorBoundary from './components/ErrorBoundary';
 import PropertiesPanel from './components/PropertiesPanel';
@@ -33,12 +34,13 @@ const C = {
 };
 
 // 左面板标签页定义
-const LEFT_TABS: { key: 'media' | 'effects' | 'text' | 'audio' | 'stickers'; label: string }[] = [
+const LEFT_TABS: { key: 'media' | 'effects' | 'text' | 'audio' | 'stickers' | 'speech'; label: string }[] = [
   { key: 'media', label: '素材' },
   { key: 'effects', label: '特效' },
   { key: 'text', label: '文字' },
   { key: 'audio', label: '音频' },
   { key: 'stickers', label: '贴纸' },
+  { key: 'speech', label: '口播' },
 ];
 
 export default function App() {
@@ -120,6 +122,7 @@ export default function App() {
             {activeLeftPanel === 'text' && <TextPanel />}
             {activeLeftPanel === 'audio' && <AudioPanel />}
             {activeLeftPanel === 'stickers' && <StickerPanel />}
+            {activeLeftPanel === 'speech' && <SpeechPanel />}
           </div>
         </aside>
 

@@ -219,8 +219,34 @@ fn main() {
                 }
             }
         }
+        "speech" => {
+            // aicut-engine speech --mode <analyze|assemble> --input <path> --opts <json>
+            let mut mode = String::new();
+            let mut input = String::new();
+            let mut opts = String::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--mode"  => { mode  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--input" => { input = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--opts"  => { opts  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    other => { eprintln!("未知参数: {}", other); process::exit(2); }
+                }
+            }
+            match mode.as_str() {
+                "analyze" => match aicut_engine::speech_analyze(&input, &opts) {
+                    Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
+                    Err(e) => { eprintln!("speech analyze 失败: {}", e); process::exit(1); }
+                },
+                "assemble" => match aicut_engine::speech_assemble(&input, &opts) {
+                    Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
+                    Err(e) => { eprintln!("speech assemble 失败: {}", e); process::exit(1); }
+                },
+                other => { eprintln!("未知 speech 模式: {} (可用: analyze, assemble)", other); process::exit(2); }
+            }
+        }
         other => {
-            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr)", other);
+            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech)", other);
             process::exit(2);
         }
     }

@@ -63,6 +63,14 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('asr:transcribe', audioPath, lang),
   },
 
+  // ── 口播剪辑 ──
+  speech: {
+    analyze: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('speech:analyze', input, optsJson),
+    assemble: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('speech:assemble', input, optsJson),
+  },
+
   // ── 草稿 ──
   saveDraft: (name: string, content: string) => ipcRenderer.invoke('draft:save', name, content),
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),

@@ -1,7 +1,7 @@
 // UI Store — 编辑器界面状态（选中、播放、时间轴、面板）
 import { create } from 'zustand';
 
-type LeftPanel = 'media' | 'effects' | 'text' | 'audio' | 'stickers';
+type LeftPanel = 'media' | 'effects' | 'text' | 'audio' | 'stickers' | 'speech';
 type RightPanel = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins';
 
 interface UIState {

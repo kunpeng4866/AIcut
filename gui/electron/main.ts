@@ -17,6 +17,13 @@ try { process.env.AICUT_PLUGIN_DIR = join(__dirname, '../../plugins'); } catch {
 // 内置字体目录：传给 Rust 引擎，导出时 drawtext 用 fontfile= 指向随包字体，保证预览/导出一致。
 try { process.env.AICUT_FONTS_DIR = getFontsDir(); } catch { /* dev 兜底 */ }
 
+// 口播剪辑：托管 Python 解释器（已装齐 faster-whisper/silero-vad/demucs）+ bridge.py 路径
+try {
+  process.env.AICUT_PYTHON_BIN = process.env.AICUT_PYTHON_BIN
+    || 'C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe';
+  process.env.AICUT_SPEECH_BRIDGE = join(__dirname, '../../python/speech_edit/bridge.py');
+} catch { /* dev 兜底 */ }
+
 // ── 路径常量 ──
 function getConfigPath() { return join(app.getPath('userData'), 'config.json'); }
 function getDraftsDir() { return join(app.getPath('userData'), 'drafts'); }
@@ -271,6 +278,27 @@ ipcMain.handle('asr:transcribe', async (_e, audioPath: string, lang: string) => 
     const enginePath = asr.enginePath || 'E:\\codex\\codex-tools\\whisper\\whisper-cli.exe';
     const modelPath = asr.modelPath || 'E:\\codex\\codex-tools\\whisper\\ggml-base.bin';
     const stdout = await callEngine('asr', 'transcribe', audioPath, lang || 'zh', enginePath, modelPath);
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
+// ── 口播剪辑（speech auto-editing）──
+ipcMain.handle('speech:analyze', async (_e, input: string, optsJson: string) => {
+  try {
+    const stdout = await callEngine('speech', '--mode', 'analyze', '--input', input ?? '', '--opts', optsJson ?? '');
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
+ipcMain.handle('speech:assemble', async (_e, input: string, optsJson: string) => {
+  try {
+    const stdout = await callEngine('speech', '--mode', 'assemble', '--input', input ?? '', '--opts', optsJson ?? '');
     const data = JSON.parse(stdout);
     return { success: true, data };
   } catch (e: any) {
