@@ -68,7 +68,7 @@ export default function Header() {
   // 打开工程文件
   const handleOpen = async () => {
     try {
-      const paths = await window.aicut.openFiles();
+      const paths = await window.aicut.openProject();
       if (paths && paths.length > 0) {
         setBusy(true);
         await loadProject(paths[0]);

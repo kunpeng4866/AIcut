@@ -164,6 +164,18 @@ ipcMain.handle('dialog:openFiles', async () => {
   return result.filePaths;
 });
 
+// 打开工程文件：过滤器限定 AIcut Project (json)，避免与素材导入的 Media 过滤器冲突
+ipcMain.handle('dialog:openProject', async () => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'AIcut Project', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  return result.filePaths;
+});
+
 ipcMain.handle('dialog:saveFile', async (_e, defaultName?: string) => {
   const result = await dialog.showSaveDialog(mainWindow!, {
     defaultPath: defaultName || 'project.json',

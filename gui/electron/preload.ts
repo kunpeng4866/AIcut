@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('aicut', {
 
   // ── 文件 ──
   openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
+  openProject: () => ipcRenderer.invoke('dialog:openProject'),
   saveProject: (path: string, content: string) => ipcRenderer.invoke('file:saveProject', path, content),
   loadProject: (path: string) => ipcRenderer.invoke('file:loadProject', path),
   openSaveDialog: (defaultName?: string) => ipcRenderer.invoke('dialog:saveFile', defaultName),

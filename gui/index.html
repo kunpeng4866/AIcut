@@ -14,6 +14,7 @@ if (!window.aicut) {
     getVersion: () => fetch(API+'/api/version').then(r=>r.json().then(j=>j.version)),
     validate: (json) => fetch(API+'/api/render',{method:'POST',body:json}).then(r=>r.json().then(j=>({valid:j.success,errors:j.error?[j.error]:[]}))),
     openFiles: () => Promise.resolve([]),
+    openProject: () => Promise.resolve([]),
     saveProject: (path,content) => Promise.resolve(true),
     loadProject: (path) => Promise.resolve('{}'),
   };

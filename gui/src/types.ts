@@ -199,6 +199,7 @@ export interface AicutAPI {
   validate(json: string): Promise<{ valid: boolean; errors?: string[] }>;
   // 文件
   openFiles(): Promise<string[]>;
+  openProject(): Promise<string[]>;
   saveProject(path: string, content: string): Promise<boolean>;
   loadProject(path: string): Promise<string>;
   openSaveDialog(defaultName?: string): Promise<string | null>;
