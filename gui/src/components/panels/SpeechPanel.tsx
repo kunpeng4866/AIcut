@@ -224,7 +224,10 @@ export default function SpeechPanel() {
     const newKeep = addDeletion(liveKeepSegments, result.duration, s, e);
     if (newKeep.length === 0) { setMsg('不能把全部内容都改为删除，至少保留一段'); return; }
     commitSpeechSegments(newKeep);
-    setMsg(`已新增删除片段 ${s.toFixed(3)}s – ${e.toFixed(3)}s`);
+    setMsg(`已新增删除片段 ${s.toFixed(3)}s – ${e.toFixed(3)}s（可继续添加下一段）`);
+    // 关键：添加后清空输入框，避免再次点击时复用已被删除的同一区间导致「没反应」
+    setNewDelStart(0);
+    setNewDelEnd(0);
   };
   const captureNewStart = () => setNewDelStart(captureSourceTime());
   const captureNewEnd = () => setNewDelEnd(captureSourceTime());
