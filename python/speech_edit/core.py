@@ -479,79 +479,8 @@ def _has_silence_border(au: np.ndarray, sr: int, s: float, e: float,
     return False
 
 
-def _word_protected_ivs(words: list, vad_regs: list, word_pad: float,
-                        events: list, au: np.ndarray, sr: int,
-                        edge: float = 0.12) -> list:
-    """词对齐保护区间（删除决策安全阀）。
-
-    默认 = 每个词区间向外扩 word_pad。两层收窄，逐步暴露被 Whisper 吞掉、
-    但其实是非语音的声音事件：
-
-    1) ∩ VAD 语音区：Whisper 常把静音/非语音拉长进词时间戳（过长），
-       而 silero VAD 不会，故把保护区间收窄为「词区间 ∩ VAD 语音区」。
-    2) 事件边缘优先（仅对**孤立且局部**的声音事件生效）：
-       - 局部：至多重叠 1 个词（跨多词事件=连续语音元音，维持整词保护）。
-       - 孤立：**事件某一侧紧邻静音**（`_has_silence_border`）→ 是独立非
-         语音（咳嗽/提示音/咂嘴），可信其优先于词边界，把词保护边界推过
-         该事件并删除；嵌在语音里、两侧皆语音的元音无静音边 → 保留。
-       这是"只删独立非语音、绝不切朗读元音"的关键防回归原则。
-    """
-    def _n_overlap(ev):
-        s, e = ev
-        cnt = 0
-        for w in words:
-            ws, we = max(0.0, w["start"] - word_pad), w["end"] + word_pad
-            if not (e <= ws or s >= we):
-                cnt += 1
-        return cnt
-
-    ivs = []
-    for w in words:
-        s = max(0.0, w["start"] - word_pad)
-        e = w["end"] + word_pad
-        # 1) ∩ VAD 语音区
-        if vad_regs:
-            segs = [(max(s, vs), min(e, ve))
-                    for (vs, ve) in vad_regs
-                    if min(e, ve) - max(s, vs) > 1e-3]
-            if segs:
-                s, e = segs[0][0], segs[-1][1]
-        # 2) 孤立局部事件：有静音边才推词边界
-        for (es, ee) in events:
-            if _n_overlap((es, ee)) > 1:
-                continue  # 跨多词：维持整词保护
-            if not _has_silence_border(au, sr, es, ee):
-                continue  # 嵌在语音里：维持整词保护
-            if ee > s and es <= s + edge:       # 落在词起始边缘
-                s = max(s, ee)
-            elif es < e and ee >= e - edge:     # 落在词结束边缘
-                e = min(e, es)
-        if e > s:
-            ivs.append((s, e))
-    return _union(ivs)
 
 
-def _subtract_intervals(events: list, protected: list) -> list:
-    """从声音事件里挖掉与 protected 重叠的部分，保留不重叠的残余段。
-
-    取代原『重叠即整段丢弃』硬开关：只删没有词覆盖的残余，更安全——
-    被保护区间覆盖的部分（真实朗读）绝不删，仅删露出边界的非语音事件。
-    """
-    prot = _union(protected)
-    out = []
-    for (s, e) in events:
-        cur = s
-        for (ps, pe) in prot:
-            if pe <= cur or ps >= e:
-                continue
-            if ps > cur:
-                out.append((cur, ps))
-            cur = max(cur, pe)
-            if cur >= e:
-                break
-        if cur < e:
-            out.append((cur, e))
-    return [(s, e) for s, e in out if e - s >= 0.04]
 
 
 def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
@@ -599,11 +528,15 @@ def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
             i += 1
     if not events:
         return []
-    # 减法式安全阀：挖掉与词对齐保护区间重叠的部分，只删无词覆盖的残余
-    # （保护区间默认=词区间外扩 word_pad；提供 vad_regs 时收窄为 词∩VAD +
-    #  事件边缘优先，暴露被 Whisper 吞掉的非语音声音事件）
-    prot = _word_protected_ivs(words, vad_regs, word_pad, events, au, sr)
-    out = _subtract_intervals(events, prot)
+    # 方案 A 保守回退：安全阀 = 词区间(含 word_pad)。
+    # 任何与词对齐重叠的声音事件**整段丢弃**(不删)，只删完全不碰词、落在词
+    # 间静音间隙的独立非语音事件。回到用户验收"无噪音"的 745230d 基线——
+    # 删除点都在词间静音间隙，acrossfade 不切语音 → 无噪音；朗读字(如"离")
+    # 被词保护覆盖，不会被误删。
+    word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
+                       for w in words])
+    out = [(s, e) for s, e in events
+           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
     return _union(out)
 
 
@@ -655,8 +588,12 @@ def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int =
         i = j + 1
     if not events:
         return []
-    prot = _word_protected_ivs(words, vad_regs, word_pad, events, au, sr)
-    out = _subtract_intervals(events, prot)
+    # 方案 A 保守回退：同 detect_cough —— 词区间(含 word_pad)即整段丢弃，
+    # 只删词间静音间隙的独立纯音事件。回到 745230d 无噪音基线。
+    word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
+                       for w in words])
+    out = [(s, e) for s, e in events
+           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
     return _union(out)
 
 
