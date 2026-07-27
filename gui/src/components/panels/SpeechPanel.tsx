@@ -182,6 +182,7 @@ export default function SpeechPanel() {
   const [newDelEnd, setNewDelEnd] = useState<number>(0);
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewNonce, setPreviewNonce] = useState(0);
   const [previewBusy, setPreviewBusy] = useState(false);
 
   // 把预览播放头(时间轴时间)映射回选中素材的源时间（供「捕获」按钮取逐帧时间）
@@ -248,8 +249,19 @@ export default function SpeechPanel() {
           : {}),
       };
       const res = await window.aicut.speech.assemble(selectedAsset.path, JSON.stringify(asmOpts));
-      if (res.success && res.data) setPreviewUrl(res.data.outputPath);
-      else setMsg(res.error || '试听生成失败');
+      if (res.success && res.data) {
+        // 修复「试听缓存」：预览输出文件名固定为 *_preview.mp4，第二次点击时
+        // setPreviewUrl 设置的是完全相同的字符串 → 浏览器不重载、继续播首次
+        // 解码的旧缓冲。这里改用 aicut-asset:// URL 并附加时间戳查询串（协议
+        // 处理器按 pathname 解析、忽略查询串 → 命中同一文件但视为不同资源），
+        // 同时用 previewNonce 作 <audio> 的 key 强制整元素重挂载，双重保险。
+        const raw = String(res.data.outputPath).replace(/\\/g, '/');
+        const assetUrl = /^(https?|aicut-asset|blob):/.test(raw)
+          ? raw
+          : `aicut-asset:///${raw}?v=${Date.now()}`;
+        setPreviewUrl(assetUrl);
+        setPreviewNonce((n) => n + 1);
+      } else setMsg(res.error || '试听生成失败');
     } finally {
       setPreviewBusy(false);
     }
@@ -582,7 +594,7 @@ export default function SpeechPanel() {
               </button>
               {previewUrl && (
                 <div style={{ marginBottom: 8 }}>
-                  <audio controls src={previewUrl} style={{ width: '100%' }} />
+                  <audio key={previewNonce} controls src={previewUrl} style={{ width: '100%' }} />
                 </div>
               )}
 
