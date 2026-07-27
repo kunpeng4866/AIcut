@@ -139,6 +139,19 @@ export default function SpeechPanel() {
     () => (result ? removedSpans(liveKeepSegments, result.duration) : []),
     [result, liveKeepSegments],
   );
+  // 保留段（按时间排序，供审核列表与 keep→delete 转换用）
+  const keepSorted = useMemo(
+    () => (result ? [...liveKeepSegments].sort((a, b) => a[0] - b[0]) : []),
+    [result, liveKeepSegments],
+  );
+  // 统一审核列表：保留段 + 删除段按时间合并，每段带原始下标
+  const segs = useMemo(() => {
+    const list: { type: 'keep' | 'del'; range: [number, number]; keepIdx?: number; delIdx?: number }[] = [];
+    keepSorted.forEach((k, ki) => list.push({ type: 'keep', range: k, keepIdx: ki }));
+    removed.forEach((d, di) => list.push({ type: 'del', range: d, delIdx: di }));
+    list.sort((a, b) => a.range[0] - b.range[0]);
+    return list;
+  }, [keepSorted, removed]);
   const [draft, setDraft] = useState<[number, number][]>(removed);
   useEffect(() => { setDraft(removed); }, [JSON.stringify(removed)]);
 
@@ -169,9 +182,18 @@ export default function SpeechPanel() {
     const newKeep = patchDeletion(liveKeepSegments, result.duration, i, which === 'start' ? { start: t } : { end: t });
     commitSpeechSegments(newKeep);
   };
-  const handleDeleteSegment = (i: number) => {
+  // 删除段 → 改为保留（AI 误删时纠正：把该删除区间并入保留）
+  const handleConvertDeleteToKeep = (delIdx: number) => {
     if (!result) return;
-    const newKeep = deleteDeletion(liveKeepSegments, result.duration, i);
+    const newKeep = deleteDeletion(liveKeepSegments, result.duration, delIdx);
+    commitSpeechSegments(newKeep);
+  };
+  // 保留段 → 改为删除（AI 误判保留时纠正）
+  const handleConvertKeepToDelete = (keepIdx: number) => {
+    if (!result) return;
+    const sorted = [...liveKeepSegments].sort((a, b) => a[0] - b[0]);
+    if (sorted.length <= 1) { setMsg('至少需保留一段内容，不能把全部都改为删除'); return; }
+    const newKeep = sorted.filter((_, idx) => idx !== keepIdx);
     commitSpeechSegments(newKeep);
   };
   const handlePreview = async () => {
@@ -451,12 +473,12 @@ export default function SpeechPanel() {
                 </div>
               </div>
               <div style={{ fontSize: 10, color: C.textSub, marginBottom: 8, lineHeight: 1.5 }}>
-                上条为原始媒体的「保留(绿)/删除(红)」分布，可对照判断是否误删、删得是否精确。
+                上条为原始媒体的「保留(绿)/删除(红)」分布。审核时可：① 调整删除段起止（或「捕获」逐帧播放头时间）；② 把 AI 误删的段「改为保留」；③ 把 AI 误判保留的段「改为删除」（新增的删除段拥有与原始删除段完全相同的操作权限）。
               </div>
 
-              {/* 删除明细（可编辑：调起止 / 捕获逐帧时间 / 删除此段） */}
+              {/* 片段审核：保留段(绿)+删除段(红) 按时间合并，可互转性质；删除段可微调范围 */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <span style={{ fontSize: 11, color: C.textSub }}>删除明细（共 {removed.length} 段，可编辑）</span>
+                <span style={{ fontSize: 11, color: C.textSub }}>片段审核（共 {segs.length} 段，可改性质/范围）</span>
                 <button
                   onClick={undoSpeechSegments}
                   disabled={speechUndoStack.length === 0}
@@ -465,29 +487,38 @@ export default function SpeechPanel() {
                   撤销{speechUndoStack.length > 0 ? `(${speechUndoStack.length})` : ''}
                 </button>
               </div>
-              <div style={{ maxHeight: 190, overflowY: 'auto', marginBottom: 10, fontSize: 11 }}>
-                {removed.length === 0 && (
-                  <div style={{ color: C.textSub, padding: '4px 0' }}>无删除区域（保留全部内容）</div>
-                )}
-                {removed.map((d, i) => {
+              <div style={{ maxHeight: 210, overflowY: 'auto', marginBottom: 10, fontSize: 11 }}>
+                {segs.map((s, i) => {
                   const fps = selectedAsset?.fps ?? 30;
                   const fmt = (t: number) => `${t.toFixed(3)}s（帧${Math.round(t * fps)}）`;
-                  const dv = draft[i] ?? d;
+                  const isKeep = s.type === 'keep';
+                  const color = isKeep ? C.keep : C.removed;
+                  const dv = !isKeep && s.delIdx !== undefined ? (draft[s.delIdx] ?? s.range) : s.range;
                   return (
                     <div key={i} style={{ padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: 2, background: C.removed, display: 'inline-block', flexShrink: 0 }} />
-                        <span style={{ color: C.textMain, minWidth: 56 }}>删除段 {i + 1}</span>
-                        <span style={{ color: C.textSub, fontVariantNumeric: 'tabular-nums' }}>{fmt(d[0])} – {fmt(d[1])}（{(d[1] - d[0]).toFixed(3)}s）</span>
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+                        <span style={{ color: C.textMain, minWidth: 56 }}>{isKeep ? '保留段' : `删除段 ${(s.delIdx ?? 0) + 1}`}</span>
+                        <span style={{ color: C.textSub, fontVariantNumeric: 'tabular-nums' }}>{fmt(s.range[0])} – {fmt(s.range[1])}（{(s.range[1] - s.range[0]).toFixed(3)}s）</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                        <span style={{ color: C.textSub }}>起</span>
-                        <input type="number" step={0.001} value={dv[0]} onChange={(e) => updateDraft(i, 'start', parseFloat(e.target.value))} onBlur={() => commitDraft(i)} style={numInput} />
-                        <button onClick={() => captureTo(i, 'start')} title="用预览播放头（已映射回源时间）设为起点" style={miniBtn}>捕获</button>
-                        <span style={{ color: C.textSub }}>止</span>
-                        <input type="number" step={0.001} value={dv[1]} onChange={(e) => updateDraft(i, 'end', parseFloat(e.target.value))} onBlur={() => commitDraft(i)} style={numInput} />
-                        <button onClick={() => captureTo(i, 'end')} title="用预览播放头设为终点" style={miniBtn}>捕获</button>
-                        <button onClick={() => handleDeleteSegment(i)} title="删除此删除段（把该区间并入保留）" style={{ ...miniBtn, color: '#ff8a8a' }}>删段</button>
+                        {isKeep ? (
+                          <button
+                            onClick={() => s.keepIdx !== undefined && handleConvertKeepToDelete(s.keepIdx)}
+                            title="把这段从保留改为删除（AI 误判保留时纠正；新增删除段可继续微调）"
+                            style={{ ...miniBtn, color: '#ff8a8a' }}
+                          >改为删除</button>
+                        ) : (
+                          <>
+                            <span style={{ color: C.textSub }}>起</span>
+                            <input type="number" step={0.001} value={dv[0]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'start', parseFloat(e.target.value))} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
+                            <button onClick={() => s.delIdx !== undefined && captureTo(s.delIdx, 'start')} title="用预览播放头（已映射回源时间）设为起点" style={miniBtn}>捕获</button>
+                            <span style={{ color: C.textSub }}>止</span>
+                            <input type="number" step={0.001} value={dv[1]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'end', parseFloat(e.target.value))} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
+                            <button onClick={() => s.delIdx !== undefined && captureTo(s.delIdx, 'end')} title="用预览播放头设为终点" style={miniBtn}>捕获</button>
+                            <button onClick={() => s.delIdx !== undefined && handleConvertDeleteToKeep(s.delIdx)} title="这段其实要保留：把删除段改回保留" style={{ ...miniBtn, color: C.keep }}>改为保留</button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
