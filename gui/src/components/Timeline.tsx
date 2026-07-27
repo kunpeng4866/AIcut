@@ -616,6 +616,9 @@ export default function Timeline() {
   const { project, addTrack, insertTrackAt, addClip, removeClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
   const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, speechOverlay } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 左侧轨道控制列与右侧轨道区共享同一条垂直滚动：左侧自身不出现滚动条，
+  // 仅镜像右侧的 scrollTop，确保控制按钮与轨道行始终对齐（避免两侧各滚各的）。
+  const leftRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; clipId: string } | null>(null);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState<{ time: number; trackIndex: number; yInTrack: number } | null>(null);
@@ -654,6 +657,13 @@ export default function Timeline() {
       setTimelineZoom(timelineZoom * (e.deltaY < 0 ? 1.1 : 0.9));
     }
   };
+
+  // 右侧轨道区滚动时，把左侧控制列的 scrollTop 同步过去，保持两侧垂直对齐。
+  const onTrackScroll = useCallback(() => {
+    const el = scrollRef.current;
+    const left = leftRef.current;
+    if (el && left) left.scrollTop = el.scrollTop;
+  }, []);
 
   // Map an asset type to the track type it belongs on.
   const assetToTrackType = (assetType: string): 'video' | 'audio' => {
@@ -893,8 +903,8 @@ export default function Timeline() {
       {/* Track headers + track area */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-        {/* Left column: track headers */}
-        <div style={{ width: 130, flexShrink: 0, background: '#16213e', borderRight: '1px solid #0f3460', overflowY: 'auto' }}>
+        {/* Left column: track headers — 自身不滚动(overflow hidden)，由右侧滚动镜像同步 */}
+        <div ref={leftRef} style={{ width: 130, flexShrink: 0, background: '#16213e', borderRight: '1px solid #0f3460', overflow: 'hidden' }}>
           <div style={{ height: RULER_HEIGHT, borderBottom: '1px solid #0f3460' }} />
           {project.tracks.map(t => (
             <div key={t.id} data-track-header-id={t.id} style={{
@@ -928,7 +938,7 @@ export default function Timeline() {
         </div>
 
         {/* Right column: scrollable timeline track area */}
-        <div ref={scrollRef} data-timeline-track-area onWheel={onWheel} onClick={() => clearSelection()}
+        <div ref={scrollRef} data-timeline-track-area onWheel={onWheel} onScroll={onTrackScroll} onClick={() => clearSelection()}
           onDragOver={onTrackDragOver} onDrop={onTrackDrop} onDragLeave={onTrackDragLeave}
           style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', position: 'relative' }}>
           <div style={{ width: duration * timelineZoom, position: 'relative', minHeight: '100%' }}>

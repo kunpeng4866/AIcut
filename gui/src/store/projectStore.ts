@@ -203,6 +203,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       // 一并清理引用该素材的时间轴片段，避免孤儿引用导致预览/导出异常
       tracks: p.tracks.map((t) => ({ ...t, clips: t.clips.filter((c) => c.assetId !== id) })),
     })),
+    // 轨道数量不限制（设计上曾写“先不要少于10个”作最低建议，现已放开）：
+    // 加轨/插轨均直接写入，无 MAX_TRACKS 上限判断。
     addTrack: (type) => {
       const newId = uid('track');
       mutate((p) => {
