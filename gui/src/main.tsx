@@ -12,4 +12,9 @@ if (aicutApi?.getFontsDir) {
   injectBundledFontFaces('');
 }
 
+// 阻止从文件管理器拖入文件/目录时 Chromium 默认的「导航到文件/下载」行为，
+// 否则拖到素材面板以外的区域会触发白屏。素材面板自身会处理导入（见 MediaPanel）。
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+
 createRoot(document.getElementById('root')!).render(<App />);

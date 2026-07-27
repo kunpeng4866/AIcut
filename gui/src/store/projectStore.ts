@@ -197,7 +197,12 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       }
     },
     addAsset: (asset) => mutate((p) => ({ ...p, assets: [...p.assets, asset] })),
-    removeAsset: (id) => mutate((p) => ({ ...p, assets: p.assets.filter((a) => a.id !== id) })),
+    removeAsset: (id) => mutate((p) => ({
+      ...p,
+      assets: p.assets.filter((a) => a.id !== id),
+      // 一并清理引用该素材的时间轴片段，避免孤儿引用导致预览/导出异常
+      tracks: p.tracks.map((t) => ({ ...t, clips: t.clips.filter((c) => c.assetId !== id) })),
+    })),
     addTrack: (type) => {
       const newId = uid('track');
       mutate((p) => {
