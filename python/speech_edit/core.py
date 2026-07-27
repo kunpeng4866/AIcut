@@ -454,7 +454,119 @@ def detect_transients(wav_path: str, gaps: list, words: list,
 
 
 # ══════════════════════════════════════════════════════
-# [4e-4i] 保留段内部精细化（保留以备参考；analyze 不调用其中改写音频者）
+# [4e] 非语音声音事件检测（独立于 VAD，扫全音频）
+# ══════════════════════════════════════════════════════
+
+def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
+                 onset_factor: float = 4.5, min_dur: float = 0.10,
+                 max_dur: float = 0.7, min_voiced: float = 0.08,
+                 word_pad: float = 0.12) -> list:
+    """全音频扫描短促浊音爆发（咳嗽 / 清嗓 / 咳痰）。
+
+    独立于 VAD 间隙：即便 silero VAD 把咳嗽判成语音并并入相邻朗读段，
+    本函数直接在全音频能量包络上做 onset 检测，仍能抓到被吸收的咳嗽。
+    核心安全阀：**无任何 Whisper 词对齐**的段才标记删除——咳嗽 / 清嗓
+    不会被转写成词，而正常朗读的元音段总有词时间戳覆盖，从而可靠区分，
+    避免把朗读元音误删。
+    """
+    au, sr = _read_wav(wav_path)
+    win = max(1, int(win_ms / 1000 * sr))
+    hop = max(1, int(hop_ms / 1000 * sr))
+    n = len(au)
+    if n < win:
+        return []
+    rms = np.array([float(np.sqrt(np.mean(au[i:i + win] ** 2)))
+                    for i in range(0, n - win + 1, hop)])
+    if rms.size == 0 or not rms.any():
+        return []
+    # 静音基线 = 低位分位数；咳嗽爆发相对它陡升
+    baseline = float(np.percentile(rms[rms > 1e-8], 10)) if np.any(rms > 1e-8) else 1e-4
+    thr = max(baseline * onset_factor, 1e-4)
+    above = rms > thr
+    events = []
+    i = 0
+    N = len(above)
+    while i < N:
+        if above[i]:
+            j = i
+            while j < N and above[j]:
+                j += 1
+            s = i * hop / sr
+            e = j * hop / sr
+            if min_dur <= (e - s) <= max_dur:
+                # 浊音判定（咳嗽是浊音爆发；清音瞬态走 detect_transients）
+                if _sustained_voiced(au, s, e, sr) >= min_voiced:
+                    events.append((s, e))
+            i = j
+        else:
+            i += 1
+    if not events:
+        return []
+    # 仅保留无任何词对齐的段
+    word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
+                       for w in words])
+    out = [(s, e) for s, e in events
+           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
+    return _union(out)
+
+
+def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int = 15,
+                     flat_thr: float = 0.12, min_rel_energy: float = 1.5,
+                     min_dur: float = 0.05, max_dur: float = 0.6,
+                     word_pad: float = 0.08) -> list:
+    """全音频扫描短时强纯音事件（系统提示音 / 蜂鸣 / 按键音 / 门铃）。
+
+    独立于 VAD：提示音常被 VAD 连同相邻朗读一起判为语音并入 keep，且现有
+    音乐门(flat<0.2 跳过)也会把它当音乐保护；本函数在全音频上直接找
+    「强 tonal(极低谱平坦度) + 高相对能量 + 短时 + 无词对齐」的孤立纯音。
+    时长上限(max_dur)是关键防火墙：真实背景音乐乐句通常 >0.6s，不会被误删。
+    """
+    au, sr = _read_wav(wav_path)
+    win = max(1, int(win_ms / 1000 * sr))
+    hop = max(1, int(hop_ms / 1000 * sr))
+    n = len(au)
+    if n < win:
+        return []
+    rms = np.array([float(np.sqrt(np.mean(au[i:i + win] ** 2)))
+                    for i in range(0, n - win + 1, hop)])
+    if rms.size == 0 or not rms.any():
+        return []
+    baseline = float(np.percentile(rms[rms > 1e-8], 30)) if np.any(rms > 1e-8) else 1e-4
+    nwin = (n - win) // hop + 1
+    tonal = []
+    for i in range(nwin):
+        seg = au[i * hop:i * hop + win]
+        if seg.size < win // 2:
+            continue
+        flat = _spectral_flatness(au, i * hop / sr, (i * hop + win) / sr, sr)
+        if flat < flat_thr and rms[i] > baseline * min_rel_energy:
+            tonal.append(i)
+    if not tonal:
+        return []
+    # 合并相邻 tonal 窗口为事件
+    events = []
+    i = 0
+    m = len(tonal)
+    while i < m:
+        j = i
+        while j + 1 < m and tonal[j + 1] - tonal[j] <= 1:
+            j += 1
+        s = tonal[i] * hop / sr
+        e = (tonal[j] + 1) * hop / sr + win / sr
+        if min_dur <= (e - s) <= max_dur:
+            events.append((s, e))
+        i = j + 1
+    if not events:
+        return []
+    word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
+                       for w in words])
+    out = [(s, e) for s, e in events
+           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
+    return _union(out)
+
+
+# ══════════════════════════════════════════════════════
+# [4f-4i] 保留段内部精细化（保留以备参考；analyze 不调用其中改写音频者）
 # ══════════════════════════════════════════════════════
 
 def _cleanup_wordless(keep: list, words: list) -> list:
@@ -891,6 +1003,11 @@ def analyze(input_path: str, opts: dict) -> dict:
         vad_neg_threshold = float(vad_neg_threshold)
     transient_crest_thr = float(opts.get("transientCrestThr", 4.0))
     transient_max_dur = float(opts.get("transientMaxDur", 0.12))
+    # 声音事件检测器（独立于 VAD）的可调钩子，均带合理默认，不改变默认行为
+    cough_onset_factor = float(opts.get("coughOnsetFactor", 4.5))
+    cough_min_voiced = float(opts.get("coughMinVoiced", 0.08))
+    tonal_flat_thr = float(opts.get("tonalFlatThr", 0.12))
+    tonal_max_dur = float(opts.get("tonalMaxDur", 0.6))
 
     # 仅接受，不在此处使用（输出生成由 Rust 负责）
     # opts.get("denoise"); opts.get("deess"); opts.get("normalize")
@@ -973,13 +1090,25 @@ def analyze(input_path: str, opts: dict) -> dict:
         )
         print(f"  4d. 瞬态/咂嘴: {len(transients)} 段", flush=True)
 
-        # 对声学类删除区应用 minGap 下限（太短不切）
+        # 4e/4f. 非语音声音事件（独立于 VAD，扫全音频，补抓被 VAD 吸收的咳嗽
+        #         / 语音段内的纯音提示音）。这些事件可能短于 minGap 但确实该删，
+        #         因此不套 _apply_min_gap。
+        cough_events = detect_cough(work_wav, words, word_pad=word_pad,
+                                    onset_factor=cough_onset_factor,
+                                    min_voiced=cough_min_voiced)
+        print(f"  4e. 咳嗽/清嗓(浊音爆发): {len(cough_events)} 段", flush=True)
+        tonal_events = detect_tonal_sfx(work_wav, words, word_pad=word_pad,
+                                        flat_thr=tonal_flat_thr, max_dur=tonal_max_dur)
+        print(f"  4f. 提示音/纯音事件: {len(tonal_events)} 段", flush=True)
+        sound_events = _union(cough_events + tonal_events)
+
+        # 对声学类删除区应用 minGap 下限（太短不切）；声音事件不套（见上）
         isolated = _apply_min_gap(isolated, min_gap)
         gap_breath = _apply_min_gap(gap_breath, min_gap)
         transients = _apply_min_gap(transients, min_gap)
 
         # 初始删除集 → 初始保留段
-        init_remove = _union(text_fillers + isolated + gap_breath + transients)
+        init_remove = _union(text_fillers + isolated + gap_breath + transients + sound_events)
         init_keep = _complement(init_remove, dur, min_keep=0.0)
 
         # 4f. 保留段内部未保护区域（词前紧、词后松）
@@ -1010,14 +1139,14 @@ def analyze(input_path: str, opts: dict) -> dict:
         #   非语音间隙（静音+音乐）整体丢弃。
         if keep_nonspeech:
             all_remove = _union(text_fillers + isolated + gap_breath +
-                                transients + intra_fillers + manual)
+                                transients + intra_fillers + sound_events + manual)
             keep = _complement(all_remove, dur, min_keep=0.0)
         else:
             keep = []
             for (vs, ve) in speech_regs:
                 rm = [(s, e) for (s, e) in
                       (text_fillers + isolated + gap_breath + transients +
-                       intra_fillers + manual)
+                       intra_fillers + sound_events + manual)
                       if e > vs and s < ve]
                 if not rm:
                     keep.append((vs, ve))
@@ -1096,6 +1225,10 @@ def analyze(input_path: str, opts: dict) -> dict:
             detail.append({"type": "transient", "start": s, "end": e})
         for s, e in intra_fillers:
             detail.append({"type": "intra_keep", "start": s, "end": e})
+        for s, e in cough_events:
+            detail.append({"type": "cough", "start": s, "end": e})
+        for s, e in tonal_events:
+            detail.append({"type": "tonal_sfx", "start": s, "end": e})
         for s, e in manual:
             detail.append({"type": "manual_exclude", "start": s, "end": e})
         detail.sort(key=lambda d: d["start"])

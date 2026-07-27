@@ -29,6 +29,12 @@ tmp_corrupted_backup/
 # 口播剪辑：分离重组本地测试产物（生成物，非源码）
 tmp_sep_test/
 
+# 口播剪辑：检测管线诊断产物（纯 numpy 分析脚本 + 报告 + 拷贝样本，非源码）
+tmp_diag/
+
+# 口播剪辑：assemble 本地测试产物（生成物，非源码）
+tmp_assemble_test/
+
 # Python 缓存
 __pycache__/
 **/__pycache__/
