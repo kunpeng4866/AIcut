@@ -580,7 +580,9 @@ export default function PreviewCanvas() {
       const totalDur = Math.max(0, ...useProjectStore.getState().project.tracks.flatMap((t) => t.clips.map((c) => c.timelineOut)));
       const newTime = cur + dt;
       if (newTime >= totalDur) {
-        setCurrentTime(totalDur);
+        if (totalDur <= 0) { useUIStore.getState().togglePlay(); return; }
+        // 播放完成后把播放头自动归零，停在 0:00 准备下次播放
+        setCurrentTime(0);
         useUIStore.getState().togglePlay();
         return;
       }
