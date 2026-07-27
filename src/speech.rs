@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::AppError;
+use crate::probe::probe;
 
 /// 托管的 Python 解释器（WorkBuddy 内置环境）。
 /// 可用环境变量 `AICUT_PYTHON_BIN` 覆盖。
@@ -216,11 +217,22 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
 
+    // 用源真实帧率切割，而非硬编码 30：25/24/29.97 等源若被强制 30fps，
+    // 段实际时长会与请求时长错位，导致 xfade offset 超出真实段长 → 合成失败或视频缺帧/卡顿。
+    let src_fps = probe(input).map(|m| m.fps).unwrap_or(30.0);
+    let fps = if src_fps > 0.0 && src_fps.is_finite() { src_fps } else { 30.0 };
+
     // 按起始时间升序排列，保证合成顺序正确
     let mut segments = opts.keep_segments.clone();
     segments.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // 剔除零长/负长段（避免切出空段导致 ffmpeg 整段失败），空结果直接报错
+    segments.retain(|(s, e)| (e - s) > 1e-4);
+    if segments.is_empty() {
+        return Err(AppError::Render("保留片段均无效（长度为 0），无法合成".into()));
+    }
 
     let mut seg_paths: Vec<PathBuf> = Vec::with_capacity(segments.len());
+    let mut seg_durations: Vec<f64> = Vec::with_capacity(segments.len());
     let mut duration = 0.0_f64;
 
     for (i, (s, e)) in segments.iter().enumerate() {
@@ -238,9 +250,10 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             format!("{:.6}", e),
             "-i".into(),
             input.to_string(),
-            // 强制固定帧率，保证 crossfade/xfade 输入帧率一致。
+            // 用源真实帧率切割（不再硬编码 30）：25/24/29.97 等源若被强制 30fps，
+            // 段实际时长会与请求时长错位，导致 xfade offset 超出真实段长 → 合成失败/视频缺帧卡顿。
             "-r".into(),
-            "30".into(),
+            format!("{:.4}", fps),
             "-c:v".into(),
             "libx264".into(),
             "-pix_fmt".into(),
@@ -280,6 +293,11 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         }
 
         duration += (e - s).max(0.0);
+        // 实测该段真实时长，供 xfade offset 计算（不能用请求的 e-s，否则量化错位导致缺帧）
+        let seg_dur = probe(seg_str)
+            .map(|m| m.duration)
+            .unwrap_or_else(|_| ((*e - *s).max(0.0) * fps).round() / fps);
+        seg_durations.push(seg_dur.max(1.0 / fps));
         seg_paths.push(seg_path);
     }
 
@@ -288,7 +306,7 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         // ---- 交叉淡入淡出路径：消除拼接处的硬切「卡顿」 ----
         let has_video = has_video_stream(input)?;
         let cf = opts.crossfade_ms / 1000.0;
-        let durs: Vec<f64> = segments.iter().map(|(s, e)| (e - s).max(0.0)).collect();
+        let durs: Vec<f64> = seg_durations.clone();
         let n = segments.len();
 
         let mut fc = String::new();
@@ -301,20 +319,21 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             last_a = lbl;
         }
 
-        // 视频 xfade 链（仅当输入含视频流）。
+        // 视频：逐段归一为精确 CFR（fps=FPS,setpts=PTS-STARTPTS）后用 concat 滤镜拼接。
+        // 注意：原先的 xfade 在本机 ffmpeg 下会丢弃大量帧（实测 drop=63），导致后段无画面/卡顿；
+        // concat 滤镜零丢帧、画面完整，代价是拼接处为硬切（音频仍走 crossfade 保持平滑过渡）。
+        let mut vin_labels: Vec<String> = Vec::with_capacity(n);
         if has_video {
-            let mut last_v = "0:v".to_string();
-            let mut acc = 0.0_f64;
-            for k in 1..n {
-                acc += durs[k - 1];
-                let off = acc - (k as f64) * cf;
-                let lbl = format!("v0{}", k);
+            for k in 0..n {
+                let lbl = format!("v{}", k);
                 fc.push_str(&format!(
-                    "[{}][{}:v]xfade=transition=fade:duration={:.6}:offset={:.6}[{}];",
-                    last_v, k, cf, off, lbl
+                    "[{}:v]fps={:.4},setpts=PTS-STARTPTS[{}];",
+                    k, fps, lbl
                 ));
-                last_v = lbl;
+                vin_labels.push(lbl);
             }
+            let ins: String = vin_labels.iter().map(|l| format!("[{}]", l)).collect();
+            fc.push_str(&format!("{}concat=n={}:v=1:a=0[vout];", ins, n));
         }
 
         // 末级音频统一施加 de-ess / declick / normalize（仅启用项）。
@@ -338,10 +357,12 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         args.push("[aout]".into());
         if has_video {
             args.push("-map".into());
-            args.push(format!("[v0{}]", n - 1));
+            args.push("[vout]".into());
         }
         args.push("-c:v".into());
         args.push("libx264".into());
+        args.push("-r".into());
+        args.push(format!("{:.4}", fps));
         args.push("-pix_fmt".into());
         args.push("yuv420p".into());
         args.push("-c:a".into());
@@ -356,15 +377,16 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             let stderr = String::from_utf8_lossy(&out.stderr);
             cleanup(&seg_paths, None);
             return Err(AppError::Render(format!(
-                "crossfade 合成失败 (退出码 {:?}): {}",
+                "口播合成失败 (退出码 {:?}): {}",
                 out.status.code(),
                 stderr.chars().take(800).collect::<String>()
             )));
         }
 
         cleanup(&seg_paths, None);
-        // crossfade 后总时长 = 各段时长之和减去 (段数-1) * 交叉时长。
-        let out_duration = durs.iter().sum::<f64>() - (n - 1) as f64 * cf;
+        // 视频为 concat 硬切（无重叠段），实际时长 = 各段真实时长之和；音频 crossfade 略短，
+        // clip 取视频时长可避免末尾静帧。
+        let out_duration = durs.iter().sum::<f64>();
         (opts.output_path.clone(), out_duration)
     } else {
         // ---- 原 concat-demuxer 路径（行为不变） ----
