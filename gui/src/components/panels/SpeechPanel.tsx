@@ -89,6 +89,27 @@ const deleteDeletion = (
   return newKeep;
 };
 
+// 新增一个删除区间 [start,end]：从保留段中切掉该区间（重叠的保留段拆分/裁剪）。
+// 新增的删除段会出现在「片段审核」列表，并拥有与 AI 原始删除段完全相同的操作权限（微调/捕获/改为保留）。
+const addDeletion = (
+  keep: [number, number][],
+  duration: number,
+  start: number,
+  end: number,
+): [number, number][] => {
+  const s = Math.max(0, Math.min(duration, Math.min(start, end)));
+  const e = Math.max(0, Math.min(duration, Math.max(start, end)));
+  if (e - s < 1e-4) return keep; // 区间过短忽略
+  const sorted = [...keep].sort((a, b) => a[0] - b[0]).map((k) => [k[0], k[1]] as [number, number]);
+  const out: [number, number][] = [];
+  for (const [a, b] of sorted) {
+    if (b <= s || a >= e) { out.push([a, b]); continue; } // 不重叠，原样保留
+    if (a < s) out.push([a, s]); // 左段保留
+    if (b > e) out.push([e, b]); // 右段保留（中间重叠部分被删除）
+  }
+  return out;
+};
+
 export default function SpeechPanel() {
   // ── 选中素材（镜像 AIPanel 逻辑）──
   const assets = useProjectStore((s) => s.project.assets);
@@ -156,6 +177,9 @@ export default function SpeechPanel() {
   }, [keepSorted, removed]);
   const [draft, setDraft] = useState<[number, number][]>(removed);
   useEffect(() => { setDraft(removed); }, [JSON.stringify(removed)]);
+  // 新增删除片段的临时输入（起/止 + 捕获自逐帧播放头）
+  const [newDelStart, setNewDelStart] = useState<number>(0);
+  const [newDelEnd, setNewDelEnd] = useState<number>(0);
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -190,14 +214,20 @@ export default function SpeechPanel() {
     const newKeep = deleteDeletion(liveKeepSegments, result.duration, delIdx);
     commitSpeechSegments(newKeep);
   };
-  // 保留段 → 改为删除（AI 误判保留时纠正）
-  const handleConvertKeepToDelete = (keepIdx: number) => {
+  // 新增一个删除片段：从保留段中切掉 [start,end] 区间（重叠保留段拆分/裁剪）。
+  // 新增的删除段会出现在「片段审核」列表里，并拥有与 AI 原始删除段完全相同的操作权限（微调/捕获/改为保留）。
+  const handleAddDeletion = () => {
     if (!result) return;
-    const sorted = [...liveKeepSegments].sort((a, b) => a[0] - b[0]);
-    if (sorted.length <= 1) { setMsg('至少需保留一段内容，不能把全部都改为删除'); return; }
-    const newKeep = sorted.filter((_, idx) => idx !== keepIdx);
+    const s = Math.min(newDelStart, newDelEnd);
+    const e = Math.max(newDelStart, newDelEnd);
+    if (!(e - s > 1e-4)) { setMsg('新增删除片段需起止不同且区间有效'); return; }
+    const newKeep = addDeletion(liveKeepSegments, result.duration, s, e);
+    if (newKeep.length === 0) { setMsg('不能把全部内容都改为删除，至少保留一段'); return; }
     commitSpeechSegments(newKeep);
+    setMsg(`已新增删除片段 ${s.toFixed(3)}s – ${e.toFixed(3)}s`);
   };
+  const captureNewStart = () => setNewDelStart(captureSourceTime());
+  const captureNewEnd = () => setNewDelEnd(captureSourceTime());
   const handlePreview = async () => {
     if (!selectedAsset || !result) return;
     setPreviewBusy(true); setMsg(null);
@@ -475,7 +505,7 @@ export default function SpeechPanel() {
                 </div>
               </div>
               <div style={{ fontSize: 10, color: C.textSub, marginBottom: 8, lineHeight: 1.5 }}>
-                上条为原始媒体的「保留(绿)/删除(红)」分布。审核时可：① 调整删除段起止（或「捕获」逐帧播放头时间）；② 把 AI 误删的段「改为保留」；③ 把 AI 误判保留的段「改为删除」（新增的删除段拥有与原始删除段完全相同的操作权限）。
+                上条为原始媒体的「保留(绿)/删除(红)」分布。审核时可：① 调整删除段起止（或「捕获」逐帧播放头时间）；② 把 AI 误删的段「改为保留」；③ 用下方「新增删除片段」手动增加一个删除区间（拥有与原始删除段完全相同的操作权限：微调/捕获/改为保留）。
               </div>
 
               {/* 片段审核：保留段(绿)+删除段(红) 按时间合并，可互转性质；删除段可微调范围 */}
@@ -504,13 +534,7 @@ export default function SpeechPanel() {
                         <span style={{ color: C.textSub, fontVariantNumeric: 'tabular-nums' }}>{fmt(s.range[0])} – {fmt(s.range[1])}（{(s.range[1] - s.range[0]).toFixed(3)}s）</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                        {isKeep ? (
-                          <button
-                            onClick={() => s.keepIdx !== undefined && handleConvertKeepToDelete(s.keepIdx)}
-                            title="把这段从保留改为删除（AI 误判保留时纠正；新增删除段可继续微调）"
-                            style={{ ...miniBtn, color: '#ff8a8a' }}
-                          >改为删除</button>
-                        ) : (
+                        {!isKeep && (
                           <>
                             <span style={{ color: C.textSub }}>起</span>
                             <input type="number" step={0.001} value={dv[0]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'start', parseFloat(e.target.value))} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
@@ -521,10 +545,25 @@ export default function SpeechPanel() {
                             <button onClick={() => s.delIdx !== undefined && handleConvertDeleteToKeep(s.delIdx)} title="这段其实要保留：把删除段改回保留" style={{ ...miniBtn, color: C.keep }}>改为保留</button>
                           </>
                         )}
+                        {isKeep && (
+                          <span style={{ color: C.textSub, fontSize: 10 }}>（保留段可经下方新增删除片段来裁剪）</span>
+                        )}
                       </div>
                     </div>
                   );
                 })}
+              </div>
+
+              {/* 新增删除片段：手动增加一个删除区间，拥有与原始删除段相同权限 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginTop: 6, padding: '6px 0', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                <span style={{ fontSize: 11, color: C.textSub, marginRight: 2 }}>新增删除片段：</span>
+                <span style={{ color: C.textSub }}>起</span>
+                <input type="number" step={0.001} value={newDelStart} onChange={(e) => setNewDelStart(parseFloat(e.target.value) || 0)} style={numInput} />
+                <button onClick={captureNewStart} title="用预览播放头（映射回源时间）设为起点" style={miniBtn}>捕获</button>
+                <span style={{ color: C.textSub }}>止</span>
+                <input type="number" step={0.001} value={newDelEnd} onChange={(e) => setNewDelEnd(parseFloat(e.target.value) || 0)} style={numInput} />
+                <button onClick={captureNewEnd} title="用预览播放头设为终点" style={miniBtn}>捕获</button>
+                <button onClick={handleAddDeletion} style={{ ...miniBtn, color: '#ff8a8a' }}>添加删除段</button>
               </div>
 
               {/* 试听（生成临时清洗片段并内嵌播放） */}
