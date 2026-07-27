@@ -75,9 +75,11 @@ const deleteDeletion = (
   const dels = removedSpans(sorted, duration);
   const d = dels[delIndex];
   if (!d) return keep;
-  const leftKeep = sorted.find((k) => Math.abs(k[1] - d[0]) < 1e-6);
-  const rightKeep = sorted.find((k) => Math.abs(k[0] - d[1]) < 1e-6);
+  // 先在 newKeep（全新副本）里查找并就地合并，再过滤；不可在 sorted(原始引用)上查，否则
+  // 既会误改 store 原数组，又因副本≠原引用导致 filter 永不命中 → 返回与输入相同的值（按钮无反应）
   const newKeep = sorted.map((s) => [s[0], s[1]] as [number, number]);
+  const leftKeep = newKeep.find((k) => Math.abs(k[1] - d[0]) < 1e-6);
+  const rightKeep = newKeep.find((k) => Math.abs(k[0] - d[1]) < 1e-6);
   if (leftKeep && rightKeep) {
     leftKeep[1] = rightKeep[1];
     return newKeep.filter((k) => k !== rightKeep);
