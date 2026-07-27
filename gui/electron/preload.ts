@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('speech:analyze', input, optsJson),
     assemble: (input: string, optsJson: string) =>
       ipcRenderer.invoke('speech:assemble', input, optsJson),
+    separate: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('speech:separate', input, optsJson),
   },
 
   // ── 草稿 ──

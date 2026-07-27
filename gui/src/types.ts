@@ -187,6 +187,8 @@ export interface SpeechAPI {
   analyze: (input: string, optsJson: string) => Promise<{ success: boolean; data?: SpeechEditResult; error?: string }>;
   // assemble: 输入媒体路径 + {keepSegments, outputPath, crossfadeMs} JSON → 生成新文件
   assemble: (input: string, optsJson: string) => Promise<{ success: boolean; data?: SpeechAssembleResult; error?: string }>;
+  // separate: 输入媒体路径 + {mode, keep?, trackType?} JSON → 音频分离(av) / 声音分离(vocal)
+  separate: (input: string, optsJson: string) => Promise<{ success: boolean; data?: any; error?: string }>;
 }
 
 declare global { interface Window { aicut: AicutAPI } }

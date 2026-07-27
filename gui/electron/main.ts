@@ -318,6 +318,16 @@ ipcMain.handle('speech:assemble', async (_e, input: string, optsJson: string) =>
   }
 });
 
+ipcMain.handle('speech:separate', async (_e, input: string, optsJson: string) => {
+  try {
+    const stdout = await callEngine('speech', '--mode', 'separate', '--input', input ?? '', '--opts', optsJson ?? '');
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
 // ── 插件 ──
 ipcMain.handle('plugin:list', async () => {
   try {

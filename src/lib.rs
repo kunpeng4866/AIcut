@@ -193,6 +193,11 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<serde_json::Value
     speech::speech_assemble(input, opts_json)
 }
 
+/// 媒体分离：音频分离(av) 或 人声分离(vocal)。调用 Python 桥实现。
+pub fn speech_separate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
+    speech::speech_separate(input, opts_json)
+}
+
 // ═══════════════════��� N-API 绑定（条件编译） ════════════════════
 
 /// N-API 导出层。需 `cargo build --features napi` 激活。

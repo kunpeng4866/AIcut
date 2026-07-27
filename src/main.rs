@@ -242,7 +242,11 @@ fn main() {
                     Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
                     Err(e) => { eprintln!("speech assemble 失败: {}", e); process::exit(1); }
                 },
-                other => { eprintln!("未知 speech 模式: {} (可用: analyze, assemble)", other); process::exit(2); }
+                "separate" => match aicut_engine::speech_separate(&input, &opts) {
+                    Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
+                    Err(e) => { eprintln!("speech separate 失败: {}", e); process::exit(1); }
+                },
+                other => { eprintln!("未知 speech 模式: {} (可用: analyze, assemble, separate)", other); process::exit(2); }
             }
         }
         other => {

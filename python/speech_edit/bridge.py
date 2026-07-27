@@ -23,7 +23,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from core import analyze
+from core import analyze, separate
 
 
 def main(argv) -> int:
@@ -48,7 +48,12 @@ def main(argv) -> int:
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
-        result = analyze(input_path, opts)
+        # 前端 separate 操作把"分离类型"放在 opts['mode']（'av' | 'vocal'），
+        # 与引擎子命令 `--mode separate` 区分开；analyze 的 opts 不会含此值。
+        if opts.get('mode') in ('av', 'vocal'):
+            result = separate(input_path, opts)
+        else:
+            result = analyze(input_path, opts)
     except Exception as e:  # 分析失败
         sys.stdout = real_stdout
         sys.stderr.write(f"[bridge] analyze failed: {e}\n")

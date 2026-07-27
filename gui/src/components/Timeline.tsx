@@ -24,6 +24,9 @@ const pathToUrl = (path: string): string => {
   return `aicut-asset:///${normalized}`;
 };
 
+// Unique id generator for new assets/clips created by separation.
+const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
 // Per-track-type accent colors.
 const TRACK_COLORS: Record<string, string> = { video: '#0f3460', audio: '#1b4332', text: '#3d2645', sticker: '#4a3a1f', effect: '#2d2d2d' };
 
@@ -620,6 +623,8 @@ export default function Timeline() {
   // 仅镜像右侧的 scrollTop，确保控制按钮与轨道行始终对齐（避免两侧各滚各的）。
   const leftRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; clipId: string } | null>(null);
+  const [subMenu, setSubMenu] = useState<{ x: number; y: number } | null>(null);
+  const [separating, setSeparating] = useState(false);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState<{ time: number; trackIndex: number; yInTrack: number } | null>(null);
 
@@ -821,9 +826,96 @@ export default function Timeline() {
     setMenu({ x: e.clientX, y: e.clientY, trackId, clipId });
   };
 
+  // 音频分离（av）：把视频片段拆成「仅视频」素材 + 一条「仅音频」轨道片段。
+  async function handleSeparateAV(trackId: string, clipId: string) {
+    const st = useProjectStore.getState();
+    const project = st.project;
+    const track = project.tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const clip = track.clips.find(c => c.id === clipId);
+    if (!clip) return;
+    const asset = project.assets.find(a => a.id === clip.assetId);
+    if (!asset) return;
+    setSeparating(true);
+    try {
+      const res: any = await window.aicut.speech.separate(
+        asset.path, JSON.stringify({ mode: 'av', trackType: 'video', duration: asset.duration })
+      );
+      if (!res?.success) throw new Error(res?.error || '分离失败');
+      const d = res.data;
+      const dur = d.duration || asset.duration || 5;
+      // 视频-only 素材，替换原片段挂载
+      const vidId = uid('asset');
+      st.addAsset({ id: vidId, type: 'video', path: d.videoOnlyPath, duration: dur,
+                    width: asset.width, height: asset.height, codec: asset.codec, fps: asset.fps });
+      st.updateClip(trackId, clipId, { assetId: vidId });
+      // 音频-only 素材 + 对齐的新音频片段
+      const audId = uid('asset');
+      st.addAsset({ id: audId, type: 'audio', path: d.audioOnlyPath, duration: dur });
+      const audioTrack = useProjectStore.getState().project.tracks.find(t => t.type === 'audio');
+      const atId = audioTrack ? audioTrack.id : useProjectStore.getState().addTrack('audio');
+      st.addClip(atId, {
+        id: uid('clip'), assetId: audId,
+        src_range: { start: clip.src_range.start, end: clip.src_range.end },
+        timelineIn: clip.timelineIn, timelineOut: clip.timelineOut,
+        transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
+        volume: 1, speed: 1, effects: [], masks: [], filters: [], keyframes: {},
+      });
+      setMenu(null); setSubMenu(null);
+    } catch (e: any) {
+      console.error('音频分离失败', e);
+      alert('音频分离失败：' + (e?.message || e));
+    } finally {
+      setSeparating(false);
+    }
+  }
+
+  // 声音分离（vocal）：视频轨替换为人声/伴奏 stem；音频轨则替换并钳制片段长度。
+  async function handleVocalSplit(trackId: string, clipId: string, keep: 'vocals' | 'accomp') {
+    const st = useProjectStore.getState();
+    const project = st.project;
+    const track = project.tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const clip = track.clips.find(c => c.id === clipId);
+    if (!clip) return;
+    const asset = project.assets.find(a => a.id === clip.assetId);
+    if (!asset) return;
+    setSeparating(true);
+    try {
+      const res: any = await window.aicut.speech.separate(
+        asset.path, JSON.stringify({ mode: 'vocal', keep, trackType: track.type, duration: asset.duration })
+      );
+      if (!res?.success) throw new Error(res?.error || '分离失败');
+      const d = res.data;
+      const dur = d.duration || asset.duration || 5;
+      if (track.type === 'video') {
+        const vidId = uid('asset');
+        st.addAsset({ id: vidId, type: 'video', path: d.resultPath, duration: dur,
+                      width: asset.width, height: asset.height, codec: asset.codec, fps: asset.fps });
+        st.updateClip(trackId, clipId, { assetId: vidId });
+      } else {
+        const audId = uid('asset');
+        st.addAsset({ id: audId, type: 'audio', path: d.resultPath, duration: dur });
+        // 人声/伴奏 stem 时长可能略短于原音频，钳制片段长度避免越界
+        const usedDur = Math.min(clip.timelineOut - clip.timelineIn, dur);
+        st.updateClip(trackId, clipId, {
+          assetId: audId,
+          src_range: { start: 0, end: usedDur },
+          timelineOut: clip.timelineIn + usedDur,
+        });
+      }
+      setMenu(null); setSubMenu(null);
+    } catch (e: any) {
+      console.error('声音分离失败', e);
+      alert('声音分离失败：' + (e?.message || e));
+    } finally {
+      setSeparating(false);
+    }
+  }
+
   // Close any open menu on outside click.
   useEffect(() => {
-    const close = () => { setMenu(null); setAddMenu(null); };
+    const close = () => { setMenu(null); setSubMenu(null); setAddMenu(null); };
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, []);
@@ -1037,11 +1129,38 @@ export default function Timeline() {
       {menu && (() => {
         const menuTrack = useProjectStore.getState().project.tracks.find(t => t.id === menu.trackId);
         const isLocked = menuTrack?.locked;
+        const trackType = menuTrack?.type;
+        const dis = (locked: boolean) => ({ ...menuItem, opacity: (locked || separating) ? 0.4 : 1, cursor: (locked || separating) ? 'not-allowed' : 'pointer' });
         return (
           <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 100, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
-            <div onClick={() => { if (!isLocked) { splitClip(menu.trackId, menu.clipId, currentTime); } setMenu(null); }} style={{ ...menuItem, opacity: isLocked ? 0.4 : 1, cursor: isLocked ? 'not-allowed' : 'pointer' }}>分割</div>
-            <div onClick={() => { duplicateClip(menu.trackId, menu.clipId); setMenu(null); }} style={{ ...menuItem, opacity: isLocked ? 0.4 : 1, cursor: isLocked ? 'not-allowed' : 'pointer' }}>复制</div>
-            <div onClick={() => { if (!isLocked) { removeClip(menu.trackId, menu.clipId); } setMenu(null); }} style={{ ...menuItem, opacity: isLocked ? 0.4 : 1, cursor: isLocked ? 'not-allowed' : 'pointer' }}>删除</div>
+            {trackType === 'video' && (
+              <div onClick={() => { if (!isLocked && !separating) { handleSeparateAV(menu.trackId, menu.clipId); } setMenu(null); }} style={dis(!!isLocked)}>
+                {separating ? '分离中…' : '音频分离'}
+              </div>
+            )}
+            {(trackType === 'video' || trackType === 'audio') && (
+              <div onClick={() => { if (!separating) { setSubMenu({ x: menu.x + 150, y: menu.y }); } }} style={dis(false)}>声音分离 ▸</div>
+            )}
+            <div onClick={() => { if (!isLocked) { splitClip(menu.trackId, menu.clipId, currentTime); } setMenu(null); }} style={dis(!!isLocked)}>分割</div>
+            <div onClick={() => { duplicateClip(menu.trackId, menu.clipId); setMenu(null); }} style={dis(!!isLocked)}>复制</div>
+            <div onClick={() => { if (!isLocked) { removeClip(menu.trackId, menu.clipId); } setMenu(null); }} style={dis(!!isLocked)}>删除</div>
+          </div>
+        );
+      })()}
+
+      {/* Clip context sub-menu: 声音分离（二级子菜单） */}
+      {subMenu && menu && (() => {
+        const menuTrack = useProjectStore.getState().project.tracks.find(t => t.id === (menu?.trackId ?? ''));
+        const isLocked = menuTrack?.locked;
+        const subDis = (locked: boolean) => ({ ...menuItem, opacity: (locked || separating) ? 0.4 : 1, cursor: (locked || separating) ? 'not-allowed' : 'pointer' });
+        return (
+          <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: subMenu.x, top: subMenu.y, zIndex: 101, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
+            <div onClick={() => { if (!separating) { handleVocalSplit(menu!.trackId, menu!.clipId, 'vocals'); setSubMenu(null); setMenu(null); } }} style={subDis(false)}>
+              {separating ? '处理中…' : '仅保留人声'}
+            </div>
+            <div onClick={() => { if (!separating) { handleVocalSplit(menu!.trackId, menu!.clipId, 'accomp'); setSubMenu(null); setMenu(null); } }} style={subDis(false)}>
+              {separating ? '处理中…' : '仅保留背景声'}
+            </div>
           </div>
         );
       })()}

@@ -1295,6 +1295,75 @@ def analyze(input_path: str, opts: dict) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def separate(input_path, opts):
+    """媒体分离：音频分离(av) 或 人声分离(vocal)。返回 dict（由 bridge 写 stdout 单行 JSON）。"""
+    mode = opts.get('mode')
+    out_dir = os.path.join(os.path.dirname(input_path), '.aicut_speech')
+    os.makedirs(out_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(input_path))[0]
+
+    def probe_duration(p):
+        try:
+            cp = subprocess.run([FFPROBE, '-v', 'error', '-show_entries', 'format=duration',
+                                 '-of', 'default=nw=1:nk=1', p],
+                                capture_output=True, text=True, encoding='utf-8', errors='replace')
+            s = cp.stdout.strip()
+            return float(s) if s else 0.0
+        except Exception:
+            return 0.0
+
+    if mode == 'av':
+        v_path = os.path.join(out_dir, f"{base}_video.mp4")
+        a_path = os.path.join(out_dir, f"{base}_audio.m4a")
+        # 视频-only：保留视频流、去掉音轨（copy 优先，失败回退重编码）
+        try:
+            _run_ffmpeg(["-i", input_path, "-an", "-c:v", "copy", v_path])
+        except Exception:
+            _run_ffmpeg(["-i", input_path, "-an", "-c:v", "libx264", "-crf", "18",
+                         "-pix_fmt", "yuv420p", v_path])
+        # 音频-only：提取音轨转 aac
+        _run_ffmpeg(["-i", input_path, "-vn", "-c:a", "aac", "-b:a", "192k", a_path])
+        return {"videoOnlyPath": v_path, "audioOnlyPath": a_path,
+                "duration": probe_duration(input_path)}
+
+    elif mode == 'vocal':
+        keep = opts.get('keep', 'vocals')          # 'vocals' | 'accomp'
+        track_type = opts.get('trackType', 'audio')  # 'video' | 'audio'
+        # 1) 转 16k 单声道 wav 供 demucs
+        wav16 = os.path.join(out_dir, f"{base}_16k.wav")
+        _run_ffmpeg(["-i", input_path, "-ac", "1", "-ar", "16000", wav16])
+        # 2) demucs two-stems=vocals
+        import importlib.util as _u
+        if not _u.find_spec("demucs"):
+            raise RuntimeError("demucs 未安装，无法做人声分离")
+        work = os.path.join(out_dir, "_demucs")
+        os.makedirs(work, exist_ok=True)
+        env = dict(os.environ, HF_ENDPOINT="https://hf-mirror.com", HF_HUB_DISABLE_XET="1")
+        cp = subprocess.run([sys.executable, "-m", "demucs", "--two-stems=vocals",
+                             "-n", "htdemucs", "-o", work, wav16],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            encoding='utf-8', errors='replace', env=env)
+        if cp.returncode != 0:
+            raise RuntimeError(f"demucs exit={cp.returncode}: {cp.stderr[-800:]}")
+        # Demucs 输出子目录名 = 输入文件主名（这里是 wav16 的 base，即 <源base>_16k）
+        wav_stem = os.path.splitext(os.path.basename(wav16))[0]
+        got_v = os.path.join(work, "htdemucs", wav_stem, "vocals.wav")
+        got_a = os.path.join(work, "htdemucs", wav_stem, "no_vocals.wav")
+        if not (os.path.exists(got_v) and os.path.exists(got_a)):
+            raise RuntimeError("demucs 未产出 vocals/no_vocals stem")
+        stem = got_v if keep == 'vocals' else got_a
+        if track_type == 'video':
+            out_path = os.path.join(out_dir,
+                                    f"{base}_vocals.mp4" if keep == 'vocals' else f"{base}_bg.mp4")
+            _run_ffmpeg(["-i", input_path, "-i", stem, "-map", "0:v", "-map", "1:a",
+                         "-c:v", "copy", "-c:a", "aac", "-shortest", out_path])
+            return {"resultPath": out_path, "duration": probe_duration(out_path)}
+        else:
+            return {"resultPath": stem, "duration": probe_duration(stem)}
+    else:
+        raise ValueError(f"未知 separate mode: {mode}")
+
+
 # ══════════════════════════════════════════════════════
 # 命令行自测（仅 core；正式入口见 bridge.py）
 # ══════════════════════════════════════════════════════

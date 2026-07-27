@@ -186,6 +186,49 @@ pub fn speech_analyze(input: &str, opts_json: &str) -> Result<Value, AppError> {
     Ok(v)
 }
 
+/// 调用 Python 桥对媒体做分离（音频分离 av / 人声分离 vocal）。
+///
+/// 与 `speech_analyze` 完全一致的「Rust spawn Python 桥」范式：
+/// `opts_json` 作为单个参数传给 Python，桥再把 dict 转成 stdout 单行 JSON 返回。
+pub fn speech_separate(input: &str, opts_json: &str) -> Result<Value, AppError> {
+    let py = std::env::var("AICUT_PYTHON_BIN").unwrap_or_else(|_| MANAGED_PYTHON.to_string());
+    let bridge = resolve_bridge()?;
+    let bridge_str = bridge
+        .to_str()
+        .ok_or_else(|| AppError::Render("bridge.py 路径包含非 UTF-8 字符".into()))?;
+
+    let output = Command::new(&py)
+        .env("PYTHONIOENCODING", "utf-8") // Windows 下管道 stdout 默认按本地 codepage，中文会乱码/解析失败
+        .env("PYTHONUTF8", "1")
+        // Windows 上 torch/whisper 多 OpenMP 线程易触发 0xC0000005 访问冲突 segfault，限单线程保稳定
+        .env("OMP_NUM_THREADS", "1")
+        .env("MKL_NUM_THREADS", "1")
+        .arg(bridge_str)
+        .arg(input)
+        .arg(opts_json)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 Python ({})：{}", py, e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Render(format!(
+            "speech separate 失败 (退出码 {:?}): {}",
+            output.status.code(),
+            stderr.chars().take(1000).collect::<String>()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+        AppError::Render(format!(
+            "speech separate 输出不是合法 JSON: {} (原始前 200 字符: {})",
+            e,
+            &stdout.chars().take(200).collect::<String>()
+        ))
+    })?;
+    Ok(v)
+}
+
 /// 按保留区间切割源视频并 concat 合成为最终口播成片。
 pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> {
     let opts: SpeechAssembleOptions = serde_json::from_str(opts_json)
