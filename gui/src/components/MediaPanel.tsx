@@ -59,10 +59,11 @@ export default function MediaPanel() {
             width: info?.width || 1920,
             height: info?.height || 1080,
             codec: info?.codec || 'h264',
+            fps: info?.fps || 30,
           });
         } catch {
           // 探测失败用默认值
-          addAsset({ id: uid('asset'), type: 'video', path, duration: 5, width: 1920, height: 1080, codec: 'h264' });
+          addAsset({ id: uid('asset'), type: 'video', path, duration: 5, width: 1920, height: 1080, codec: 'h264', fps: 30 });
         }
       }
     } finally {

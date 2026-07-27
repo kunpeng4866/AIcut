@@ -2,7 +2,7 @@
 import type { SubtitleGenResult } from './aiTypes';
 
 export interface CanvasConfig { width: number; height: number; fps?: number; sample_rate?: number }
-export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string }
+export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number }
 export interface RangeConfig { start: number; end: number }
 // 文字片段内容

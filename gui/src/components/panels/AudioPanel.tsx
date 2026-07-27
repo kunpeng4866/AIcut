@@ -90,6 +90,7 @@ export default function AudioPanel() {
           width: res.info?.width || 0,
           height: res.info?.height || 0,
           codec: res.info?.codec || '',
+          fps: res.info?.fps || 30,
         };
         useProjectStore.getState().addAsset(asset);
       }

@@ -2,7 +2,7 @@
 // 多轨道叠加：查找 currentTime 下所有可见 video 轨道的活跃 clip，按 track.order 从底到顶叠加
 // 音频轨道：独立 <audio> 元素播放，受静音/独奏控制（不受可见性影响）
 // WebGPU 不可用时回退到 HTML5 video（渲染所有活跃视频轨道，按层级叠加）
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
@@ -157,6 +157,27 @@ export default function PreviewCanvas() {
   const setCanvasSize = useProjectStore((s) => s.setCanvasSize);
   const { currentTime, isPlaying, togglePlay, setCurrentTime } = useUIStore();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // 当前帧率：播放头所在主视频轨 clip 优先取其素材 fps，否则回退到工程画布 fps
+  const activeClip = useMemo(() => {
+    const t = currentTime;
+    for (const tr of project.tracks) {
+      if (tr.type !== 'video') continue;
+      for (const c of tr.clips) {
+        if (t >= c.timelineIn && t < c.timelineOut) return c;
+      }
+    }
+    // 回退：任意第一个有素材的 video clip
+    for (const tr of project.tracks) {
+      if (tr.type !== 'video') continue;
+      if (tr.clips.length) return tr.clips[0];
+    }
+    return null;
+  }, [project, currentTime]);
+  const activeFps =
+    (activeClip ? project.assets.find((a) => a.id === activeClip.assetId)?.fps : undefined) ??
+    project.canvas.fps ??
+    30;
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
   // 音量放大支持：HTMLMediaElement.volume 硬限 [0,1]，而 clip.volume / track.volume 可达 2，
@@ -892,6 +913,39 @@ export default function PreviewCanvas() {
 
   const handleTogglePlay = useCallback(() => { audioCtxRef.current?.resume?.(); togglePlay(); }, [togglePlay]);
 
+  // 逐帧步进：暂停后精确到上/下一帧。常规（无变速/冻结）走「源帧」精确：
+  // 取当前源时间 → 源帧 ±1 → 逆映射回时间轴；变速片段回退到时间轴近似步进。
+  const stepFrame = useCallback((dir: number) => {
+    if (useUIStore.getState().isPlaying) useUIStore.getState().togglePlay();
+    const remap = activeClip?.time_remap;
+    const hasRemap = !!(remap && (remap.curve?.length || remap.freeze || remap.reverse));
+    let newT: number;
+    if (activeClip && !hasRemap) {
+      const srcLen = activeClip.src_range.end - activeClip.src_range.start;
+      const curSrc = clipSourceTime(currentTime, activeClip).srcT;
+      const f = Math.round(curSrc * activeFps) + dir;
+      const newSrc = Math.max(0, Math.min(srcLen, f / activeFps));
+      const speed = activeClip.speed ?? 1;
+      newT = activeClip.timelineIn + (newSrc - activeClip.src_range.start) / speed;
+    } else {
+      const f = Math.round(currentTime * activeFps) + dir;
+      newT = f / activeFps;
+    }
+    setCurrentTime(Math.max(0, Math.min(totalDuration, newT)));
+  }, [currentTime, activeClip, activeFps, totalDuration, setCurrentTime]);
+
+  // 键盘逐帧：暂停态下 ← / , 上一帧，→ / . 下一帧；输入框聚焦时不触发
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as any).isContentEditable)) return;
+      if (e.key === 'ArrowLeft' || e.key === ',') { e.preventDefault(); stepFrame(-1); }
+      else if (e.key === 'ArrowRight' || e.key === '.') { e.preventDefault(); stepFrame(1); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [stepFrame]);
+
   // 进度条点击/拖拽跳转
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1157,12 +1211,25 @@ export default function PreviewCanvas() {
 
       {/* 播放控制栏 */}
       <div style={theme.controls}>
+        <button style={theme.btn} onClick={() => stepFrame(-1)} title="上一帧（暂停时 ← 或 ,）">⏮▏</button>
+        <button style={theme.btn} onClick={() => stepFrame(1)} title="下一帧（暂停时 → 或 .）">▏⏭</button>
+
         <button style={theme.btn} onClick={handleTogglePlay} title={isPlaying ? '暂停' : '播放'}>
           {isPlaying ? '⏸' : '▶'}
         </button>
 
         <div style={theme.timecode}>
           {formatTC(currentTime)} / {formatTC(totalDuration)}
+        </div>
+
+        {/* 帧号显示：常规片段显示「源帧序号 / 源总帧数 @ fps」（基于素材源时间，与删除明细捕获同源） */}
+        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#9fe', whiteSpace: 'nowrap', marginLeft: 8 }}>
+          {(() => {
+            const srcTime = activeClip ? clipSourceTime(currentTime, activeClip).srcT : currentTime;
+            const srcDur = activeClip ? (activeClip.src_range.end - activeClip.src_range.start) : totalDuration;
+            const label = activeClip ? '源帧' : '帧';
+            return <>{label} {Math.round(srcTime * activeFps)} / {Math.round(srcDur * activeFps)} @ {Math.round(activeFps)}fps</>;
+          })()}
         </div>
 
         {/* 进度条 */}

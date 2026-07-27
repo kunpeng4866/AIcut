@@ -29,6 +29,12 @@ interface UIState {
   // 人工精修：仅更新 keepSegments（拖动边界时每帧调用，纯 UI 状态、不入工程历史）
   setSpeechOverlaySegments: (segs: [number, number][]) => void;
   clearSpeechOverlay: () => void;
+  // 删除明细编辑撤销栈：每次离散编辑（改起止/删段）前压当前 keepSegments，可逐步撤销
+  speechUndoStack: [number, number][][];
+  // 提交一次删除明细编辑：先压栈当前值，再写入新 keepSegments
+  commitSpeechSegments: (segs: [number, number][]) => void;
+  // 撤销最近一次删除明细编辑
+  undoSpeechSegments: () => void;
 
   // 可拖拽调节的面板尺寸
   leftPanelWidth: number;    // 左面板宽度（默认 280）
@@ -70,9 +76,22 @@ export const useUIStore = create<UIState>((set) => ({
   previewHeight: 1080,
 
   speechOverlay: null,
-  setSpeechOverlay: (o) => set({ speechOverlay: o }),
+  speechUndoStack: [],
+  setSpeechOverlay: (o) => set({ speechOverlay: o, speechUndoStack: [] }),
   setSpeechOverlaySegments: (segs) => set((s) => s.speechOverlay ? { speechOverlay: { ...s.speechOverlay, keepSegments: segs } } : {}),
-  clearSpeechOverlay: () => set({ speechOverlay: null }),
+  clearSpeechOverlay: () => set({ speechOverlay: null, speechUndoStack: [] }),
+  commitSpeechSegments: (segs) => set((s) => {
+    if (!s.speechOverlay) return {};
+    const stack = [...s.speechUndoStack, s.speechOverlay.keepSegments];
+    if (stack.length > 50) stack.shift();
+    return { speechUndoStack: stack, speechOverlay: { ...s.speechOverlay, keepSegments: segs } };
+  }),
+  undoSpeechSegments: () => set((s) => {
+    if (!s.speechOverlay || s.speechUndoStack.length === 0) return {};
+    const stack = [...s.speechUndoStack];
+    const prev = stack.pop() as [number, number][];
+    return { speechUndoStack: stack, speechOverlay: { ...s.speechOverlay, keepSegments: prev } };
+  }),
 
   leftPanelWidth: 280,
   rightPanelWidth: 280,

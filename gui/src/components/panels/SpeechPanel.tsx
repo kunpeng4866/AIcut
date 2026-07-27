@@ -6,7 +6,7 @@
 //   3) 展示压缩统计 + 保留/删除时间轴可视化
 //   4) 点「生成清洗片段」调用 window.aicut.speech.assemble → 落轨（原片段保留）
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
 import type { ClipConfig, SpeechEditOptions, SpeechEditResult, SpeechAssembleOptions } from '../../types';
@@ -26,16 +26,6 @@ const C = {
   removed: '#fca5a5',
 };
 
-// 删除类型 → 中文标签 + 颜色（用于明细列表）
-const DETAIL_LABELS: Record<string, { label: string; color: string }> = {
-  text_filler:    { label: '语气词',    color: '#fca5a5' },
-  isolated_noise: { label: '孤立噪声',  color: '#fca5a5' },
-  gap_breath:     { label: '气声/咳嗽', color: '#f0abfc' },
-  transient:      { label: '瞬态/咂嘴', color: '#fcd34d' },
-  intra_keep:     { label: '段内噪声',  color: '#fca5a5' },
-  manual_exclude: { label: '手动排除',  color: '#94a3b8' },
-};
-
 // 由 keepSegments 求补集，得到「被删除」区间 [start,end]
 const removedSpans = (keep: [number, number][], duration: number): [number, number][] => {
   const sorted = [...keep].sort((a, b) => a[0] - b[0]);
@@ -47,6 +37,54 @@ const removedSpans = (keep: [number, number][], duration: number): [number, numb
   }
   if (cursor < duration) spans.push([cursor, duration]);
   return spans;
+};
+
+// 调整某个删除区间的起/止（patch.start / patch.end），返回新的 keepSegments
+// 删除区间 d 的左侧保留段 end == d[0]、右侧保留段 start == d[1]；
+// 改 d[0] → 两侧保留段边界都移到新值；改 d[1] 同理；首尾删除段只有一侧保留段。
+const patchDeletion = (
+  keep: [number, number][],
+  duration: number,
+  delIndex: number,
+  patch: { start?: number; end?: number },
+): [number, number][] => {
+  const sorted = [...keep].sort((a, b) => a[0] - b[0]);
+  const dels = removedSpans(sorted, duration);
+  const d = dels[delIndex];
+  if (!d) return keep;
+  let ns = patch.start !== undefined ? patch.start : d[0];
+  let ne = patch.end !== undefined ? patch.end : d[1];
+  ns = Math.max(0, Math.min(ns, ne - 0.001));
+  ne = Math.min(duration, Math.max(ne, ns + 0.001));
+  const newKeep = sorted.map((s) => [s[0], s[1]] as [number, number]);
+  const val = patch.start !== undefined ? ns : ne;
+  const leftKeep = newKeep.find((k) => Math.abs(k[1] - d[0]) < 1e-6);
+  const rightKeep = newKeep.find((k) => Math.abs(k[0] - d[1]) < 1e-6);
+  if (leftKeep) leftKeep[1] = val;
+  if (rightKeep) rightKeep[0] = val;
+  return newKeep;
+};
+
+// 删除某个删除区间（把该区间并入保留：相邻保留段合并 / 延长到首尾）
+const deleteDeletion = (
+  keep: [number, number][],
+  duration: number,
+  delIndex: number,
+): [number, number][] => {
+  const sorted = [...keep].sort((a, b) => a[0] - b[0]);
+  const dels = removedSpans(sorted, duration);
+  const d = dels[delIndex];
+  if (!d) return keep;
+  const leftKeep = sorted.find((k) => Math.abs(k[1] - d[0]) < 1e-6);
+  const rightKeep = sorted.find((k) => Math.abs(k[0] - d[1]) < 1e-6);
+  const newKeep = sorted.map((s) => [s[0], s[1]] as [number, number]);
+  if (leftKeep && rightKeep) {
+    leftKeep[1] = rightKeep[1];
+    return newKeep.filter((k) => k !== rightKeep);
+  }
+  if (leftKeep && !rightKeep) { leftKeep[1] = duration; return newKeep; }
+  if (!leftKeep && rightKeep) { rightKeep[0] = 0; return newKeep; }
+  return newKeep;
 };
 
 export default function SpeechPanel() {
@@ -89,6 +127,79 @@ export default function SpeechPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+
+  // ── 删除明细编辑 / 试听 / 撤销 ──
+  const currentTime = useUIStore((s) => s.currentTime);
+  const commitSpeechSegments = useUIStore((s) => s.commitSpeechSegments);
+  const undoSpeechSegments = useUIStore((s) => s.undoSpeechSegments);
+  const speechUndoStack = useUIStore((s) => s.speechUndoStack);
+  const tracks = useProjectStore((s) => s.project.tracks);
+
+  const removed = useMemo(
+    () => (result ? removedSpans(liveKeepSegments, result.duration) : []),
+    [result, liveKeepSegments],
+  );
+  const [draft, setDraft] = useState<[number, number][]>(removed);
+  useEffect(() => { setDraft(removed); }, [JSON.stringify(removed)]);
+
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+
+  // 把预览播放头(时间轴时间)映射回选中素材的源时间（供「捕获」按钮取逐帧时间）
+  const captureSourceTime = (): number => {
+    if (!selectedAsset || !result) return currentTime;
+    const clip = tracks.flatMap((t) => t.clips).find((c) => c.assetId === selectedAsset.id);
+    let t = currentTime;
+    if (clip) t = currentTime - clip.timelineIn + clip.src_range.start;
+    return Math.max(0, Math.min(result.duration, t));
+  };
+  const updateDraft = (i: number, which: 'start' | 'end', val: number) =>
+    setDraft((prev) => prev.map((r, idx) => (idx === i ? (which === 'start' ? [val, r[1]] : [r[0], val]) : r)));
+  const commitDraft = (i: number) => {
+    if (!result) return;
+    const dr = draft[i];
+    if (!dr || !isFinite(dr[0]) || !isFinite(dr[1])) return;
+    const newKeep = patchDeletion(liveKeepSegments, result.duration, i, { start: dr[0], end: dr[1] });
+    commitSpeechSegments(newKeep);
+  };
+  const captureTo = (i: number, which: 'start' | 'end') => {
+    if (!result) return;
+    const t = captureSourceTime();
+    setDraft((prev) => prev.map((r, idx) => (idx === i ? (which === 'start' ? [t, r[1]] : [r[0], t]) : r)));
+    const newKeep = patchDeletion(liveKeepSegments, result.duration, i, which === 'start' ? { start: t } : { end: t });
+    commitSpeechSegments(newKeep);
+  };
+  const handleDeleteSegment = (i: number) => {
+    if (!result) return;
+    const newKeep = deleteDeletion(liveKeepSegments, result.duration, i);
+    commitSpeechSegments(newKeep);
+  };
+  const handlePreview = async () => {
+    if (!selectedAsset || !result) return;
+    setPreviewBusy(true); setMsg(null);
+    try {
+      const outputPath = selectedAsset.path.replace(/\.[^.]+$/, '_preview.mp4');
+      const asmOpts: SpeechAssembleOptions = {
+        keepSegments: liveKeepSegments,
+        outputPath,
+        crossfadeMs,
+        declick,
+        deess,
+        normalize,
+        ...('separated' in result && result.separated
+          ? { separated: true, vocalPath: result.vocalPath, accompPath: result.accompPath, musicSegments: result.musicSegments }
+          : {}),
+      };
+      const res = await window.aicut.speech.assemble(selectedAsset.path, JSON.stringify(asmOpts));
+      if (res.success && res.data) setPreviewUrl(res.data.outputPath);
+      else setMsg(res.error || '试听生成失败');
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
+  const numInput: React.CSSProperties = { width: 74, background: '#0b1a2e', color: C.textMain, border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 4px', fontSize: 11 };
+  const miniBtn: React.CSSProperties = { fontSize: 11, padding: '2px 6px', background: C.control, color: C.textMain, border: `1px solid ${C.border}`, borderRadius: 3, cursor: 'pointer' };
 
   // ── 分析 ──
   const handleAnalyze = async () => {
@@ -158,6 +269,7 @@ export default function SpeechPanel() {
           type: original.type, // 'video' | 'audio'
           path: res2.data.outputPath,
           duration: res2.data.duration,
+          fps: original.fps,
         };
         useProjectStore.getState().addAsset(asset);
         const track = useProjectStore.getState().getMainVideoTrack();
@@ -189,9 +301,6 @@ export default function SpeechPanel() {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
-
-  // 删除区间（保留备用；当前可视化直接用 keepSegments 与 detail）
-  const removed = result ? removedSpans(liveKeepSegments, result.duration) : [];
 
   return (
     <div style={{ padding: 12, color: C.textMain, fontSize: 13, height: '100%', overflowY: 'auto', boxSizing: 'border-box' }}>
@@ -345,27 +454,62 @@ export default function SpeechPanel() {
                 上条为原始媒体的「保留(绿)/删除(红)」分布，可对照判断是否误删、删得是否精确。
               </div>
 
-              {/* 删除明细（按时间，带起止秒数与类型） */}
-              <div style={{ fontSize: 11, color: C.textSub, marginBottom: 4 }}>
-                删除明细（按时间，共 {result.detail.length} 段）
+              {/* 删除明细（可编辑：调起止 / 捕获逐帧时间 / 删除此段） */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 11, color: C.textSub }}>删除明细（共 {removed.length} 段，可编辑）</span>
+                <button
+                  onClick={undoSpeechSegments}
+                  disabled={speechUndoStack.length === 0}
+                  style={{ fontSize: 11, padding: '2px 8px', background: speechUndoStack.length ? C.panel : '#333', color: speechUndoStack.length ? C.textMain : '#777', border: `1px solid ${C.border}`, borderRadius: 4, cursor: speechUndoStack.length ? 'pointer' : 'default' }}
+                >
+                  撤销{speechUndoStack.length > 0 ? `(${speechUndoStack.length})` : ''}
+                </button>
               </div>
-              <div style={{ maxHeight: 150, overflowY: 'auto', marginBottom: 10, fontSize: 11 }}>
-                {result.detail.length === 0 && (
+              <div style={{ maxHeight: 190, overflowY: 'auto', marginBottom: 10, fontSize: 11 }}>
+                {removed.length === 0 && (
                   <div style={{ color: C.textSub, padding: '4px 0' }}>无删除区域（保留全部内容）</div>
                 )}
-                {result.detail.map((d, i) => {
-                  const info = DETAIL_LABELS[d.type] || { label: d.type, color: C.removed };
+                {removed.map((d, i) => {
+                  const fps = selectedAsset?.fps ?? 30;
+                  const fmt = (t: number) => `${t.toFixed(3)}s（帧${Math.round(t * fps)}）`;
+                  const dv = draft[i] ?? d;
                   return (
-                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: info.color, display: 'inline-block', flexShrink: 0 }} />
-                      <span style={{ color: C.textMain, minWidth: 62 }}>{info.label}</span>
-                      <span style={{ color: C.textSub, fontVariantNumeric: 'tabular-nums' }}>
-                        {d.start.toFixed(2)}–{d.end.toFixed(2)}s（{(d.end - d.start).toFixed(2)}s）
-                      </span>
+                    <div key={i} style={{ padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: C.removed, display: 'inline-block', flexShrink: 0 }} />
+                        <span style={{ color: C.textMain, minWidth: 56 }}>删除段 {i + 1}</span>
+                        <span style={{ color: C.textSub, fontVariantNumeric: 'tabular-nums' }}>{fmt(d[0])} – {fmt(d[1])}（{(d[1] - d[0]).toFixed(3)}s）</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                        <span style={{ color: C.textSub }}>起</span>
+                        <input type="number" step={0.001} value={dv[0]} onChange={(e) => updateDraft(i, 'start', parseFloat(e.target.value))} onBlur={() => commitDraft(i)} style={numInput} />
+                        <button onClick={() => captureTo(i, 'start')} title="用预览播放头（已映射回源时间）设为起点" style={miniBtn}>捕获</button>
+                        <span style={{ color: C.textSub }}>止</span>
+                        <input type="number" step={0.001} value={dv[1]} onChange={(e) => updateDraft(i, 'end', parseFloat(e.target.value))} onBlur={() => commitDraft(i)} style={numInput} />
+                        <button onClick={() => captureTo(i, 'end')} title="用预览播放头设为终点" style={miniBtn}>捕获</button>
+                        <button onClick={() => handleDeleteSegment(i)} title="删除此删除段（把该区间并入保留）" style={{ ...miniBtn, color: '#ff8a8a' }}>删段</button>
+                      </div>
                     </div>
                   );
                 })}
               </div>
+
+              {/* 试听（生成临时清洗片段并内嵌播放） */}
+              <button
+                onClick={handlePreview}
+                disabled={previewBusy}
+                style={{
+                  width: '100%', padding: '8px 10px', marginBottom: 8, background: C.control, color: C.textMain,
+                  border: `1px solid ${C.border}`, borderRadius: 4, cursor: previewBusy ? 'default' : 'pointer', fontSize: 13,
+                }}
+              >
+                {previewBusy ? '生成试听中…' : '试听清洗结果'}
+              </button>
+              {previewUrl && (
+                <div style={{ marginBottom: 8 }}>
+                  <audio controls src={previewUrl} style={{ width: '100%' }} />
+                </div>
+              )}
 
               {/* 生成清洗片段 */}
               <button

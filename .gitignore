@@ -26,6 +26,9 @@ tmp_corrupted_backup/
 # 口播剪辑：Demucs 分离出的 stem 缓存（生成物，非源码）
 .aicut_speech/
 
+# 口播剪辑：分离重组本地测试产物（生成物，非源码）
+tmp_sep_test/
+
 # Python 缓存
 __pycache__/
 **/__pycache__/
