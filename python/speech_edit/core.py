@@ -457,10 +457,107 @@ def detect_transients(wav_path: str, gaps: list, words: list,
 # [4e] 非语音声音事件检测（独立于 VAD，扫全音频）
 # ══════════════════════════════════════════════════════
 
+def _has_silence_border(au: np.ndarray, sr: int, s: float, e: float,
+                        margin: float = 0.05, floor_ratio: float = 0.4) -> bool:
+    """事件某一侧 margin 内是否存在静音（能量低于事件峰值*floor_ratio）。
+
+    用于安全阀：只有**紧邻静音**的声音事件才是独立非语音（咳嗽/提示音/
+    咂嘴），可以放心推过词边界删除；而嵌在连续语音里的元音两侧都是语音、
+    无静音边，必须保留（避免切碎朗读）。
+    """
+    i0, i1 = int(s * sr), int(e * sr)
+    if i1 <= i0:
+        return False
+    peak = float(np.abs(au[i0:i1]).max()) + 1e-9
+    floor = peak * floor_ratio
+    a0 = max(0, int((s - margin) * sr)); a1 = max(0, int(s * sr))
+    if a1 > a0 and float(np.abs(au[a0:a1]).max()) < floor:
+        return True
+    b0 = min(len(au), i1); b1 = min(len(au), int((e + margin) * sr))
+    if b1 > b0 and float(np.abs(au[b0:b1]).max()) < floor:
+        return True
+    return False
+
+
+def _word_protected_ivs(words: list, vad_regs: list, word_pad: float,
+                        events: list, au: np.ndarray, sr: int,
+                        edge: float = 0.12) -> list:
+    """词对齐保护区间（删除决策安全阀）。
+
+    默认 = 每个词区间向外扩 word_pad。两层收窄，逐步暴露被 Whisper 吞掉、
+    但其实是非语音的声音事件：
+
+    1) ∩ VAD 语音区：Whisper 常把静音/非语音拉长进词时间戳（过长），
+       而 silero VAD 不会，故把保护区间收窄为「词区间 ∩ VAD 语音区」。
+    2) 事件边缘优先（仅对**孤立且局部**的声音事件生效）：
+       - 局部：至多重叠 1 个词（跨多词事件=连续语音元音，维持整词保护）。
+       - 孤立：**事件某一侧紧邻静音**（`_has_silence_border`）→ 是独立非
+         语音（咳嗽/提示音/咂嘴），可信其优先于词边界，把词保护边界推过
+         该事件并删除；嵌在语音里、两侧皆语音的元音无静音边 → 保留。
+       这是"只删独立非语音、绝不切朗读元音"的关键防回归原则。
+    """
+    def _n_overlap(ev):
+        s, e = ev
+        cnt = 0
+        for w in words:
+            ws, we = max(0.0, w["start"] - word_pad), w["end"] + word_pad
+            if not (e <= ws or s >= we):
+                cnt += 1
+        return cnt
+
+    ivs = []
+    for w in words:
+        s = max(0.0, w["start"] - word_pad)
+        e = w["end"] + word_pad
+        # 1) ∩ VAD 语音区
+        if vad_regs:
+            segs = [(max(s, vs), min(e, ve))
+                    for (vs, ve) in vad_regs
+                    if min(e, ve) - max(s, vs) > 1e-3]
+            if segs:
+                s, e = segs[0][0], segs[-1][1]
+        # 2) 孤立局部事件：有静音边才推词边界
+        for (es, ee) in events:
+            if _n_overlap((es, ee)) > 1:
+                continue  # 跨多词：维持整词保护
+            if not _has_silence_border(au, sr, es, ee):
+                continue  # 嵌在语音里：维持整词保护
+            if ee > s and es <= s + edge:       # 落在词起始边缘
+                s = max(s, ee)
+            elif es < e and ee >= e - edge:     # 落在词结束边缘
+                e = min(e, es)
+        if e > s:
+            ivs.append((s, e))
+    return _union(ivs)
+
+
+def _subtract_intervals(events: list, protected: list) -> list:
+    """从声音事件里挖掉与 protected 重叠的部分，保留不重叠的残余段。
+
+    取代原『重叠即整段丢弃』硬开关：只删没有词覆盖的残余，更安全——
+    被保护区间覆盖的部分（真实朗读）绝不删，仅删露出边界的非语音事件。
+    """
+    prot = _union(protected)
+    out = []
+    for (s, e) in events:
+        cur = s
+        for (ps, pe) in prot:
+            if pe <= cur or ps >= e:
+                continue
+            if ps > cur:
+                out.append((cur, ps))
+            cur = max(cur, pe)
+            if cur >= e:
+                break
+        if cur < e:
+            out.append((cur, e))
+    return [(s, e) for s, e in out if e - s >= 0.04]
+
+
 def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
                  onset_factor: float = 4.5, min_dur: float = 0.10,
                  max_dur: float = 0.7, min_voiced: float = 0.08,
-                 word_pad: float = 0.12) -> list:
+                 word_pad: float = 0.12, vad_regs: list = None) -> list:
     """全音频扫描短促浊音爆发（咳嗽 / 清嗓 / 咳痰）。
 
     独立于 VAD 间隙：即便 silero VAD 把咳嗽判成语音并并入相邻朗读段，
@@ -502,18 +599,18 @@ def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
             i += 1
     if not events:
         return []
-    # 仅保留无任何词对齐的段
-    word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
-                       for w in words])
-    out = [(s, e) for s, e in events
-           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
+    # 减法式安全阀：挖掉与词对齐保护区间重叠的部分，只删无词覆盖的残余
+    # （保护区间默认=词区间外扩 word_pad；提供 vad_regs 时收窄为 词∩VAD +
+    #  事件边缘优先，暴露被 Whisper 吞掉的非语音声音事件）
+    prot = _word_protected_ivs(words, vad_regs, word_pad, events, au, sr)
+    out = _subtract_intervals(events, prot)
     return _union(out)
 
 
 def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int = 15,
                      flat_thr: float = 0.12, min_rel_energy: float = 1.5,
                      min_dur: float = 0.05, max_dur: float = 0.6,
-                     word_pad: float = 0.08) -> list:
+                     word_pad: float = 0.08, vad_regs: list = None) -> list:
     """全音频扫描短时强纯音事件（系统提示音 / 蜂鸣 / 按键音 / 门铃）。
 
     独立于 VAD：提示音常被 VAD 连同相邻朗读一起判为语音并入 keep，且现有
@@ -558,10 +655,8 @@ def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int =
         i = j + 1
     if not events:
         return []
-    word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
-                       for w in words])
-    out = [(s, e) for s, e in events
-           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
+    prot = _word_protected_ivs(words, vad_regs, word_pad, events, au, sr)
+    out = _subtract_intervals(events, prot)
     return _union(out)
 
 
@@ -1095,10 +1190,12 @@ def analyze(input_path: str, opts: dict) -> dict:
         #         因此不套 _apply_min_gap。
         cough_events = detect_cough(work_wav, words, word_pad=word_pad,
                                     onset_factor=cough_onset_factor,
-                                    min_voiced=cough_min_voiced)
+                                    min_voiced=cough_min_voiced,
+                                    vad_regs=speech_regs)
         print(f"  4e. 咳嗽/清嗓(浊音爆发): {len(cough_events)} 段", flush=True)
         tonal_events = detect_tonal_sfx(work_wav, words, word_pad=word_pad,
-                                        flat_thr=tonal_flat_thr, max_dur=tonal_max_dur)
+                                        flat_thr=tonal_flat_thr, max_dur=tonal_max_dur,
+                                        vad_regs=speech_regs)
         print(f"  4f. 提示音/纯音事件: {len(tonal_events)} 段", flush=True)
         sound_events = _union(cough_events + tonal_events)
 
