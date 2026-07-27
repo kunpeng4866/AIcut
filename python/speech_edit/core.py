@@ -155,19 +155,35 @@ def neural_separate(wav16_path: str, out_dir: str, cache_dir: str):
 # [2] Whisper 词级转写
 # ══════════════════════════════════════════════════════
 
-def transcribe(wav_path: str, model_size: str = "base") -> tuple:
-    """返回 (words, duration, asr_model)。words: [{word,start,end}]"""
+def transcribe(wav_path: str, model_size: str = "base", language: str = None) -> tuple:
+    """返回 (words, duration, asr_model)。words: [{word,start,end}]
+
+    language=None 时交给 faster-whisper 自动检测（泛化：支持英文 / 中英混说 / 方言样本，
+    不再硬编码中文导致非中文样本词缺失 → 级联误删）。
+    """
     from faster_whisper import WhisperModel
+    # 先估算时长（即便转写失败也能让后续 VAD 兜底走通）
+    dur = 0.0
+    try:
+        au, sr = _read_wav(wav_path)
+        dur = len(au) / sr
+    except Exception:
+        dur = 0.0
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segs, info = model.transcribe(wav_path, beam_size=5, language="zh", word_timestamps=True)
-    words = []
-    for seg in segs:
-        for w in (seg.words or []):
-            words.append({"word": w.word, "start": float(w.start), "end": float(w.end)})
-    dur = float(getattr(info, "duration", 0) or 0)
-    return words, dur, model
+    try:
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        segs, info = model.transcribe(wav_path, beam_size=5, language=language, word_timestamps=True)
+        words = []
+        for seg in segs:
+            for w in (seg.words or []):
+                words.append({"word": w.word, "start": float(w.start), "end": float(w.end)})
+        dur = float(getattr(info, "duration", 0) or 0) or dur
+        return words, dur, model
+    except Exception as e:
+        sys.stderr.write(f"[transcribe] 转写失败({e})，降级为无词（仅 VAD 路径）\n")
+        return [], dur, None
+
 
 
 # ══════════════════════════════════════════════════════
@@ -176,17 +192,24 @@ def transcribe(wav_path: str, model_size: str = "base") -> tuple:
 
 def vad_speech_regions(wav_path: str, threshold: float = 0.25,
                        min_speech_ms: int = 80, min_silence_ms: int = 80,
-                       speech_pad_ms: int = 40) -> list:
-    """帧级 VAD，返回候选语音区间 [(s,e)]。"""
+                       speech_pad_ms: int = 40, neg_threshold: float = None) -> list:
+    """帧级 VAD，返回候选语音区间 [(s,e)]。
+
+    neg_threshold=None 时用 silero 默认（=threshold）；显式传入可拉大升/降阈迟滞，
+    稳定渐入渐出人声的段边界（泛化钩子，默认行为不变）。
+    """
     from silero_vad import load_silero_vad, get_speech_timestamps
     au, sr = _read_wav(wav_path)
     model = load_silero_vad()
-    ts = get_speech_timestamps(
-        au, model, sampling_rate=sr, threshold=threshold,
+    kwargs = dict(
+        sampling_rate=sr, threshold=threshold,
         min_speech_duration_ms=min_speech_ms,
         min_silence_duration_ms=min_silence_ms,
         speech_pad_ms=speech_pad_ms,
     )
+    if neg_threshold is not None:
+        kwargs["neg_threshold"] = neg_threshold
+    ts = get_speech_timestamps(au, model, **kwargs)
     return [(float(t["start"]) / sr, float(t["end"]) / sr) for t in ts]
 
 
@@ -472,6 +495,11 @@ def detect_intra_keep(wav_path: str, keep: list, words: list,
     在保留段内部，找出词保护范围之外的子段中有填充词/噪声特征的部分。
     非对称策略: 词前紧(pad_head)抓填充词，词后松(pad_tail)保尾音。
     """
+    # 守卫：Whisper 返回 0 词（语言错配 / 纯音乐 / 转写失败）时，不应把整段保留区
+    # 送进 _gap_is_filler 判定（否则 voiced>voiced_min 即整段判删 → 灾难性误删）。
+    # 与 detect_isolated_fillers 对齐。
+    if not words:
+        return []
     au, sr = _read_wav(wav_path)
     word_ivs = _union([(max(0.0, w["start"] - pad_head), w["end"] + pad_tail) for w in words])
 
@@ -851,6 +879,19 @@ def analyze(input_path: str, opts: dict) -> dict:
     trim_silence = bool(opts.get("trimSilence", True))
     exclude = opts.get("exclude", []) or []
 
+    # ── 泛化增强：可选参数（均带合理默认，不改变默认行为）──
+    # language=None → faster-whisper 自动检测（支持英文 / 中英混说 / 方言样本）
+    language = opts.get("language", None)
+    vad_min_speech_ms = int(opts.get("vadMinSpeechMs", 80))
+    vad_min_silence_ms = int(opts.get("vadMinSilenceMs", 80))
+    vad_speech_pad_ms = int(opts.get("vadSpeechPadMs", 40))
+    # neg_threshold=None → 用 silero 默认（=vadThreshold）
+    vad_neg_threshold = opts.get("vadNegThreshold", None)
+    if vad_neg_threshold is not None:
+        vad_neg_threshold = float(vad_neg_threshold)
+    transient_crest_thr = float(opts.get("transientCrestThr", 4.0))
+    transient_max_dur = float(opts.get("transientMaxDur", 0.12))
+
     # 仅接受，不在此处使用（输出生成由 Rust 负责）
     # opts.get("denoise"); opts.get("deess"); opts.get("normalize")
 
@@ -893,13 +934,19 @@ def analyze(input_path: str, opts: dict) -> dict:
 
         # ── [2] Whisper 转写 ──
         print("[2/6] Whisper 转写…", flush=True)
-        words, _, _ = transcribe(work_wav, model_size)
+        words, _, _ = transcribe(work_wav, model_size, language)
         print(f"  {len(words)} 个词", flush=True)
 
         # ── [3] VAD ──
         print("[3/6] VAD 语音检测…", flush=True)
         try:
-            speech_regs = vad_speech_regions(work_wav, vad_threshold)
+            speech_regs = vad_speech_regions(
+                work_wav, vad_threshold,
+                min_speech_ms=vad_min_speech_ms,
+                min_silence_ms=vad_min_silence_ms,
+                speech_pad_ms=vad_speech_pad_ms,
+                neg_threshold=vad_neg_threshold,
+            )
             print(f"  {len(speech_regs)} 个语音段", flush=True)
         except Exception as e:  # ImportError / 缺权重等 → 整段视为语音
             print(f"  silero-vad 不可用({e})，退化为整段", flush=True)
@@ -920,7 +967,10 @@ def analyze(input_path: str, opts: dict) -> dict:
         gaps = _complement(speech_regs, dur, min_keep=0.0)
         gap_breath = detect_gap_breath(work_wav, gaps, words, word_pad=word_pad)
         print(f"  4c. 间隙气声/咳嗽: {len(gap_breath)} 段", flush=True)
-        transients = detect_transients(work_wav, gaps, words, word_pad=word_pad)
+        transients = detect_transients(
+            work_wav, gaps, words, word_pad=word_pad,
+            crest_thr=transient_crest_thr, max_dur=transient_max_dur,
+        )
         print(f"  4d. 瞬态/咂嘴: {len(transients)} 段", flush=True)
 
         # 对声学类删除区应用 minGap 下限（太短不切）
