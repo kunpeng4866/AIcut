@@ -443,8 +443,9 @@ pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
             }
         }
     }
+    // col_a is 0..1 float range from mask_alpha_expr; multiply by 255 for 8-bit RGBA alpha plane
     Some(format!(
-        "geq=r='{col_r}':g='{col_g}':b='{col_b}':a='{col_a}',format=rgba"
+        "format=rgba,geq=r='{col_r}':g='{col_g}':b='{col_b}':a='({col_a})*255'"
     ))
 }
 
