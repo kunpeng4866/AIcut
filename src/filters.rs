@@ -615,16 +615,19 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             // 前端语义：中心 (x,y) 归一化、半径 radius 归一化（相对帧短边 min(w,h)）。
             // 位置读 x/y（原 cx/cy 导致永远居中，已修正）；真圆距离判据相对 min(W,H) 归一化，
             // 与前端 maskRender.ts（r = radius*min(w,h)）一致；原生 (X/W-x)²+(Y/H-y)² 在 W≠H 时为椭圆，已废弃。
-            // 羽化 feather 近似前端 blur：软边宽度 ≈ feather*min(W,H)*0.5。
+            // 羽化 feather 近似前端 blur（Canvas filter:blur(R)）：高斯模糊本质对称且过渡带宽 ≈ 1.6×R。
+            // geq 用 clip(0.5-sd/fp) 对称线性近似，过渡总带宽 fp；取 fp=feather*min(W,H) 与前端的
+            // 高斯 blur radius=feather*minSide*0.5 在视觉上可比（geq 过渡带宽约为前端的 ~77%），
+            // 显著改善"导出羽化比预览小"问题。
             let feather = mask.feather.max(0.0);
             let x = mask.params.get("x").copied().unwrap_or(0.5);
             let y = mask.params.get("y").copied().unwrap_or(0.5);
             let r = mask.params.get("radius").copied().unwrap_or(0.3);
             let dist = format!("sqrt((X-{x}*W)^2+(Y-{y}*H)^2)", x = fmt(x), y = fmt(y));
             let r_px = format!("({r}*min(W,H))", r = fmt(r));
-            let fp = format!("max(1,({feather}*min(W,H)*0.5))", feather = fmt(feather));
-            // 软边圆：dist<R 内 alpha=1，dist>R 外 alpha=0，边缘按 fp 线性平滑过渡
-            let mut a_expr = format!("clip(({r_px}-{dist})/({fp}),0,1)", r_px = r_px, dist = dist, fp = fp);
+            let fp = format!("max(1,({feather}*min(W,H)))", feather = fmt(feather));
+            // 对称羽化圆：中心(feather*minSide/2 内) alpha=1，边界 0，边缘按 fp 平滑过渡
+            let mut a_expr = format!("clip(0.5-({dist}-{r_px})/({fp}),0,1)", dist = dist, r_px = r_px, fp = fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -654,8 +657,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let hw_expr = format!("(({w})*W/2)", w = fmt(w));
             let hh_expr = format!("(({h})*H/2)", h = fmt(h));
             let r0_expr = format!("(({r})*min({hw},{hh}))", r = fmt(round), hw = hw_expr, hh = hh_expr);
-            // 羽化过渡带半宽（像素）：feather 相对 min(半宽,半高) 折算
-            let ex_expr = format!("(max(({f})*min({hw},{hh}),0.001))", f = fmt(feather), hw = hw_expr, hh = hh_expr);
+            // 羽化过渡带半宽（像素）：feather 相对帧短边 min(W,H) 折算（与 circle/polygon/star 一致）
+            let ex_expr = format!("(max(({f})*min(W,H),0.001))", f = fmt(feather));
             // 像素 → 矩形局部坐标（绕中心旋转 -a）
             let dx = format!("((X-({x})*W)*({ca})+(Y-({y})*H)*({sa}))",
                 x = fmt(x), y = fmt(y), ca = fmt(ca), sa = fmt(sa));
@@ -701,7 +704,7 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             //   r = sqrt(px²+py²), ang = atan2(py,px) （-PI/2 指向正上方）
             //   seg = 2*PI/sides；aa = mod(ang - rotRad + PI/2 + 0.5*seg, seg) - 0.5*seg （0 处为顶点）
             //   edgeDist = R*cos(0.5*seg)/cos(aa)；sd = r - edgeDist
-            // 羽化 feather 近似前端 blur：软边 ≈ feather*min(W,H)*0.5（与 circle 同系数）。
+            // 羽化 feather 近似前端 blur：对称线性过渡，fp=feather*min(W,H)。
             let feather = mask.feather.max(0.0);
             let x = mask.params.get("x").copied().unwrap_or(0.5);
             let y = mask.params.get("y").copied().unwrap_or(0.5);
@@ -720,8 +723,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let r_px = format!("({}*min(W,H))", fmt(radius));
             let edge_dist = format!("(({})*cos({})/cos({}))", r_px, half_seg, aa);
             let sd = format!("({}-({}))", r_expr, edge_dist);
-            let fp = format!("max(1,({}*min(W,H)*0.5))", fmt(feather));
-            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
+            let fp = format!("max(1,({}*min(W,H)))", fmt(feather));
+            let mut a_expr = format!("clip(0.5-({})/({}),0,1)", sd, fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -754,8 +757,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let t = format!("(abs({})/{})", aa, half_seg);
             let edge_dist_star = format!("(({})+(({})-({}))*({}))", r_px, rin_px, r_px, t);
             let sd = format!("({}-({}))", r_expr, edge_dist_star);
-            let fp = format!("max(1,({}*min(W,H)*0.5))", fmt(feather));
-            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
+            let fp = format!("max(1,({}*min(W,H)))", fmt(feather));
+            let mut a_expr = format!("clip(0.5-({})/({}),0,1)", sd, fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
