@@ -373,17 +373,21 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
 ///                 第一个顶点指向正上方（屏幕顶部），正角度=顺时针；star 另有 innerRatio
 ///                 (内/外半径比 0..1) 与 sides（整数 ≥3）。
 ///
-/// 注：形状遮罩采用「把形状外像素 RGB 乘 0」的黑色遮罩方式，
-/// 叠加在 graph.rs 的黑色 base 上即呈现透明效果。
+/// 自本增量起改用直通 alpha 通道（straight alpha）合成：
+///   - output: geq=r='...':g='...':b='...':a='...'，alpha 通道由 overlay 做真 alpha 合成
+///     (dst = src*rgb*src_alpha + base*(1-src_alpha))，不再依赖"黑遮罩技巧"。
+///   - 羽化从单向内侧改为对称（clip(0.5-sd/fp)），边界 alpha=0.5 通过真合成自然半透明，
+///     无黑环问题。
+///   - 阴影从沿轮廓环（ring）改为偏移填充剪影（filled silhouette），
+///     用大羽化半径模拟模糊扩散（blur=1 时软边扩至 0.5*minSide）。
 ///
 /// 多蒙版：本函数接收该 clip 的全部蒙版，在**单一 geq** 中按 alpha-max 求并集
-/// （a_union = max(a_1, a_2, ...)），与前端预览的 lighter 并集语义对齐；
-/// 单蒙版时输出与旧版逐字节一致。
+/// （a_union = max(a_1, a_2, ...)），与前端预览的 lighter 并集语义对齐。
 ///
-/// 描边(stroke)/阴影(shadow) 自增量 2 起由本函数一并合成：内容先被并集蒙版裁剪
-/// （黑遮罩技巧：内容区外 RGB*0），再逐 mask 叠阴影环、再叠描边环（顺序匹配前端
-/// composeMaskedFrame：先 shadow 后 stroke）。环 alpha 由 `ring_alpha_expr` 计算，
-/// 颜色分量已 premultiplied（color*alpha），下游黑=透明、彩色=保留。
+/// 描边(stroke)/阴影(shadow) 自本增量起由带 alpha 通道的 geq 输出合成：
+///   阴影先通过 (1-a_union) 因子叠加到直通 RGB，再取 alpha=max(a_union,shadowAlpha)；
+///   描边在阴影之上用标准 straight-alpha over 合成。
+///   顺序匹配前端 composeMaskedFrame（先 shadow 后 stroke）。
 pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
     let mut base_exprs = Vec::new();
     for m in masks {
@@ -407,36 +411,46 @@ pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
         }
         acc
     };
-    // 分层合成（premultiplied over）：内容先被并集蒙版裁剪（黑遮罩），再叠阴影、再叠描边。
-    let mut col_r = format!("(r(X,Y)*({a_union}))");
-    let mut col_g = format!("(g(X,Y)*({a_union}))");
-    let mut col_b = format!("(b(X,Y)*({a_union}))");
+    // 分层合成（straight alpha）：内容保持原色，alpha 用并集蒙版做真合成；再叠阴影、再叠描边。
+    let mut col_r = "r(X,Y)".to_string();
+    let mut col_g = "g(X,Y)".to_string();
+    let mut col_b = "b(X,Y)".to_string();
+    let mut col_a = a_union.clone();
     for m in masks {
-        // 阴影在描边之下
+        // 阴影在描边之下（填充剪影贡献到 alpha，颜色通过 (1-a_union) 因子叠加到直通通道）
         if m.shadow.enabled {
             if let Some((sr, sg, sb, sa)) = build_shadow_terms(m) {
-                col_r = format!("(({col_r})*(1-({sa}))+({sr})*({sa}))");
-                col_g = format!("(({col_g})*(1-({sa}))+({sg})*({sa}))");
-                col_b = format!("(({col_b})*(1-({sa}))+({sb})*({sa}))");
+                col_r = format!("(({col_r})+({sr})*({sa})*(1-({au})))",
+                    col_r = col_r, sr = sr, sa = sa, au = a_union);
+                col_g = format!("(({col_g})+({sg})*({sa})*(1-({au})))",
+                    col_g = col_g, sg = sg, sa = sa, au = a_union);
+                col_b = format!("(({col_b})+({sb})*({sa})*(1-({au})))",
+                    col_b = col_b, sb = sb, sa = sa, au = a_union);
+                col_a = format!("max({col_a},{sa})", col_a = col_a, sa = sa);
             }
         }
-        // 描边在上
+        // 描边在上（标准 straight-alpha over 合成）
         if m.stroke.enabled {
             if let Some((tr, tg, tb, ta)) = build_stroke_terms(m) {
-                col_r = format!("(({col_r})*(1-({ta}))+({tr})*({ta}))");
-                col_g = format!("(({col_g})*(1-({ta}))+({tg})*({ta}))");
-                col_b = format!("(({col_b})*(1-({ta}))+({tb})*({ta}))");
+                col_r = format!("(({col_r})*(1-({ta}))+({tr})*({ta}))",
+                    col_r = col_r, ta = ta, tr = tr);
+                col_g = format!("(({col_g})*(1-({ta}))+({tg})*({ta}))",
+                    col_g = col_g, ta = ta, tg = tg);
+                col_b = format!("(({col_b})*(1-({ta}))+({tb})*({ta}))",
+                    col_b = col_b, ta = ta, tb = tb);
+                col_a = format!("(({col_a})*(1-({ta}))+({ta}))",
+                    col_a = col_a, ta = ta);
             }
         }
     }
     Some(format!(
-        "geq=r='{col_r}':g='{col_g}':b='{col_b}'"
+        "geq=r='{col_r}':g='{col_g}':b='{col_b}':a='{col_a}'"
     ))
 }
 
 /// 返回蒙版形状在给定坐标变量下的**有符号距离**表达式（负=形状内部，0=轮廓）。
 /// 坐标变量 `x_expr`/`y_expr` 默认 "X"/"Y"；阴影传偏移后的坐标以获得偏移环 sd。
-/// 各 shape 的 sd 公式与 `mask_alpha_expr` 内部完全一致，仅坐标变量参数化，供描边/阴影环复用。
+/// 各 shape 的 sd 公式与 `mask_alpha_expr` 内部完全一致，仅坐标变量参数化，供描边环/填充剪影复用。
 fn mask_sd_expr(mask: &Mask, x_expr: &str, y_expr: &str) -> Option<String> {
     if mask.shape.is_empty() {
         return None;
@@ -561,21 +575,23 @@ fn build_stroke_terms(mask: &Mask) -> Option<(String, String, String, String)> {
     Some((fmt(r * 255.0), fmt(g * 255.0), fmt(b * 255.0), a))
 }
 
-/// 阴影项：(R,G,B, A)。阴影为同一轮廓偏移 (dx,dy) 后的加粗模糊环。
+/// 阴影项：(R,G,B,A)。阴影为偏移后的填充剪影（filled silhouette），用大羽化半径模拟模糊。
 /// `dx = cos(angle)*distance*minSide`，`dy = sin(angle)*distance*minSide`；
-/// 半宽 `hwShadow = blurPx/2`，软边 `seShadow = blurPx = max(2, blur*minSide*0.5)`。
+/// 羽化半径 `shadowFeather = max(1, max(2, blur*minSide*0.5))` 模拟模糊扩散。
 fn build_shadow_terms(mask: &Mask) -> Option<(String, String, String, String)> {
     let ang = mask.shadow.angle * std::f64::consts::PI / 180.0;
     let ca = ang.cos();
     let sa = ang.sin();
     let dx = format!("(({ca})*({dist})*min(W,H))", ca = fmt(ca), dist = fmt(mask.shadow.distance));
     let dy = format!("(({sa})*({dist})*min(W,H))", sa = fmt(sa), dist = fmt(mask.shadow.distance));
-    let sd = mask_sd_expr(mask, &format!("(X-({dx}))"), &format!("(Y-({dy}))"))?;
+    let sd_off = mask_sd_expr(mask, &format!("(X-({dx}))"), &format!("(Y-({dy}))"))?;
     let blur_px = format!("max(2,({b}*min(W,H)*0.5))", b = fmt(mask.shadow.blur));
-    let hw = format!("(({blur})/2)", blur = blur_px);
-    let a = ring_alpha_expr(&sd, &hw, &blur_px, mask.shadow.opacity);
+    let shadow_feather = format!("max(1,{blur})", blur = blur_px);
+    // 填充剪影（对称羽化）：中心不透明→边缘渐透明
+    let fill_alpha = format!("clip(0.5-({sd})/({sf}),0,1)", sd = sd_off, sf = shadow_feather);
+    let a = format!("({fa})*({op})", fa = fill_alpha, op = fmt(mask.shadow.opacity));
     let (r, g, b) = hex_to_rgb_f64(&mask.shadow.color);
-    // geq 像素值范围 0..255，颜色分量须 *255 再 premultiply。
+    // geq 像素值范围 0..255，颜色分量 *255；opacity 通过 alpha 烘焙，不预乘颜色。
     Some((fmt(r * 255.0), fmt(g * 255.0), fmt(b * 255.0), a))
 }
 
@@ -626,8 +642,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let dist = format!("sqrt((X-{x}*W)^2+(Y-{y}*H)^2)", x = fmt(x), y = fmt(y));
             let r_px = format!("({r}*min(W,H))", r = fmt(r));
             let fp = format!("max(1,({feather}*min(W,H)))", feather = fmt(feather));
-            // 内侧羽化圆：dist<R 内 alpha=1，dist>R 外 alpha=0，边缘按 fp 线性平滑过渡（非对称，边界处 alpha=0 避免黑遮罩环）
-            let mut a_expr = format!("clip(({r_px}-{dist})/({fp}),0,1)", r_px = r_px, dist = dist, fp = fp);
+            // 对称羽化圆：dist<R 内 alpha=1，边界 alpha=0.5，dist>R 外 alpha=0（借助 alpha 通道真合成移除黑遮罩环）
+            let mut a_expr = format!("clip(0.5-({dist}-{r_px})/({fp}),0,1)", dist = dist, r_px = r_px, fp = fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -669,8 +685,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let qy = format!("(abs({dy})-(({hh})-({r0})))", dy = dy, hh = hh_expr, r0 = r0_expr);
             let sd = format!("(min(max({qx},{qy}),0)+sqrt(max({qx},0)*max({qx},0)+max({qy},0)*max({qy},0))-({r0}))",
                 qx = qx, qy = qy, r0 = r0_expr);
-            // 形状内侧 alpha：sd<0 内 alpha=1，sd>0 外 alpha=0，边缘按 ex 平滑过渡（非对称，边界处 alpha=0 避免黑遮罩环）
-            let mut a_expr = format!("clip(-({sd})/({ex}),0,1)", sd = sd, ex = ex_expr);
+            // 对称羽化矩形：sd<0 内 alpha=1，边界 alpha=0.5，sd>0 外 alpha=0（借助 alpha 通道真合成移除黑遮罩环）
+            let mut a_expr = format!("clip(0.5-({sd})/({ex}),0,1)", sd = sd, ex = ex_expr);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -724,7 +740,7 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let edge_dist = format!("(({})*cos({})/cos({}))", r_px, half_seg, aa);
             let sd = format!("({}-({}))", r_expr, edge_dist);
             let fp = format!("max(1,({}*min(W,H)))", fmt(feather));
-            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
+            let mut a_expr = format!("clip(0.5-({})/({}),0,1)", sd, fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -758,7 +774,7 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let edge_dist_star = format!("(({})+(({})-({}))*({}))", r_px, rin_px, r_px, t);
             let sd = format!("({}-({}))", r_expr, edge_dist_star);
             let fp = format!("max(1,({}*min(W,H)))", fmt(feather));
-            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
+            let mut a_expr = format!("clip(0.5-({})/({}),0,1)", sd, fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
