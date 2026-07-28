@@ -444,7 +444,7 @@ pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
         }
     }
     Some(format!(
-        "geq=r='{col_r}':g='{col_g}':b='{col_b}':a='{col_a}'"
+        "geq=r='{col_r}':g='{col_g}':b='{col_b}':a='{col_a}',format=rgba"
     ))
 }
 
