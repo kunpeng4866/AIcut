@@ -500,12 +500,13 @@ export function useWebGPUPreview({
           });
 
           const pass = cmd.beginRenderPass({
-            colorAttachments: [{
-              view,
-              clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              loadOp: idx === 0 ? 'clear' : 'load',
-              storeOp: 'store',
-            }],
+              colorAttachments: [{
+                view,
+                // 与外层预览容器 #1a1a2e 保持一致，使黑色阴影在背景上有可见层次。
+                clearValue: { r: 26 / 255, g: 26 / 255, b: 46 / 255, a: 1 },
+                loadOp: idx === 0 ? 'clear' : 'load',
+                storeOp: 'store',
+              }],
           });
           pass.setPipeline(pipeline);
           pass.setBindGroup(0, bindGroup);
