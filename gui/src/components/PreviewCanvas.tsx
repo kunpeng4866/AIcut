@@ -1072,9 +1072,14 @@ export default function PreviewCanvas() {
                   outStyle.WebkitMaskSize = '100% 100%';
                   outStyle.maskSize = '100% 100%';
                 }
-                // 蒙版（HTML5 回退）：把启用蒙版合成为 CSS mask-image（dataURL），并叠加阴影 drop-shadow。
+                // 蒙版（HTML5 回退）：把启用蒙版合成为 CSS mask-image（dataURL）。
+                // 关键：阴影 drop-shadow【不能】和 mask-image 放在同一元素上。CSS 渲染顺序是先 filter 后 mask，
+                // drop-shadow 生成的、延伸到蒙版形状之外的阴影会被 mask 一并裁掉 → 阴影永远不可见。
+                // 因此阴影必须放到【无 mask 的外层 wrapper】，由其基于被遮罩子元素的 alpha 轮廓生成阴影，
+                // wrapper 自身不被遮罩，阴影才不会被裁掉。
                 // 与转场 maskImage 共存时以 clip 自身蒙版为准（覆盖转场软边）。
                 const maskList = (clip.masks || []).filter((m) => m.enabled);
+                let shadowFilter: string | null = null;
                 if (maskList.length > 0) {
                   const maskUrl = buildMaskImageUrl(maskList);
                   if (maskUrl) {
@@ -1083,19 +1088,23 @@ export default function PreviewCanvas() {
                     outStyle.WebkitMaskSize = '100% 100%';
                     outStyle.maskSize = '100% 100%';
                   }
-                  const sh = buildMaskShadowFilter(maskList);
-                  if (sh) outStyle.filter = outStyle.filter ? `${outStyle.filter} ${sh}` : sh;
+                  shadowFilter = buildMaskShadowFilter(maskList); // 仅取字符串，挂到外层 wrapper
                 }
-                return (
+                const videoEl = (
                   <video
                     key={clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                     src={pathToUrl(asset.path)}
-                    style={outStyle}
+                    style={{ ...outStyle, pointerEvents: 'auto' }}
                     onLoadedMetadata={onLoadedMetadataFor(clip)}
                     onClick={handleTogglePlay}
                   />
                 );
+                return shadowFilter ? (
+                  <div key={clip.id} style={{ position: 'absolute', inset: 0, filter: shadowFilter, pointerEvents: 'none' }}>
+                    {videoEl}
+                  </div>
+                ) : videoEl;
               })}
             </>
           )
