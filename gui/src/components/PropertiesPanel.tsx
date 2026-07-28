@@ -2,11 +2,12 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
-import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, MaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
+import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, WipeMaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
+import MaskTab from './panels/MaskTab';
 import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
 
-type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins';
+type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins' | 'mask';
 
 // 插件 manifest 类型（仅前端 UI 使用，不依赖 engine 包）
 interface ParameterDef {
@@ -31,6 +32,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'subtitle', label: '字幕' },
   { key: 'keyframes', label: '关键帧' },
   { key: 'plugins', label: '插件' },
+  { key: 'mask', label: '蒙版' },
 ];
 
 // 滤镜/特效预设已改为从 plugins/ 目录的真实插件加载（见下方 ItemsTab），
@@ -731,7 +733,7 @@ const TRANSITION_TYPES: { value: TransitionType; label: string }[] = [
   { value: 'wipe', label: '擦除' },
 ];
 // 由预设对象构造写入 transition 的字段；只写 preset 中存在的字段，缺失字段传 undefined 由 store omit
-function buildPresetTransition(p: { type: TransitionType; duration: number; direction?: WipeDirection; easing?: TransitionEasing; feather?: number; blurAmount?: number; maskShape?: MaskShape }) {
+function buildPresetTransition(p: { type: TransitionType; duration: number; direction?: WipeDirection; easing?: TransitionEasing; feather?: number; blurAmount?: number; maskShape?: WipeMaskShape }) {
   return {
     transitionType: p.type,
     duration: p.duration,
@@ -747,7 +749,7 @@ function buildPresetTransition(p: { type: TransitionType; duration: number; dire
 const TRANSITION_PRESETS: {
   key: string; label: string; type: TransitionType; duration: number;
   direction?: WipeDirection; easing: TransitionEasing; feather?: number;
-  blurAmount?: number; maskShape?: MaskShape;
+  blurAmount?: number; maskShape?: WipeMaskShape;
 }[] = [
   { key: 'none', label: '硬切', type: 'none', duration: 0, easing: 'ease-in-out' },
   { key: 'dissolve', label: '交叉溶解', type: 'dissolve', duration: 0.5, easing: 'ease-in-out' },
@@ -850,24 +852,33 @@ export default function PropertiesPanel() {
   const activeTab = useUIStore((s) => s.activeRightPanel);
   const setActiveTab = useUIStore((s) => s.setActiveRightPanel);
   const sel = useSelectedClip();
+  const project = useProjectStore((s) => s.project);
+  // 仅视频/图片（非音频）clip 显示「蒙版」tab；音频 clip 无蒙版
+  const selTrack = sel ? project.tracks.find((t) => t.id === sel.trackId) : undefined;
+  const visibleTabs = sel && selTrack?.type === 'audio'
+    ? TABS.filter((t) => t.key !== 'mask')
+    : TABS;
+  // 若当前 tab 因切到音频轨被隐藏，回退到 transform
+  const tab = sel && selTrack?.type === 'audio' && activeTab === 'mask' ? 'transform' : activeTab;
   return (
     <div style={S.panel}>
       <div style={S.tabs}>
-        {TABS.map((t) => (
-          <button key={t.key} style={S.tab(activeTab === t.key)} onClick={() => setActiveTab(t.key)}>{t.label}</button>
+        {visibleTabs.map((t) => (
+          <button key={t.key} style={S.tab(tab === t.key)} onClick={() => setActiveTab(t.key)}>{t.label}</button>
         ))}
       </div>
       <div style={S.content}>
         {!sel ? <ProjectInfo /> : (
-          activeTab === 'transform' ? <TransformTab clip={sel.clip} trackId={sel.trackId} /> :
-          activeTab === 'filters' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="filters" /> :
-          activeTab === 'effects' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="effects" /> :
-          activeTab === 'audio' ? <AudioTab clip={sel.clip} trackId={sel.trackId} /> :
-          activeTab === 'speed' ? <SpeedTab clip={sel.clip} trackId={sel.trackId} /> :
-          activeTab === 'transition' ? <TransitionTab clip={sel.clip} trackId={sel.trackId} /> :
-          activeTab === 'text' ? <TextTab clip={sel.clip} trackId={sel.trackId} /> :
-          activeTab === 'subtitle' ? <SubtitleTab clip={sel.clip} trackId={sel.trackId} /> :
-          activeTab === 'plugins' ? <PluginsTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'transform' ? <TransformTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'filters' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="filters" /> :
+          tab === 'effects' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="effects" /> :
+          tab === 'audio' ? <AudioTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'speed' ? <SpeedTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'transition' ? <TransitionTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'text' ? <TextTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'subtitle' ? <SubtitleTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'plugins' ? <PluginsTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'mask' ? <MaskTab clip={sel.clip} trackId={sel.trackId} /> :
           <KeyframesTab clip={sel.clip} trackId={sel.trackId} />
         )}
       </div>

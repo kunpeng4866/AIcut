@@ -12,6 +12,7 @@ import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
 import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, getFlashOverlay, type TransitionPreviewLayer, type MaskRect } from '../utils/transitionUtils';
 import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
+import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -1070,6 +1071,20 @@ export default function PreviewCanvas() {
                   outStyle.maskImage = outTr.maskImage;
                   outStyle.WebkitMaskSize = '100% 100%';
                   outStyle.maskSize = '100% 100%';
+                }
+                // 蒙版（HTML5 回退）：把启用蒙版合成为 CSS mask-image（dataURL），并叠加阴影 drop-shadow。
+                // 与转场 maskImage 共存时以 clip 自身蒙版为准（覆盖转场软边）。
+                const maskList = (clip.masks || []).filter((m) => m.enabled);
+                if (maskList.length > 0) {
+                  const maskUrl = buildMaskImageUrl(maskList);
+                  if (maskUrl) {
+                    outStyle.WebkitMaskImage = maskUrl;
+                    outStyle.maskImage = maskUrl;
+                    outStyle.WebkitMaskSize = '100% 100%';
+                    outStyle.maskSize = '100% 100%';
+                  }
+                  const sh = buildMaskShadowFilter(maskList);
+                  if (sh) outStyle.filter = outStyle.filter ? `${outStyle.filter} ${sh}` : sh;
                 }
                 return (
                   <video

@@ -114,8 +114,12 @@ pub fn is_simple_project(project: &Project) -> bool {
         if !clip.effects.is_empty() {
             return false;
         }
-        if !clip.masks.is_empty() {
-            return false;
+        // 蒙版支持程度判断：仅支持的形态且未用描边/阴影时，允许走 graph.rs 导出
+        if !can_mask_via_graph(project) {
+            // 有 mask 但不支持导出时，仍视为非简单工程（走 ExportPipeline，mask 静默丢弃）
+            // 注意：只有"确实有 mask"才返回 false，避免误伤
+            let has_mask = project.tracks.iter().flat_map(|t| &t.clips).any(|c| !c.masks.is_empty());
+            if has_mask { return false; }
         }
         if !clip.keyframes.is_empty() {
             return false;
@@ -137,6 +141,43 @@ pub fn is_simple_project(project: &Project) -> bool {
         }
     }
 
+    true
+}
+
+/// 判断工程所有 mask 是否都能被 graph.rs 导出路径消费。
+///
+/// 支持：circle / linear / mirror（任意参数）；rect 仅限轴对齐（rotation==0）。
+/// 不支持：任何其它 shape（polygon/star/text/handdrawn 等 MVP 未实现）。
+/// 另外 graph.rs 导出路径暂不支持描边(stroke)/阴影(shadow)，启用其一则该工程走 ExportPipeline。
+///
+/// 返回 true 时，is_simple_project 可保持 true，让 masks 走 graph.rs；
+/// 返回 false 且工程确有 mask 时，is_simple_project 返回 false（走 ExportPipeline，mask 不导出，靠前端提示）。
+fn can_mask_via_graph(project: &Project) -> bool {
+    // MVP 仅支持「单个蒙版」：同一 clip 上的多个 mask 在 graph.rs 快速路径下会呈「交集(AND)」
+    // 叠加（每个 geq 依次把形状外像素乘 0），无法表达前端「并集(OR)」语义；多蒙版并集导出留待 v2。
+    // 因此：同一个 clip 的 masks 数量 > 1 时一律返回 false（走 ExportPipeline，mask 静默丢弃，靠前端提示）。
+    // rect 仍仅限 rotation==0；stroke/shadow 启用仍返回 false。
+    let supported = |shape: &str, params: &std::collections::HashMap<String, f64>, m: &crate::types::Mask| -> bool {
+        let ok_shape = match shape {
+            "circle" | "linear" | "mirror" => true,
+            "rect" => params.get("rotation").copied().unwrap_or(0.0).abs() < 1e-3, // 仅轴对齐矩形
+            _ => false,
+        };
+        ok_shape && !m.stroke.enabled && !m.shadow.enabled
+    };
+    for track in &project.tracks {
+        for clip in &track.clips {
+            // 多蒙版限制：MVP 仅支持单个蒙版，多蒙版走 ExportPipeline
+            if clip.masks.len() > 1 {
+                return false;
+            }
+            for m in &clip.masks {
+                if !supported(&m.shape, &m.params, m) {
+                    return false;
+                }
+            }
+        }
+    }
     true
 }
 
@@ -376,13 +417,71 @@ mod tests {
     #[test]
     fn test_is_simple_project_with_masks() {
         let mut project = make_simple_project();
+        // 不支持导出的 mask（启用了描边）→ 走 ExportPipeline，视为非简单工程
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "rect".to_string(),
             params: std::collections::HashMap::new(),
             invert: false,
             feather: 0.0,
+            stroke: crate::types::MaskStroke { enabled: true, ..Default::default() },
+            shadow: Default::default(),
         });
         assert!(!is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_with_supported_mask() {
+        // 支持的 mask（轴对齐 rect，无描边/阴影）→ 走 graph.rs，仍视为简单工程
+        let mut project = make_simple_project();
+        let mut params = std::collections::HashMap::new();
+        params.insert("x".to_string(), 0.5);
+        params.insert("y".to_string(), 0.5);
+        params.insert("width".to_string(), 0.5);
+        params.insert("height".to_string(), 0.5);
+        project.tracks[0].clips[0].masks.push(crate::types::Mask {
+            shape: "rect".to_string(),
+            params,
+            invert: false,
+            feather: 0.1,
+            stroke: Default::default(),
+            shadow: Default::default(),
+        });
+        assert!(is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_with_multiple_masks() {
+        // MVP 仅支持单个蒙版：同一 clip 多蒙版 → 走 ExportPipeline（mask 静默丢弃），
+        // 视为非简单工程（is_simple_project 返回 false）。
+        let mut project = make_simple_project();
+        let mut p1 = std::collections::HashMap::new();
+        p1.insert("x".to_string(), 0.5);
+        p1.insert("y".to_string(), 0.5);
+        let mut p2 = std::collections::HashMap::new();
+        p2.insert("angle".to_string(), 90.0);
+        project.tracks[0].clips[0].masks.push(crate::types::Mask {
+            shape: "circle".to_string(), params: p1, invert: false, feather: 0.0,
+            stroke: Default::default(), shadow: Default::default(),
+        });
+        project.tracks[0].clips[0].masks.push(crate::types::Mask {
+            shape: "linear".to_string(), params: p2, invert: false, feather: 0.0,
+            stroke: Default::default(), shadow: Default::default(),
+        });
+        assert!(!is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_single_mask_ok() {
+        // 单个支持的蒙版 → 仍视为简单工程（走 graph.rs 导出）
+        let mut project = make_simple_project();
+        let mut p = std::collections::HashMap::new();
+        p.insert("x".to_string(), 0.3);
+        p.insert("y".to_string(), 0.7);
+        project.tracks[0].clips[0].masks.push(crate::types::Mask {
+            shape: "mirror".to_string(), params: p, invert: false, feather: 0.2,
+            stroke: Default::default(), shadow: Default::default(),
+        });
+        assert!(is_simple_project(&project));
     }
 
     #[test]

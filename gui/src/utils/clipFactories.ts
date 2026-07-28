@@ -1,6 +1,6 @@
 // 共享片段工厂：把"建轨 + 加片段 + 选中"等重复逻辑集中，供左侧面板各组件复用。
 // 所有函数直接读/写 project store 与 ui store，调用方无需关心轨道查找细节。
-import type { AssetConfig, ClipConfig } from '../types';
+import type { AssetConfig, ClipConfig, MaskConfig } from '../types';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 
@@ -107,6 +107,6 @@ export function createImageStickerClip(asset: AssetConfig, timelineIn = 0): Clip
     timelineOut: timelineIn + dur,
     transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
     volume: 1, speed: 1,
-    effects: [], masks: [], filters: [], keyframes: {},
+    effects: [], masks: [] as MaskConfig[], filters: [], keyframes: {},
   };
 }

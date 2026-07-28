@@ -359,34 +359,144 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
 }
 
 /// 将 Mask 数据结构转换为 FFmpeg 滤镜串。
-/// 线性蒙版 → crop+overlay；圆形蒙版 → geq 表达式生成 alpha
+/// 线性(linear) → geq 沿 angle 方向的渐变带（中心可见、两端渐隐）；
+/// 圆形(circle) → geq 以 (x,y) 为中心的距离场遮罩；
+/// 矩形(rect) → geq 圆角矩形距离场遮罩（支持羽化/反转/圆角/旋转）；
+/// 镜面(mirror) → geq 带 angle 的对称渐变带（中心透明、两端可见）。
+///
+/// 几何语义与 gui/src/utils/maskRender.ts 前端预览精确一致：
+///   circle : 中心 (x,y) 归一化、半径 radius 归一化（相对帧短边 min(w,h)）
+///   linear : 以 (x,y) 为中心、angle 为渐变轴方向，half=width*min(W,H)，中心可见两端渐隐
+///   mirror : 同 linear 几何，但相反——中心透明、两端可见
+///
+/// 注：除 colorchannelmixer 调 alpha 外，形状遮罩采用「把形状外像素 RGB 乘 0」的黑色遮罩方式，
+/// 叠加在 graph.rs 的黑色 base 上即呈现透明效果。
+/// 多个 mask 依次串接时呈「交集(AND)」叠加，真正的并集(OR)在 MVP 导出路径未实现。
 pub fn build_mask_spec(mask: &Mask) -> Option<String> {
     if mask.shape.is_empty() {
         return None;
     }
     match mask.shape.as_str() {
         "linear" => {
-            let feather = mask.feather.max(0.0).min(1.0);
-            let base_alpha = mask.params.get("opacity").copied().unwrap_or(1.0);
-            let alpha = base_alpha * (1.0 - feather * 0.5); // 羽化降低整体透明度
+            // 前端语义（maskRender.ts linear）：
+            //   以 (x,y) 为中心、angle(度) 为渐变轴方向（dx=cos, dy=sin），
+            //   半带宽 half = width*min(W,H)；沿轴中心可见、两端渐隐到透明
+            //   （addColorStop 0→透明, 0.5→可见, 1→透明）。
+            // 原实现是整帧 alpha 乘子（colorchannelmixer），完全没用 x/y/angle/width，
+            // 此处重写为渐变带（geq）：a = clip(1 - |d|/half_eff, 0, 1)。
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let ang = mask.params.get("angle").copied().unwrap_or(0.0) * std::f64::consts::PI / 180.0;
+            let ca = ang.cos();
+            let sa = ang.sin();
+            let width = mask.params.get("width").copied().unwrap_or(0.3);
+            let feather = mask.feather.max(0.0);
+            // half_eff = width*min(W,H)*(1+feather*2)：feather 折算为软化宽度，近似前端 blur
+            let half_expr = format!("({width}*min(W,H)*(1+{feather}*2))", width = fmt(width), feather = fmt(feather));
+            // 沿 angle 方向的有符号像素距离 d = (X-x*W)*ca + (Y-y*H)*sa
+            let d_expr = format!("((X-{x}*W)*{ca}+(Y-{y}*H)*{sa})", x = fmt(x), y = fmt(y), ca = fmt(ca), sa = fmt(sa));
+            // 中心可见、两端渐隐：a = clip(1 - |d|/half_eff, 0, 1)
+            let mut a_expr = format!("clip(1-abs({d})/({half}),0,1)", d = d_expr, half = half_expr);
             if mask.invert {
-                Some(format!("colorchannelmixer=aa={}", fmt((1.0 - alpha).max(0.0))))
-            } else {
-                Some(format!("colorchannelmixer=aa={}", fmt(alpha)))
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
+            // 形状外 RGB 乘 0（黑色遮罩），形状内保留原像素（叠加在黑色 base 上即透明）
+            Some(format!(
+                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
+                a_expr = a_expr
+            ))
         }
         "circle" => {
+            // 前端语义：中心 (x,y) 归一化、半径 radius 归一化（相对帧短边 min(w,h)）。
+            // 位置读 x/y（原 cx/cy 导致永远居中，已修正）；真圆距离判据相对 min(W,H) 归一化，
+            // 与前端 maskRender.ts（r = radius*min(w,h)）一致；原生 (X/W-x)²+(Y/H-y)² 在 W≠H 时为椭圆，已废弃。
+            // 羽化 feather 近似前端 blur：软边宽度 ≈ feather*min(W,H)*0.5。
             let feather = mask.feather.max(0.0);
-            let cx = mask.params.get("cx").copied().unwrap_or(0.5);
-            let cy = mask.params.get("cy").copied().unwrap_or(0.5);
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
             let r = mask.params.get("radius").copied().unwrap_or(0.3);
+            let dist = format!("sqrt((X-{x}*W)^2+(Y-{y}*H)^2)", x = fmt(x), y = fmt(y));
+            let r_px = format!("({r}*min(W,H))", r = fmt(r));
+            let fp = format!("max(1,({feather}*min(W,H)*0.5))", feather = fmt(feather));
+            // 软边圆：dist<R 内 alpha=1，dist>R 外 alpha=0，边缘按 fp 线性平滑过渡
+            let mut a_expr = format!("clip(({r_px}-{dist})/({fp}),0,1)", r_px = r_px, dist = dist, fp = fp);
             if mask.invert {
-                Some(format!("geq=r='if(gt((X/W-{})^2+(Y/H-{})^2,{}^2),r(X,Y),0)':g='if(gt((X/W-{cx})^2+(Y/H-{cy})^2,{r}^2),g(X,Y),0)':b='if(gt((X/W-{cx})^2+(Y/H-{cy})^2,{r}^2),b(X,Y),0)'",
-                    fmt(cx), fmt(cy), fmt(r)))
-            } else {
-                Some(format!("geq=r='if(lt((X/W-{})^2+(Y/H-{})^2,{}^2),r(X,Y),0)':g='if(lt((X/W-{cx})^2+(Y/H-{cy})^2,{r}^2),g(X,Y),0)':b='if(lt((X/W-{cx})^2+(Y/H-{cy})^2,{r}^2),b(X,Y),0)'",
-                    fmt(cx), fmt(cy), fmt(r)))
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
+            Some(format!(
+                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
+                a_expr = a_expr
+            ))
+        }
+        "rect" => {
+            // 归一化坐标/尺寸约定（与前端一致）：
+            //   x,y       : 矩形中心，归一化 0~1（相对帧宽高）
+            //   width,h   : 矩形宽高，归一化 0~1（相对帧宽高）
+            //   rotation  : 旋转角度（度），graph.rs 仅支持 0（轴对齐）
+            //   roundness : 圆角比例 0~1（圆角半径 = min(hw,hh)*roundness）
+            //   feather   : 羽化宽度，归一化 0~1（相对帧宽高）
+            //
+            // 注意：geq 中 X/Y/W/H 均为像素；阈值必须用 W/H 折算成像素，
+            // 不能把归一化常量当像素用（否则单位不一致会让整帧被遮黑）。
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let w = mask.params.get("width").copied().unwrap_or(0.5);
+            let h = mask.params.get("height").copied().unwrap_or(0.5);
+            let rot = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let round = mask.params.get("roundness").copied().unwrap_or(0.0);
+            let feather = mask.feather.max(0.0);
+            let a = rot * std::f64::consts::PI / 180.0;
+            let ca = a.cos();
+            let sa = a.sin();
+            // 半宽/半高（像素）：用 W/H 折算，保证与 dx/dy 同单位
+            let hw_expr = format!("(({w})*W/2)", w = fmt(w));
+            let hh_expr = format!("(({h})*H/2)", h = fmt(h));
+            let r0_expr = format!("(({r})*min({hw},{hh}))", r = fmt(round), hw = hw_expr, hh = hh_expr);
+            // 羽化过渡带半宽（像素）：feather 相对 min(半宽,半高) 折算
+            let ex_expr = format!("(max(({f})*min({hw},{hh}),0.001))", f = fmt(feather), hw = hw_expr, hh = hh_expr);
+            // 像素 → 矩形局部坐标（绕中心旋转 -a）
+            let dx = format!("((X-({x})*W)*({ca})+(Y-({y})*H)*({sa}))",
+                x = fmt(x), y = fmt(y), ca = fmt(ca), sa = fmt(sa));
+            let dy = format!("(-(X-({x})*W)*({sa})+(Y-({y})*H)*({ca}))",
+                x = fmt(x), y = fmt(y), sa = fmt(sa), ca = fmt(ca));
+            // 圆角矩形有符号距离场 (sdRoundBox)，单位：像素
+            let qx = format!("(abs({dx})-(({hw})-({r0})))", dx = dx, hw = hw_expr, r0 = r0_expr);
+            let qy = format!("(abs({dy})-(({hh})-({r0})))", dy = dy, hh = hh_expr, r0 = r0_expr);
+            let sd = format!("(min(max({qx},{qy}),0)+sqrt(max({qx},0)*max({qx},0)+max({qy},0)*max({qy},0))-({r0}))",
+                qx = qx, qy = qy, r0 = r0_expr);
+            // 形状内 alpha（1 内 / 0 外，边缘按 ex 平滑过渡）
+            let mut a_expr = format!("clip(0.5-({sd})/({ex}),0,1)", sd = sd, ex = ex_expr);
+            if mask.invert {
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
+            }
+            // 形状外 RGB 乘 0（黑色遮罩），形状内保留原像素
+            Some(format!(
+                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
+                a_expr = a_expr
+            ))
+        }
+        "mirror" => {
+            // 前端语义（maskRender.ts mirror）：同 linear 几何，但相反——
+            //   中心透明、两端可见（0→可见, 0.5→透明, 1→可见），即 linear 的 a 取反。
+            // 原实现是沿 X 轴对称、仅有 feather/opacity、无 angle/width，此处重写为带 angle 的对称渐变带。
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let ang = mask.params.get("angle").copied().unwrap_or(0.0) * std::f64::consts::PI / 180.0;
+            let ca = ang.cos();
+            let sa = ang.sin();
+            let width = mask.params.get("width").copied().unwrap_or(0.3);
+            let feather = mask.feather.max(0.0);
+            let half_expr = format!("({width}*min(W,H)*(1+{feather}*2))", width = fmt(width), feather = fmt(feather));
+            let d_expr = format!("((X-{x}*W)*{ca}+(Y-{y}*H)*{sa})", x = fmt(x), y = fmt(y), ca = fmt(ca), sa = fmt(sa));
+            // 中心透明、两端可见：a = clip(|d|/half_eff, 0, 1)（linear 的 1-a）
+            let mut a_expr = format!("clip(abs({d})/({half}),0,1)", d = d_expr, half = half_expr);
+            if mask.invert {
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
+            }
+            Some(format!(
+                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
+                a_expr = a_expr
+            ))
         }
         _ => None,
     }

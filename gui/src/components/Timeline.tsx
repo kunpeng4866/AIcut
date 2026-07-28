@@ -587,6 +587,13 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
       <span style={{ position: 'absolute', top: 2, left: 8, fontSize: 11, color: '#eee', pointerEvents: 'none' }}>
         {clip.assetId}
       </span>
+      {/* 蒙版标记：带启用蒙版的片段右上角显示图标 */}
+      {clip.masks && clip.masks.some((m) => m.enabled) && (
+        <span
+          title="该片段含蒙版"
+          style={{ position: 'absolute', top: 2, right: 6, fontSize: 11, color: '#4caf50', pointerEvents: 'none', zIndex: 6 }}
+        >🔲</span>
+      )}
       {clip.text && (
         <span style={{ position: 'absolute', top: 18, left: 8, right: 8, fontSize: 10, color: '#ccc', pointerEvents: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {clip.text.content}

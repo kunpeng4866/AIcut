@@ -2,8 +2,9 @@
 // useWebGPUPreview — WebGPU 实时视频预览 hook（多轨道纹理叠加）
 // 负责：设备初始化、WGSL 渲染管线、rAF 渲染循环（多视频帧上传→多 pass Over 合成→渲染）、资源清理
 import { useEffect, useRef, useState } from 'react';
-import type { ClipConfig, AssetConfig } from '../types';
+import type { ClipConfig, AssetConfig, MaskConfig } from '../types';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
+import { composeMaskedFrame } from '../utils/maskRender';
 
 // 从 transform CSS 字符串（如 "scale(1.12)"）解析缩放因子，供 zoom 转场折进 WebGPU 用户 scale
 function parseScale(s: string | null | undefined): number {
@@ -352,6 +353,19 @@ export function useWebGPUPreview({
         items.forEach((item, idx) => {
           const { source, clip, vw, vh, extraOpacity, offsetX, maskRect } = item;
 
+          // 蒙版合成（最小侵入式）：把「视频帧 × 蒙版 alpha」画到离屏 canvas，再上传纹理，
+          // 不改动现有 WGSL shader 与 transform/opacity/滤镜管线。无启用蒙版时回退用原帧。
+          let uploadSource: CanvasImageSource = source;
+          const maskList = (clip.masks || []).filter((m: any) => m && m.enabled);
+          if (maskList.length > 0) {
+            try {
+              const composed = composeMaskedFrame(source, vw, vh, maskList as MaskConfig[]);
+              if (composed) uploadSource = composed;
+            } catch {
+              /* 合成失败则回退原帧 */
+            }
+          }
+
           // 上传视频帧到临时纹理
           const texture = device.createTexture({
             size: [vw, vh],
@@ -360,7 +374,7 @@ export function useWebGPUPreview({
           });
           try {
             device.queue.copyExternalImageToTexture(
-              { source, flipY: false },
+              { source: uploadSource, flipY: false },
               { texture },
               [vw, vh],
             );

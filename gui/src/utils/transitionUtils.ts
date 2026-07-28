@@ -4,7 +4,7 @@
 //   duration: 秒（转场窗长度），默认 0.5
 //   direction: 'left' | 'right' | 'up' | 'down'（仅 wipe 用，默认 'right'）
 // 转场窗：[timelineOut - duration, timelineOut)
-import { ClipConfig, TrackConfig, TransitionEasing, MaskShape } from '../types';
+import { ClipConfig, TrackConfig, TransitionEasing, WipeMaskShape } from '../types';
 
 // 圆形遮罩（归一化画布坐标，0..1，y-down）；feather 为归一化羽化宽度（0..~0.15）
 export interface CircleMask { cx: number; cy: number; r: number; feather: number }
@@ -52,7 +52,7 @@ function transitionOf(clip: ClipConfig) {
   const easing = (tr.easing as TransitionEasing) || 'ease-in-out';
   const feather = tr.feather === undefined ? 10 : Math.max(0, Math.min(30, tr.feather));
   const blurAmount = tr.blurAmount === undefined ? 65 : Math.max(0, Math.min(100, tr.blurAmount));
-  const maskShape = (tr.maskShape as MaskShape) || 'linear';
+  const maskShape = (tr.maskShape as WipeMaskShape) || 'linear';
   return { type: tr.transitionType, dur, dir, easing, feather, blurAmount, maskShape };
 }
 

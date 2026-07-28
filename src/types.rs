@@ -19,6 +19,38 @@ pub struct Effect {
     pub enabled: bool,
 }
 
+/// 蒙版描边（graph.rs 导出路径暂不支持，仅做数据承载）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MaskStroke {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub color: String, // "#rrggbb"
+    #[serde(default)]
+    pub size: f64,     // px
+    #[serde(default)]
+    pub opacity: f64,  // 0~1
+    #[serde(default)]
+    pub blur: f64,     // px
+}
+
+/// 蒙版阴影（graph.rs 导出路径暂不支持，仅做数据承载）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MaskShadow {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub opacity: f64,
+    #[serde(default)]
+    pub blur: f64,
+    #[serde(default)]
+    pub distance: f64,
+    #[serde(default)]
+    pub angle: f64, // deg
+}
+
 /// 蒙版（片段透明度形状）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mask {
@@ -29,6 +61,10 @@ pub struct Mask {
     pub invert: bool,
     #[serde(default)]
     pub feather: f64,
+    #[serde(default)]
+    pub stroke: MaskStroke,
+    #[serde(default)]
+    pub shadow: MaskShadow,
 }
 
 /// 滤镜实例（来自 Clip.filters）

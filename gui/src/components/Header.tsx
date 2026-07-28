@@ -95,8 +95,14 @@ export default function Header() {
     }
   };
 
-  // 打开导出对话框
-  const handleExport = () => setShowExport(true);
+  // 打开导出对话框（含蒙版轻提示，仅提示不阻塞）
+  const handleExport = () => {
+    const hasMask = project.tracks.some((t) => t.clips.some((c) => (c.masks?.length ?? 0) > 0));
+    if (hasMask && !window.confirm('当前工程包含蒙版，仅简单工程（矩形/圆形/线性/镜面、无旋转无描边阴影）可正确导出，复杂蒙版可能丢失。是否继续？')) {
+      return;
+    }
+    setShowExport(true);
+  };
 
   // 打开AI配置向导
   const handleConfig = () => configStore.setShowConfigWizard(true);

@@ -46,7 +46,7 @@ export interface ClipConfig {
   id: string; assetId: string; src_range: RangeConfig; timelineIn: number; timelineOut: number;
   transform?: TransformConfig; volume?: number; speed?: number;
   time_remap?: TimeRemapConfig;
-  effects?: any[]; masks?: any[]; filters?: any[]; keyframes?: Record<string, any>;
+  effects?: any[]; masks?: MaskConfig[]; filters?: any[]; keyframes?: Record<string, any>;
   text?: TextContent;
   subtitle?: SubtitleContent;
   // 转场：本片段结尾与同轨下一片段之间的过渡（None = 无）
@@ -68,8 +68,40 @@ export type TransitionType =
 export type WipeDirection = 'left' | 'right' | 'up' | 'down';
 // 缓动曲线：'linear' 易显卡顿；'ease-in-out' 为丝滑默认
 export type TransitionEasing = 'linear' | 'ease-in-out';
-// 擦除遮罩形状：'linear' 线性推扫；'circle' 圆形展开
-export type MaskShape = 'linear' | 'circle';
+// 擦除遮罩形状：'linear' 线性推扫；'circle' 圆形展开（转场专用，与下方蒙版 MaskShape 不同）
+export type WipeMaskShape = 'linear' | 'circle';
+
+// ── 蒙版（Mask）数据模型（前后端统一）──
+// shape 取值与后端 Mask.shape 完全一致
+export type MaskShape = 'rect' | 'circle' | 'linear' | 'mirror';
+// 描边
+export interface MaskStroke {
+  enabled: boolean;
+  color: string;
+  size: number;      // 归一化 0~1（相对帧短边）
+  opacity: number;   // 0~1
+  blur: number;      // 归一化 0~1
+}
+// 阴影
+export interface MaskShadow {
+  enabled: boolean;
+  color: string;
+  opacity: number;   // 0~1
+  blur: number;      // 归一化 0~1
+  distance: number;  // 归一化 0~1
+  angle: number;     // 角度（度）
+}
+// 单条蒙版
+export interface MaskConfig {
+  id: string;
+  shape: MaskShape;
+  enabled: boolean;
+  invert: boolean;
+  feather: number;   // 羽化：归一化 0~1（预览按帧短边换算像素）
+  params: Record<string, number>; // 形状参数（归一化 0~1）
+  stroke?: MaskStroke;
+  shadow?: MaskShadow;
+}
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'
   duration?: number;               // 秒，默认 0.5，夹取 0.1–3.0
@@ -77,7 +109,7 @@ export interface TransitionConfig {
   easing?: TransitionEasing;       // 缓动，默认 'ease-in-out'
   feather?: number;                // 遮罩羽化 0–30（像素感），默认 10
   blurAmount?: number;             // 模糊过渡强度 0–100，默认 65
-  maskShape?: MaskShape;           // wipe 遮罩形状，默认 'linear'
+  maskShape?: WipeMaskShape;       // wipe 遮罩形状，默认 'linear'
 }
 export interface TrackConfig {
   id: string; type: string; order?: number; clips: ClipConfig[];

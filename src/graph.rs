@@ -95,6 +95,9 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     if rot.abs() > 0.01 { chain.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
     if !clip_filters.is_empty() { chain.push_str(&format!(",{}", clip_filters)); }
+    // 蒙版依次串接：每个 mask 通过 geq 把形状外像素 RGB 乘 0（黑色遮罩，叠加在黑色 base 上即透明）。
+    // 因此多个 mask 呈「交集(AND)」叠加——像素需同时满足所有 mask 才可见。
+    // MVP 导出路径未实现真正的「并集(OR)」；如需并集应改用 alpha 通道 max 合成（见 build_mask_spec 注释）。
     for mask in &c.masks {
         if let Some(s) = build_mask_spec(mask) { chain.push_str(&format!(",{}", s)); }
     }
