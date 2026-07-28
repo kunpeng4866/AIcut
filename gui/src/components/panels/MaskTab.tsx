@@ -175,7 +175,9 @@ function defaultStroke(): MaskStroke {
   return { enabled: false, color: '#ffffff', size: 0.02, opacity: 1, blur: 0 };
 }
 function defaultShadow(): MaskShadow {
-  return { enabled: false, color: '#000000', opacity: 0.6, blur: 0.05, distance: 0.05, angle: 135 };
+  // 预览背景为纯黑 (#000)，纯黑阴影在黑底上不可见，因此默认使用灰蓝色光晕。
+  // 用户仍可手动改为 #000000，此时在黑色预览背景下会融入背景（属预期）。
+  return { enabled: false, color: '#7a8a9a', opacity: 0.75, blur: 0.05, distance: 0.05, angle: 135 };
 }
 
 // 几何参数（按形状显示）
