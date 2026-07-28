@@ -362,17 +362,52 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
 /// 线性(linear) → geq 沿 angle 方向的渐变带（中心可见、两端渐隐）；
 /// 圆形(circle) → geq 以 (x,y) 为中心的距离场遮罩；
 /// 矩形(rect) → geq 圆角矩形距离场遮罩（支持羽化/反转/圆角/旋转）；
-/// 镜面(mirror) → geq 带 angle 的对称渐变带（中心透明、两端可见）。
+/// 镜面(mirror) → geq 带 angle 的对称渐变带（中心透明、两端可见）；
+/// 多边形(polygon) / 星形(star) → geq 极坐标有符号距离场遮罩。
 ///
 /// 几何语义与 gui/src/utils/maskRender.ts 前端预览精确一致：
 ///   circle : 中心 (x,y) 归一化、半径 radius 归一化（相对帧短边 min(w,h)）
 ///   linear : 以 (x,y) 为中心、angle 为渐变轴方向，half=width*min(W,H)，中心可见两端渐隐
 ///   mirror : 同 linear 几何，但相反——中心透明、两端可见
+///   polygon/star : 中心 (x,y) 归一化、外接/外顶点半径 radius*min(W,H)；rotation=0 时
+///                 第一个顶点指向正上方（屏幕顶部），正角度=顺时针；star 另有 innerRatio
+///                 (内/外半径比 0..1) 与 sides（整数 ≥3）。
 ///
-/// 注：除 colorchannelmixer 调 alpha 外，形状遮罩采用「把形状外像素 RGB 乘 0」的黑色遮罩方式，
+/// 注：形状遮罩采用「把形状外像素 RGB 乘 0」的黑色遮罩方式，
 /// 叠加在 graph.rs 的黑色 base 上即呈现透明效果。
-/// 多个 mask 依次串接时呈「交集(AND)」叠加，真正的并集(OR)在 MVP 导出路径未实现。
-pub fn build_mask_spec(mask: &Mask) -> Option<String> {
+///
+/// 多蒙版：本函数接收该 clip 的全部蒙版，在**单一 geq** 中按 alpha-max 求并集
+/// （a_union = max(a_1, a_2, ...)），与前端预览的 lighter 并集语义对齐；
+/// 单蒙版时输出与旧版逐字节一致。
+pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
+    let mut exprs = Vec::new();
+    for m in masks {
+        if let Some(a) = mask_alpha_expr(m) {
+            exprs.push(a);
+        }
+    }
+    if exprs.is_empty() {
+        return None;
+    }
+    // alpha-max 并集：多蒙版取各蒙版 alpha 的最大值（任一蒙版覆盖即可见）。
+    let a_union = if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap()
+    } else {
+        let mut acc = exprs.pop().unwrap();
+        while let Some(e) = exprs.pop() {
+            acc = format!("max({}, {})", e, acc);
+        }
+        acc
+    };
+    Some(format!(
+        "geq=r='r(X,Y)*({a_union})':g='g(X,Y)*({a_union})':b='b(X,Y)*({a_union})'",
+        a_union = a_union
+    ))
+}
+
+/// 计算单个蒙版的 geq alpha 表达式（0..1，已应用 invert）。
+/// None 表示该 shape 不支持或为空。该表达式是 build_mask_spec 并集的核心构件。
+fn mask_alpha_expr(mask: &Mask) -> Option<String> {
     if mask.shape.is_empty() {
         return None;
     }
@@ -400,11 +435,7 @@ pub fn build_mask_spec(mask: &Mask) -> Option<String> {
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
-            // 形状外 RGB 乘 0（黑色遮罩），形状内保留原像素（叠加在黑色 base 上即透明）
-            Some(format!(
-                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
-                a_expr = a_expr
-            ))
+            Some(a_expr)
         }
         "circle" => {
             // 前端语义：中心 (x,y) 归一化、半径 radius 归一化（相对帧短边 min(w,h)）。
@@ -423,10 +454,7 @@ pub fn build_mask_spec(mask: &Mask) -> Option<String> {
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
-            Some(format!(
-                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
-                a_expr = a_expr
-            ))
+            Some(a_expr)
         }
         "rect" => {
             // 归一化坐标/尺寸约定（与前端一致）：
@@ -469,11 +497,7 @@ pub fn build_mask_spec(mask: &Mask) -> Option<String> {
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
-            // 形状外 RGB 乘 0（黑色遮罩），形状内保留原像素
-            Some(format!(
-                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
-                a_expr = a_expr
-            ))
+            Some(a_expr)
         }
         "mirror" => {
             // 前端语义（maskRender.ts mirror）：同 linear 几何，但相反——
@@ -493,10 +517,75 @@ pub fn build_mask_spec(mask: &Mask) -> Option<String> {
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
-            Some(format!(
-                "geq=r='r(X,Y)*({a_expr})':g='g(X,Y)*({a_expr})':b='b(X,Y)*({a_expr})'",
-                a_expr = a_expr
-            ))
+            Some(a_expr)
+        }
+        "polygon" => {
+            // 前端语义（maskRender.ts polygon，与后端共享 SDF 公式）：
+            //   中心 (x,y) 归一化（相对帧宽高），外接半径 R = radius*min(W,H)；
+            //   sides：整数 ≥3；rotation：度，rotation=0 时第一顶点指向正上方，正角度顺时针。
+            // 极坐标有符号距离场（负=形状内部）：
+            //   r = sqrt(px²+py²), ang = atan2(py,px) （-PI/2 指向正上方）
+            //   seg = 2*PI/sides；aa = mod(ang - rotRad + PI/2 + 0.5*seg, seg) - 0.5*seg （0 处为顶点）
+            //   edgeDist = R*cos(0.5*seg)/cos(aa)；sd = r - edgeDist
+            // 羽化 feather 近似前端 blur：软边 ≈ feather*min(W,H)*0.5（与 circle 同系数）。
+            let feather = mask.feather.max(0.0);
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let radius = mask.params.get("radius").copied().unwrap_or(0.3);
+            let sides = mask.params.get("sides").copied().unwrap_or(3.0).max(3.0);
+            let rotation = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let px = format!("(X-{}*W)", fmt(x));
+            let py = format!("(Y-{}*H)", fmt(y));
+            let r_expr = format!("sqrt({}*{}+{}*{})", px, px, py, py);
+            let ang = format!("atan2({},{})", py, px);
+            let half_seg = fmt(std::f64::consts::PI / sides);
+            let seg = fmt(2.0 * std::f64::consts::PI / sides);
+            let rot_rad = fmt(rotation * std::f64::consts::PI / 180.0);
+            // aa = mod(ang - rotRad + PI/2 + 0.5*seg, seg) - 0.5*seg （0 处为顶点，seg=2*PI/sides）
+            let aa = format!("(mod({}+PI/2+{}-({}),{})-{})", ang, half_seg, rot_rad, seg, half_seg);
+            let r_px = format!("({}*min(W,H))", fmt(radius));
+            let edge_dist = format!("(({})*cos({})/cos({}))", r_px, half_seg, aa);
+            let sd = format!("({}-({}))", r_expr, edge_dist);
+            let fp = format!("max(1,({}*min(W,H)*0.5))", fmt(feather));
+            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
+            if mask.invert {
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
+            }
+            Some(a_expr)
+        }
+        "star" => {
+            // 前端语义（maskRender.ts star，与后端共享 SDF 公式）：
+            //   中心 (x,y) 归一化，外顶点半径 R = radius*min(W,H)，内顶点半径 Rin = innerRatio*R；
+            //   sides：星形尖数（整数 ≥3），rotation：度（rotation=0 时一尖指向正上方，顺时针）。
+            // 径向近似（足以做遮罩）：在顶点(R)与扇区边(Rin)间按 t=|aa|/(0.5*seg) 线性插值边界半径：
+            //   edgeDist = R + (Rin - R)*t；sd = r - edgeDist。其余约定同 polygon。
+            let feather = mask.feather.max(0.0);
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let radius = mask.params.get("radius").copied().unwrap_or(0.3);
+            let inner_ratio = mask.params.get("innerRatio").copied().unwrap_or(0.5).clamp(0.0, 1.0);
+            let sides = mask.params.get("sides").copied().unwrap_or(3.0).max(3.0);
+            let rotation = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let px = format!("(X-{}*W)", fmt(x));
+            let py = format!("(Y-{}*H)", fmt(y));
+            let r_expr = format!("sqrt({}*{}+{}*{})", px, px, py, py);
+            let ang = format!("atan2({},{})", py, px);
+            let half_seg = fmt(std::f64::consts::PI / sides);
+            let seg = fmt(2.0 * std::f64::consts::PI / sides);
+            let rot_rad = fmt(rotation * std::f64::consts::PI / 180.0);
+            // aa = mod(ang - rotRad + PI/2 + 0.5*seg, seg) - 0.5*seg （0 处为顶点，seg=2*PI/sides）
+            let aa = format!("(mod({}+PI/2+{}-({}),{})-{})", ang, half_seg, rot_rad, seg, half_seg);
+            let r_px = format!("({}*min(W,H))", fmt(radius));
+            let rin_px = format!("({}*{})", fmt(inner_ratio), r_px);
+            let t = format!("(abs({})/{})", aa, half_seg);
+            let edge_dist_star = format!("(({})+(({})-({}))*({}))", r_px, rin_px, r_px, t);
+            let sd = format!("({}-({}))", r_expr, edge_dist_star);
+            let fp = format!("max(1,({}*min(W,H)*0.5))", fmt(feather));
+            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
+            if mask.invert {
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
+            }
+            Some(a_expr)
         }
         _ => None,
     }

@@ -56,9 +56,11 @@ const SHAPES: { value: MaskShape; label: string }[] = [
   { value: 'circle', label: '圆形' },
   { value: 'linear', label: '线性' },
   { value: 'mirror', label: '镜面' },
+  { value: 'polygon', label: '多边形' },
+  { value: 'star', label: '星形' },
 ];
 
-const SHAPE_LABEL: Record<MaskShape, string> = { rect: '矩形', circle: '圆形', linear: '线性', mirror: '镜面' };
+const SHAPE_LABEL: Record<MaskShape, string> = { rect: '矩形', circle: '圆形', linear: '线性', mirror: '镜面', polygon: '多边形', star: '星形' };
 
 export default function MaskTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
@@ -71,14 +73,10 @@ export default function MaskTab({ clip, trackId }: { clip: ClipConfig; trackId: 
   const commitLive = (next: MaskConfig[]) => updateClipLive(trackId, clip.id, { masks: next } as Partial<ClipConfig>);
 
   const addMask = () => {
-    // MVP 收敛为单蒙版：多蒙版并集导出留 v2（避免预览并集/导出交集不一致）
-    if (masks.length > 0) {
-      alert('MVP 暂仅支持单个蒙版（多蒙版并集将于后续版本支持）');
-      return;
-    }
+    // v2：放开多蒙版限制，允许添加多个蒙版（预览与导出均走并集 lighter 叠加）。
     const m = createDefaultMask('rect', uid('mask'));
     pushHistorySnapshot();
-    const next = [m];
+    const next = [...masks, m];
     commit(next);
     setSelectedId(m.id);
   };
@@ -203,6 +201,22 @@ function GeomParams({ mask, onParam, onEditStart }: { mask: MaskConfig; onParam:
         <ParamSlider label="X" value={num('x', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('x', v)} onEditStart={onEditStart} />
         <ParamSlider label="Y" value={num('y', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('y', v)} onEditStart={onEditStart} />
         <ParamSlider label="半径" value={num('radius', 0.3)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('radius', v)} onEditStart={onEditStart} />
+        <ParamSlider label="羽化" value={num('feather', 0)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('feather', v)} onEditStart={onEditStart} />
+      </div>
+    );
+  }
+  if (mask.shape === 'polygon' || mask.shape === 'star') {
+    const sides = Math.round(num('sides', mask.shape === 'star' ? 5 : 6));
+    return (
+      <div>
+        <ParamSlider label="X" value={num('x', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('x', v)} onEditStart={onEditStart} />
+        <ParamSlider label="Y" value={num('y', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('y', v)} onEditStart={onEditStart} />
+        <ParamSlider label="半径" value={num('radius', 0.3)} min={0} max={0.5} step={0.01} editable onChange={(v) => onParam('radius', v)} onEditStart={onEditStart} />
+        <ParamSlider label="边数" value={sides} min={3} max={12} step={1} editable onChange={(v) => onParam('sides', Math.round(v))} onEditStart={onEditStart} />
+        <ParamSlider label="旋转" value={num('rotation', 0)} min={-180} max={180} step={1} unit="°" editable onChange={(v) => onParam('rotation', v)} onEditStart={onEditStart} />
+        {mask.shape === 'star' && (
+          <ParamSlider label="内比" value={num('innerRatio', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('innerRatio', v)} onEditStart={onEditStart} />
+        )}
         <ParamSlider label="羽化" value={num('feather', 0)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('feather', v)} onEditStart={onEditStart} />
       </div>
     );

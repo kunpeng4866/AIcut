@@ -15,6 +15,10 @@ export function defaultMaskParams(shape: MaskShape): Record<string, number> {
       return { x: 0.5, y: 0.5, angle: 0, width: 0.3, feather: 0 };
     case 'mirror':
       return { x: 0.5, y: 0.5, angle: 0, width: 0.3, spread: 0.3, feather: 0 };
+    case 'polygon':
+      return { x: 0.5, y: 0.5, radius: 0.3, sides: 6, rotation: 0, feather: 0 };
+    case 'star':
+      return { x: 0.5, y: 0.5, radius: 0.3, innerRatio: 0.5, sides: 5, rotation: 0, feather: 0 };
     default:
       return { x: 0.5, y: 0.5, width: 0.5, height: 0.5, rotation: 0, roundness: 0, feather: 0 };
   }
@@ -61,6 +65,42 @@ function tracePath(ctx: CanvasRenderingContext2D, w: number, h: number, mask: Ma
     ctx.rotate(ang);
     ctx.beginPath();
     ctx.rect(-w, -h, w * 2, h * 2);
+  } else if (mask.shape === 'polygon' || mask.shape === 'star') {
+    // 顶点角度：phi_k = -PI/2 + rotRad + k*seg
+    //   canvas atan2 中 -PI/2 指向正上方；rotRad=rotation*PI/180，正角度=顺时针。
+    //   与后端 filters.rs 极坐标 SDF 顶点相位 ang+PI/2 对齐（rotation=0 顶点在正上方）。
+    const cx = (p.x ?? 0.5) * w;
+    const cy = (p.y ?? 0.5) * h;
+    const m = Math.min(w, h);
+    const R = Math.max(1, (p.radius ?? 0.3) * m);
+    const sides = Math.max(3, Math.round(p.sides ?? (mask.shape === 'star' ? 5 : 6)));
+    const rotRad = ((p.rotation ?? 0) * Math.PI) / 180;
+    const seg = (Math.PI * 2) / sides;
+    ctx.beginPath();
+    if (mask.shape === 'star') {
+      const Rin = Math.max(1, (p.innerRatio ?? 0.5) * R);
+      for (let k = 0; k < sides; k++) {
+        const phi = -Math.PI / 2 + rotRad + k * seg;
+        const ox = cx + R * Math.cos(phi);
+        const oy = cy + R * Math.sin(phi);
+        const pin = phi + seg / 2;
+        const ix = cx + Rin * Math.cos(pin);
+        const iy = cy + Rin * Math.sin(pin);
+        if (k === 0) ctx.moveTo(ox, oy);
+        else ctx.lineTo(ox, oy);
+        ctx.lineTo(ix, iy);
+      }
+      ctx.closePath();
+    } else {
+      for (let k = 0; k < sides; k++) {
+        const phi = -Math.PI / 2 + rotRad + k * seg;
+        const px = cx + R * Math.cos(phi);
+        const py = cy + R * Math.sin(phi);
+        if (k === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    }
   }
 }
 

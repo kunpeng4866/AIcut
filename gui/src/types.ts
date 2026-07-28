@@ -73,7 +73,13 @@ export type WipeMaskShape = 'linear' | 'circle';
 
 // ── 蒙版（Mask）数据模型（前后端统一）──
 // shape 取值与后端 Mask.shape 完全一致
-export type MaskShape = 'rect' | 'circle' | 'linear' | 'mirror';
+// 几何/旋转契约（前后端一致）：
+//   polygon params: { x, y, radius, sides, rotation }
+//   star    params: { x, y, radius, innerRatio, sides, rotation }
+//   x,y 中心归一化 0..1；radius 相对 min(W,H)；sides≥3 整数；rotation 角度(度)
+//   innerRatio 星形内/外半径比 0..1
+//   rotation=0 时第一个顶点指向正上方；正角度=顺时针（与后端 filters.rs 极坐标 SDF 顶点相位 ang+PI/2 对齐）
+export type MaskShape = 'rect' | 'circle' | 'linear' | 'mirror' | 'polygon' | 'star';
 // 描边
 export interface MaskStroke {
   enabled: boolean;
