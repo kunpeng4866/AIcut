@@ -81,7 +81,7 @@ function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
 
 // 把单个蒙版形状（白色=可见）画到 ctx（已 cleared）。含羽化（模糊）与渐变。
 function drawShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: MaskConfig): void {
-  const feather = mask.feather ?? 0;
+  const feather = mask.params?.feather ?? mask.feather ?? 0;
   if (mask.shape === 'linear' || mask.shape === 'mirror') {
     const p = mask.params || {};
     const cx = (p.x ?? 0.5) * w;
