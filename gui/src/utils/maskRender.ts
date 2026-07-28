@@ -170,11 +170,13 @@ function drawStrokeShadow(ctx: CanvasRenderingContext2D, w: number, h: number, m
     }
     if (m.shadow?.enabled) {
       ctx.save();
-      ctx.globalAlpha = clamp01(m.shadow.opacity ?? 1);
-      ctx.shadowColor = m.shadow.color || '#000000';
-      ctx.shadowBlur = (m.shadow.blur ?? 0) * minSide * 0.2;
+      // 不透明：烘焙进 shadowColor 的 alpha（比依赖 globalAlpha 更稳健、跨浏览器一致）。
+      // 注意：shadowColor 自带 alpha，这里 globalAlpha 保持 1，避免双重相乘压暗。
+      ctx.globalAlpha = 1;
+      ctx.shadowColor = hexToRgba(m.shadow.color || '#000000', clamp01(m.shadow.opacity ?? 1));
+      ctx.shadowBlur = Math.max(0, m.shadow.blur ?? 0) * minSide * 0.2;
       const a = ((m.shadow.angle ?? 0) * Math.PI) / 180;
-      const dist = (m.shadow.distance ?? 0) * minSide;
+      const dist = Math.max(0, m.shadow.distance ?? 0) * minSide;
       ctx.shadowOffsetX = Math.cos(a) * dist;
       ctx.shadowOffsetY = Math.sin(a) * dist;
       // 透明填充 + 实心阴影：仅显示投影，不遮挡内容
@@ -187,6 +189,16 @@ function drawStrokeShadow(ctx: CanvasRenderingContext2D, w: number, h: number, m
 }
 
 function clamp01(v: number): number { return Math.max(0, Math.min(1, v)); }
+
+// 把 #rgb / #rrggbb 颜色按 alpha(0~1) 转 rgba 字符串（供阴影不透明烘焙进颜色使用）。
+function hexToRgba(hex: string, alpha: number): string {
+  let h = (hex || '#000000').replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  return `rgba(${r},${g},${b},${clamp01(alpha)})`;
+}
 
 // WebGPU 用：把视频帧（source）与蒙版 alpha 合成，返回含 alpha 的 canvas（白=可见区保留）。
 // 无启用蒙版返回 null（调用方回退用原帧）。
@@ -225,14 +237,18 @@ export function buildMaskImageUrl(masks: MaskConfig[]): string | null {
 }
 
 // HTML5 用：把启用蒙版中的阴影合并为一个 CSS drop-shadow 字符串（近似）。无阴影返回 null。
+// 不透明：烘焙进颜色的 rgba alpha（修复此前 drop-shadow 颜色用不透明 hex、opacity 失效的问题）。
+// 归一化参数按参考显示尺寸换算，保证不同预览尺寸下都有明显响应。
 export function buildMaskShadowFilter(masks: MaskConfig[]): string | null {
   const enabled = masks.filter((m) => m.enabled && m.shadow?.enabled);
   if (enabled.length === 0) return null;
   const sh = enabled[0].shadow!;
-  const blur = (sh.blur ?? 0) * 100;
+  const ref = 480; // 参考显示短边（px），使 blur/distance 归一化参数有稳定可见幅度
+  const blur = Math.max(0, sh.blur ?? 0) * ref * 0.5;
   const a = ((sh.angle ?? 0) * Math.PI) / 180;
-  const dist = (sh.distance ?? 0) * 60;
+  const dist = Math.max(0, sh.distance ?? 0) * ref;
   const dx = Math.round(Math.cos(a) * dist);
   const dy = Math.round(Math.sin(a) * dist);
-  return `drop-shadow(${dx}px ${dy}px ${Math.round(blur)}px ${sh.color || '#000'})`;
+  const color = hexToRgba(sh.color || '#000000', clamp01(sh.opacity ?? 1));
+  return `drop-shadow(${dx}px ${dy}px ${Math.round(blur)}px ${color})`;
 }
