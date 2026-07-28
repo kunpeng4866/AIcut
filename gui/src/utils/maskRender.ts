@@ -46,8 +46,9 @@ function tracePath(ctx: CanvasRenderingContext2D, w: number, h: number, mask: Ma
   if (mask.shape === 'rect') {
     const cx = (p.x ?? 0.5) * w;
     const cy = (p.y ?? 0.5) * h;
-    const ww = Math.max(1, (p.width ?? 0.5) * w);
-    const hh = Math.max(1, (p.height ?? 0.5) * h);
+    const m = Math.min(w, h);
+    const ww = Math.max(1, (p.width ?? 0.5) * m);
+    const hh = Math.max(1, (p.height ?? 0.5) * m);
     const rot = ((p.rotation ?? 0) * Math.PI) / 180;
     ctx.translate(cx, cy);
     ctx.rotate(rot);
@@ -194,6 +195,25 @@ function drawShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: Ma
     ctx.fillRect(0, 0, w, h);
     ctx.restore();
     return;
+  }
+  if (mask.shape === 'circle') {
+    // 圆形羽化：径向渐变从圆心等比例收缩/扩展，避免 blur 在非方画布上的扭曲
+    const m = Math.min(w, h);
+    const fp = feather * m * 0.5;
+    if (feather > 0 && fp > 0.5) {
+      const cx = (mask.params?.x ?? 0.5) * w;
+      const cy = (mask.params?.y ?? 0.5) * h;
+      const r = Math.max(1, (mask.params?.radius ?? 0.3) * m);
+      const innerR = Math.max(0.5, r - fp);
+      const outerR = r + fp;
+      const grad = ctx.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
+      grad.addColorStop(0, 'rgba(255,255,255,1)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+      return;
+    }
+    // 无羽化或羽化极小：走 tracePath + fill 路径
   }
   ctx.save();
   if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * Math.min(w, h) * 0.5)}px)`;
