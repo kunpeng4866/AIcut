@@ -34,6 +34,7 @@ mod graph;
 use thiserror::Error;
 
 use crate::project::{Project, Track, Transform};
+use crate::types::Mask;
 
 /// 引擎错误类型
 #[derive(Error, Debug)]
@@ -158,17 +159,20 @@ fn can_mask_via_graph(project: &Project) -> bool {
     // 多蒙版并集已支持（build_mask_spec 接收 &[Mask] 做 alpha-max），不再禁用。
     // rect 仍仅限 rotation==0（graph.rs 仅生成轴对齐 geq）。
     // 自增量 2 起，stroke/shadow 已由 build_mask_spec 合成导出，故此处不再禁用。
-    let supported = |shape: &str, params: &std::collections::HashMap<String, f64>| -> bool {
-        match shape {
-            "circle" | "linear" | "mirror" | "polygon" | "star" => true,
-            "rect" => params.get("rotation").copied().unwrap_or(0.0).abs() < 1e-3, // 仅轴对齐矩形
+    let supported = |m: &Mask| -> bool {
+        match m.shape.as_str() {
+            "circle" | "linear" | "mirror" | "polygon" | "star" | "heart" => true,
+            // 文字蒙版：需非空 text 内容才走 graph.rs（drawtext）导出
+            "text" => !m.text.trim().is_empty(),
+            // 矩形仍仅限轴对齐（graph.rs 只生成轴对齐 geq）
+            "rect" => m.params.get("rotation").copied().unwrap_or(0.0).abs() < 1e-3,
             _ => false,
         }
     };
     for track in &project.tracks {
         for clip in &track.clips {
             for m in &clip.masks {
-                if !supported(&m.shape, &m.params) {
+                if !supported(m) {
                     return false;
                 }
             }
@@ -420,7 +424,7 @@ mod tests {
             invert: false,
             feather: 0.0,
             stroke: crate::types::MaskStroke { enabled: true, ..Default::default() },
-            shadow: Default::default(),
+            shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }
@@ -440,7 +444,7 @@ mod tests {
             invert: false,
             feather: 0.1,
             stroke: Default::default(),
-            shadow: Default::default(),
+            shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }
@@ -456,11 +460,11 @@ mod tests {
         p2.insert("angle".to_string(), 90.0);
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "circle".to_string(), params: p1, invert: false, feather: 0.0,
-            stroke: Default::default(), shadow: Default::default(),
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
         });
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "linear".to_string(), params: p2, invert: false, feather: 0.0,
-            stroke: Default::default(), shadow: Default::default(),
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }
@@ -477,7 +481,7 @@ mod tests {
         p.insert("rotation".to_string(), 0.0);
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "polygon".to_string(), params: p, invert: false, feather: 0.0,
-            stroke: Default::default(), shadow: Default::default(),
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }
@@ -495,7 +499,39 @@ mod tests {
         p.insert("rotation".to_string(), 0.0);
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "star".to_string(), params: p, invert: false, feather: 0.0,
-            stroke: Default::default(), shadow: Default::default(),
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
+        });
+        assert!(is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_with_heart_mask() {
+        // heart 蒙版（用 geq 隐式函数软边实现）→ 支持导出，仍视为简单工程
+        let mut project = make_simple_project();
+        let mut p = std::collections::HashMap::new();
+        p.insert("x".to_string(), 0.5);
+        p.insert("y".to_string(), 0.5);
+        p.insert("radius".to_string(), 0.3);
+        p.insert("rotation".to_string(), 0.0);
+        project.tracks[0].clips[0].masks.push(crate::types::Mask {
+            shape: "heart".to_string(), params: p, invert: false, feather: 0.1,
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
+        });
+        assert!(is_simple_project(&project));
+    }
+
+    #[test]
+    fn test_is_simple_project_with_text_mask() {
+        // text 蒙版（用 ffmpeg drawtext + alphamerge 导出）→ 支持导出，仍视为简单工程
+        let mut project = make_simple_project();
+        let mut p = std::collections::HashMap::new();
+        p.insert("x".to_string(), 0.5);
+        p.insert("y".to_string(), 0.5);
+        p.insert("size".to_string(), 0.15);
+        project.tracks[0].clips[0].masks.push(crate::types::Mask {
+            shape: "text".to_string(), params: p, invert: false, feather: 0.0,
+            text: "测试".to_string(),
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }
@@ -512,7 +548,7 @@ mod tests {
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "polygon".to_string(), params: p, invert: false, feather: 0.0,
             stroke: crate::types::MaskStroke { enabled: true, ..Default::default() },
-            shadow: Default::default(),
+            shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }
@@ -526,7 +562,7 @@ mod tests {
         p.insert("y".to_string(), 0.7);
         project.tracks[0].clips[0].masks.push(crate::types::Mask {
             shape: "mirror".to_string(), params: p, invert: false, feather: 0.2,
-            stroke: Default::default(), shadow: Default::default(),
+            stroke: Default::default(), shadow: Default::default(), ..Default::default()
         });
         assert!(is_simple_project(&project));
     }

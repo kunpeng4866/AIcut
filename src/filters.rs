@@ -388,19 +388,48 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
 ///   阴影先通过 (1-a_union) 因子叠加到直通 RGB，再取 alpha=max(a_union,shadowAlpha)；
 ///   描边在阴影之上用标准 straight-alpha over 合成。
 ///   顺序匹配前端 composeMaskedFrame（先 shadow 后 stroke）。
-pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
+/// 蒙版滤镜构建结果。
+/// - `geq`：单输入 geq 滤镜后缀（适用于 circle/rect/linear/mirror/polygon/star/heart 等
+///   可用闭合表达式表示的形状），附加到主视频链后产出带 alpha 的视频。
+/// - `image_masks`：需要外部/生成蒙版流的形状（text），每个是一项独立滤镜图语句
+///   （生成带 alpha 的蒙版流，标签见 `label`）与合成步骤。
+pub struct MaskSpec {
+    pub geq: Option<String>,
+    pub image_masks: Vec<ImageMask>,
+}
+/// 一个需要独立滤镜图语句生成的蒙版流（如文字 drawtext）。
+pub struct ImageMask {
+    /// 该蒙版流在滤镜图中的标签（如 "tx0"），合成时用 [vid][tx0]alphamerge[vid] 引用。
+    pub label: String,
+    /// 生成该蒙版流的完整滤镜图语句（以 `;` 分隔、内部自包含，最后定义出 `label` 流）。
+    /// 蒙版流应为 RGBA，且以亮度(luma) 表示可见度（白字黑底 → luma=字形覆盖度），
+    /// 因为 alphamerge 取第二路输入的 luma 作为 alpha。
+    pub statement: String,
+}
+
+pub fn build_mask_spec(masks: &[Mask], w: u32, h: u32, fps: u32, dur: f64) -> Option<MaskSpec> {
     let mut base_exprs = Vec::new();
     for m in masks {
         if let Some(a) = mask_alpha_expr(m) {
             base_exprs.push(a);
         }
     }
+    // 文字类蒙版走 drawtext 独立流，不入 geq 并集。
+    let mut text_masks: Vec<ImageMask> = Vec::new();
+    for m in masks {
+        if m.shape == "text" {
+            if let Some(im) = build_text_mask(m, w, h, fps, dur) {
+                text_masks.push(im);
+            }
+        }
+    }
     // alpha-max 并集：多蒙版取各蒙版 base alpha 的最大值（任一蒙版覆盖即可见）。
     let has_decor = masks.iter().any(|m| m.stroke.enabled || m.shadow.enabled);
-    if base_exprs.is_empty() && !has_decor {
+    let has_base = !base_exprs.is_empty();
+    if !has_base && text_masks.is_empty() && !has_decor {
         return None;
     }
-    let a_union = if base_exprs.is_empty() {
+    let a_union = if !has_base {
         "0".to_string()
     } else if base_exprs.len() == 1 {
         base_exprs.into_iter().next().unwrap()
@@ -412,6 +441,7 @@ pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
         acc
     };
     // 分层合成（straight alpha）：内容保持原色，alpha 用并集蒙版做真合成；再叠阴影、再叠描边。
+    // stroke/shadow 仅在 geq 形状里生效（text 蒙版本轮回退，只产出填充字形+羽化+反转）。
     let mut col_r = "r(X,Y)".to_string();
     let mut col_g = "g(X,Y)".to_string();
     let mut col_b = "b(X,Y)".to_string();
@@ -444,9 +474,66 @@ pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
         }
     }
     // col_a is 0..1 float range from mask_alpha_expr; multiply by 255 for 8-bit RGBA alpha plane
-    Some(format!(
-        "format=rgba,geq=r='{col_r}':g='{col_g}':b='{col_b}':a='({col_a})*255'"
-    ))
+    // geq 仅在存在 geq 形状（has_base）或存在描边/阴影合成（has_decor）时产出；
+    // 纯文字蒙版（无 geq 形状、无装饰）时 geq 为 None，仅靠 image_masks + alphamerge 合成。
+    let geq = if !has_base && !has_decor {
+        None
+    } else {
+        Some(format!(
+            "format=rgba,geq=r='{col_r}':g='{col_g}':b='{col_b}':a='({col_a})*255'"
+        ))
+    };
+    Some(MaskSpec { geq, image_masks: text_masks })
+}
+
+/// 为 shape=="text" 的蒙版生成 drawtext 滤镜语句（自包含的多语句滤镜图）。
+/// 产出 RGBA 蒙版流（黑底白字，luma=字形覆盖度），供 graph.rs 用 alphamerge 合到主视频。
+pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64) -> Option<ImageMask> {
+    let text = mask.text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let min_side = (w.min(h)) as f64;
+    let size = mask.params.get("size").copied().unwrap_or(0.15);
+    let fontsize = (size * min_side).round().max(1.0) as u32;
+    let x = mask.params.get("x").copied().unwrap_or(0.5);
+    let y = mask.params.get("y").copied().unwrap_or(0.5);
+    let rotation_rad = mask.params.get("rotation").copied().unwrap_or(0.0) * std::f64::consts::PI / 180.0;
+    let feather = mask.feather.max(0.0);
+    let sigma = if feather > 0.0 { feather * min_side * 0.5 } else { 0.0 };
+    // drawtext 文本与路径用单引号包裹。ffmpeg 滤镜图把 ':' 当作选项分隔符，即使在单引号内
+    // 也会误判（实测：fontfile='C:/Windows/...' 报错 "No option name near '/Windows/...'"），
+    // 故必须对 ':' 转义为 '\:'；同时转义 '\' 与单引号，避免破坏转义序列。
+    let escaped = text.replace('\\', "\\\\").replace('\'', "\\'").replace(':', "\\:");
+    // 优先微软雅黑（支持中文），Windows 上 ffmpeg 接受正斜杠路径；路径中的冒号需转义。
+    let fontfile = "C:/Windows/Fonts/msyh.ttc".replace(':', "\\:");
+    let mut draw = format!(
+        "[bgT]drawtext=text='{text}':fontfile='{ff}':fontsize={fs}:fontcolor=white:x='(main_w-tw)/2+(({x})*main_w-main_w/2)':y='(main_h-th)/2+(({y})*main_h-main_h/2)'",
+        text = escaped, ff = fontfile, fs = fontsize, x = fmt(x), y = fmt(y)
+    );
+    if sigma > 0.0 {
+        draw.push_str(&format!(",gblur=sigma={s}", s = fmt(sigma)));
+    }
+    if mask.invert {
+        // alphamerge 取第二路输入的 luma 作为 alpha，故反转须翻转亮度（negate 翻转所有通道亮度，
+        // 使白字变黑、黑底变白），alpha 通道被忽略无所谓。
+        draw.push_str(",negate");
+    }
+    // 本机构建版本的 drawtext 不支持 rotation 选项（实测 "Option not found"），旋转改用独立
+    // rotate 滤镜实现。最终标签统一为 [tx0]（graph.rs 按 im.label 固定引用 [tx0]）；非 0 旋转时
+    // 先以临时 [txraw] 收尾 drawtext 链，再 rotate 到 [tx0]，rotate 用透明黑填充保证蒙版外为透明。
+    let has_rot = rotation_rad.abs() > 1e-6;
+    if has_rot {
+        draw.push_str("[txraw]");
+        draw.push_str(&format!(";[txraw]rotate=angle={a}:c=black@0[tx0]", a = fmt(rotation_rad)));
+    } else {
+        draw.push_str("[tx0]");
+    }
+    let statement = format!(
+        "color=c=black@0:s={W}x{H}:d={DUR}:r={FPS},format=rgba[bgT];{draw}",
+        W = w, H = h, DUR = fmt(dur), FPS = fps, draw = draw
+    );
+    Some(ImageMask { label: "tx0".into(), statement })
 }
 
 /// 返回蒙版形状在给定坐标变量下的**有符号距离**表达式（负=形状内部，0=轮廓）。
@@ -464,6 +551,26 @@ fn mask_sd_expr(mask: &Mask, x_expr: &str, y_expr: &str) -> Option<String> {
             let dist = format!("sqrt(({xe}-{x}*W)^2+({ye}-{y}*H)^2)", xe = x_expr, ye = y_expr, x = fmt(x), y = fmt(y));
             let r_px = format!("({r}*min(W,H))", r = fmt(r));
             Some(format!("(({dist})-({r_px}))", dist = dist, r_px = r_px))
+        }
+        "heart" => {
+            // 近似有符号距离（供 stroke/shadow 视觉用，非精确 SDF）：
+            // 复用 mask_alpha_expr 的隐式函数 f，sd = sign(f)·sqrt(|f|)·(radius·minSide)·0.5。
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let r = mask.params.get("radius").copied().unwrap_or(0.3);
+            let rot = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let ang = rot * std::f64::consts::PI / 180.0;
+            let ca = ang.cos();
+            let sa = ang.sin();
+            let nx = format!("(({xe})-({x}*W))/(({r})*min(W,H))", xe = x_expr, x = fmt(x), r = fmt(r));
+            let ny = format!("(-(({ye})-({y}*H))/(({r})*min(W,H)))", ye = y_expr, y = fmt(y), r = fmt(r));
+            let nxr = format!("(({nx})*({ca})-({ny})*({sa}))", nx = nx, ca = fmt(ca), ny = ny, sa = fmt(sa));
+            let nyr = format!("(({nx})*({sa})+({ny})*({ca}))", nx = nx, sa = fmt(sa), ny = ny, ca = fmt(ca));
+            let e = format!("(({nxr})*({nxr})+({nyr})*({nyr})-1)", nxr = nxr, nyr = nyr);
+            let f = format!("(({e})*({e})*({e})-({nxr})*({nxr})*({nyr})*({nyr}))", e = e, nxr = nxr, nyr = nyr);
+            let r_px = format!("({r}*min(W,H))", r = fmt(r));
+            let sd = format!("((({f})>=0?1:-1)*sqrt(abs({f}))*({r_px})*0.5)", f = f, r_px = r_px);
+            Some(sd)
         }
         "rect" => {
             let w = mask.params.get("width").copied().unwrap_or(0.5);
@@ -645,6 +752,33 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let fp = format!("max(1,({feather}*min(W,H)))", feather = fmt(feather));
             // 对称羽化圆：dist<R 内 alpha=1，边界 alpha=0.5，dist>R 外 alpha=0（借助 alpha 通道真合成移除黑遮罩环）
             let mut a_expr = format!("clip(0.5-({dist}-{r_px})/({fp}),0,1)", dist = dist, r_px = r_px, fp = fp);
+            if mask.invert {
+                a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
+            }
+            Some(a_expr)
+        }
+        "heart" => {
+            // 心形用隐式函数软边（与前端 maskRender 一致的隐式函数 f）：
+            //   f = (nx²+ny²-1)³ - nx²·ny³ ，f<0 为心形内部，f=0 为轮廓。
+            // 坐标先归一化到以 (x,y) 为中心、radius*minSide 为尺度；屏幕 Y 向下，取负使心形顶点朝上；
+            // rotation 顺时针旋转。软边 fp = max(feather*minSide*0.5, 1e-3) 像素，
+            // a = clip(0.5 - f*4/fp, 0, 1)（系数 4 仅作量级近似，把 f 折算到像素软边）。
+            let feather = mask.feather.max(0.0);
+            let x = mask.params.get("x").copied().unwrap_or(0.5);
+            let y = mask.params.get("y").copied().unwrap_or(0.5);
+            let r = mask.params.get("radius").copied().unwrap_or(0.3);
+            let rot = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let ang = rot * std::f64::consts::PI / 180.0;
+            let ca = ang.cos();
+            let sa = ang.sin();
+            let nx = format!("((X-({x}*W))/(({r})*min(W,H)))", x = fmt(x), r = fmt(r));
+            let ny = format!("(-(Y-({y}*H))/(({r})*min(W,H)))", y = fmt(y), r = fmt(r));
+            let nxr = format!("(({nx})*({ca})-({ny})*({sa}))", nx = nx, ca = fmt(ca), ny = ny, sa = fmt(sa));
+            let nyr = format!("(({nx})*({sa})+({ny})*({ca}))", nx = nx, sa = fmt(sa), ny = ny, ca = fmt(ca));
+            let e = format!("(({nxr})*({nxr})+({nyr})*({nyr})-1)", nxr = nxr, nyr = nyr);
+            let f = format!("(({e})*({e})*({e})-({nxr})*({nxr})*({nyr})*({nyr}))", e = e, nxr = nxr, nyr = nyr);
+            let fp = format!("max(({feather})*min(W,H)*0.5,0.001)", feather = fmt(feather));
+            let mut a_expr = format!("clip(0.5-({f})*4.0/({fp}),0,1)", f = f, fp = fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }

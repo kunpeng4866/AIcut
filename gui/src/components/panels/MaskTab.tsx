@@ -58,9 +58,11 @@ const SHAPES: { value: MaskShape; label: string }[] = [
   { value: 'mirror', label: '镜面' },
   { value: 'polygon', label: '多边形' },
   { value: 'star', label: '星形' },
+  { value: 'heart', label: '心形' },
+  { value: 'text', label: '文字' },
 ];
 
-const SHAPE_LABEL: Record<MaskShape, string> = { rect: '矩形', circle: '圆形', linear: '线性', mirror: '镜面', polygon: '多边形', star: '星形' };
+const SHAPE_LABEL: Record<MaskShape, string> = { rect: '矩形', circle: '圆形', linear: '线性', mirror: '镜面', polygon: '多边形', star: '星形', heart: '心形', text: '文字' };
 
 export default function MaskTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
@@ -95,6 +97,9 @@ export default function MaskTab({ clip, trackId }: { clip: ClipConfig; trackId: 
   };
   const setParam = (id: string, key: string, value: number) => {
     commitLive(masks.map((m) => (m.id === id ? { ...m, params: { ...m.params, [key]: value } } : m)));
+  };
+  const setText = (id: string, value: string) => {
+    commitLive(masks.map((m) => (m.id === id ? { ...m, text: value } : m)));
   };
   const toggleInvert = (id: string) => {
     pushHistorySnapshot();
@@ -145,7 +150,7 @@ export default function MaskTab({ clip, trackId }: { clip: ClipConfig; trackId: 
           </div>
 
           {/* 几何参数 */}
-          <GeomParams mask={selected} onParam={(k, v) => setParam(selected.id, k, v)} onEditStart={pushHistorySnapshot} />
+          <GeomParams mask={selected} onParam={(k, v) => setParam(selected.id, k, v)} onEditStart={pushHistorySnapshot} onText={(id, v) => setText(selected.id, v)} />
 
           {/* 反转 */}
           <div style={S.row}>
@@ -179,9 +184,36 @@ function defaultShadow(): MaskShadow {
 }
 
 // 几何参数（按形状显示）
-function GeomParams({ mask, onParam, onEditStart }: { mask: MaskConfig; onParam: (k: string, v: number) => void; onEditStart: () => void }) {
+function GeomParams({ mask, onParam, onEditStart, onText }: { mask: MaskConfig; onParam: (k: string, v: number) => void; onEditStart: () => void; onText: (id: string, v: string) => void }) {
   const p = mask.params || {};
   const num = (k: string, d = 0) => p[k] ?? d;
+  if (mask.shape === 'text') {
+    return (
+      <div>
+        <div style={S.row}>
+          <span style={S.label}>文字</span>
+          <input type="text" value={mask.text || ''} onChange={(e) => onText(mask.id, e.target.value)}
+            style={{ flex: 1, background: '#2a2a2a', color: '#eee', border: '1px solid #444', borderRadius: 4, padding: '4px 6px', fontSize: 12 }} />
+        </div>
+        <ParamSlider label="X" value={num('x', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('x', v)} onEditStart={onEditStart} />
+        <ParamSlider label="Y" value={num('y', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('y', v)} onEditStart={onEditStart} />
+        <ParamSlider label="大小" value={num('size', 0.15)} min={0.02} max={1} step={0.01} editable onChange={(v) => onParam('size', v)} onEditStart={onEditStart} />
+        <ParamSlider label="旋转" value={num('rotation', 0)} min={-180} max={180} step={1} unit="°" editable onChange={(v) => onParam('rotation', v)} onEditStart={onEditStart} />
+        <ParamSlider label="羽化" value={num('feather', 0)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('feather', v)} onEditStart={onEditStart} />
+      </div>
+    );
+  }
+  if (mask.shape === 'heart') {
+    return (
+      <div>
+        <ParamSlider label="X" value={num('x', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('x', v)} onEditStart={onEditStart} />
+        <ParamSlider label="Y" value={num('y', 0.5)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('y', v)} onEditStart={onEditStart} />
+        <ParamSlider label="半径" value={num('radius', 0.3)} min={0} max={0.5} step={0.01} editable onChange={(v) => onParam('radius', v)} onEditStart={onEditStart} />
+        <ParamSlider label="旋转" value={num('rotation', 0)} min={-180} max={180} step={1} unit="°" editable onChange={(v) => onParam('rotation', v)} onEditStart={onEditStart} />
+        <ParamSlider label="羽化" value={num('feather', 0)} min={0} max={1} step={0.01} editable onChange={(v) => onParam('feather', v)} onEditStart={onEditStart} />
+      </div>
+    );
+  }
   if (mask.shape === 'rect') {
     return (
       <div>

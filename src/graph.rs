@@ -73,40 +73,79 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
     let chain = build_video_chain(c, idx, w, h, &label, fps);
-    nodes.push(chain);
+    nodes.extend(chain);
     Some(label)
 }
 
-fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32) -> String {
+/// 构建单个 clip 的视频滤镜图，返回**多条**滤镜图语句（以 `;` 连接）。
+/// 普通情况只有一条（核心变换链 + 蒙版 + opacity + fps）；文字蒙版会产出额外的
+/// drawtext 蒙版流语句与 alphamerge 合成语句。最终语句产出 `[label]` 视频流。
+fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32) -> Vec<String> {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
     let sh = (h as f64 * sy).round() as u32;
-    let mut chain = format!("[{}:v]scale={}:{}", idx, sw, sh);
+    let mut core = format!("[{}:v]scale={}:{}", idx, sw, sh);
     // 曲线变速优先（time_remap.curve 权威，否则回退 speed_curve），否则线性变速
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
     if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur) {
-        chain.push_str(&format!(",setpts={}", expr));
+        core.push_str(&format!(",setpts={}", expr));
     } else if (c.speed - 1.0).abs() > 0.001 {
-        chain.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
+        core.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
     }
     let rot = keyframed(c, "transform.rotation", c.transform.rotation);
-    if rot.abs() > 0.01 { chain.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
+    if rot.abs() > 0.01 { core.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
-    if !clip_filters.is_empty() { chain.push_str(&format!(",{}", clip_filters)); }
-    // 多蒙版并集：把所有 enabled 蒙版一次性交给 build_mask_spec，在单一 geq 中按
-    // alpha-max 求并集（a_union = max(a_1, a_2, ...)）——任一蒙版覆盖的像素即可见，
-    // 与前端预览的 lighter 并集语义对齐。形状外像素 RGB 乘 0（黑色遮罩，叠加在黑色
-    // base 上即透明）。单蒙版时输出与旧版逐字节一致。
-    if let Some(s) = build_mask_spec(&c.masks) { chain.push_str(&format!(",{}", s)); }
+    if !clip_filters.is_empty() { core.push_str(&format!(",{}", clip_filters)); }
+    // opacity + fps 作为尾部统一施加（在蒙版合成之后），保证各路输入帧率一致、透明度正确。
     let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
-    if opacity < 1.0 { chain.push_str(&format!(",colorchannelmixer=aa={}", fmt(opacity))); }
-    // 统一输出帧率到画布 fps：xfade/overlay 要求各路输入帧率一致，否则 filter 配置失败
-    // （如 24fps 与 30fps 素材直接 xfade 会报 framesync 错误）。放在变换链末尾、打标签前。
-    chain.push_str(&format!(",fps={}", fps));
-    chain.push_str(&format!("[{}]", label));
-    chain
+    let tail = if opacity < 1.0 {
+        format!(",colorchannelmixer=aa={},fps={}", fmt(opacity), fps)
+    } else {
+        format!(",fps={}", fps)
+    };
+    let mut nodes: Vec<String> = Vec::new();
+    // 蒙版：geq 形状（heart/circle/...）走单输入 geq；文字(text) 走独立 drawtext 流 + alphamerge。
+    let mspec = build_mask_spec(&c.masks, w, h, fps, dur);
+    match mspec {
+        None => {
+            // 无蒙版：核心链直接尾部施加 opacity/fps → label
+            nodes.push(format!("{}{}[{}]", core, tail, label));
+        }
+        Some(spec) => {
+            if spec.image_masks.is_empty() {
+                // 纯 geq 形状（heart/star/...）或装饰：单语句兼容旧行为
+                match &spec.geq {
+                    Some(g) => nodes.push(format!("{},{}{}[{}]", core, g, tail, label)),
+                    None => nodes.push(format!("{}{}[{}]", core, tail, label)),
+                }
+            } else {
+                // 多语句：主视频(可选 geq) → 中间标签 vid → 逐张 alphamerge → 尾部 opacity/fps → label
+                let vid = format!("{}v", label);
+                match &spec.geq {
+                    Some(g) => nodes.push(format!("{},{}[{}]", core, g, vid)),
+                    None => {
+                        // 纯文字蒙版：主视频先转 RGBA，才能与 RGBA 文字蒙版流 alphamerge
+                        nodes.push(format!("{},format=rgba[{}]", core, vid));
+                    }
+                }
+                let mut cur = vid.clone();
+                for (i, im) in spec.image_masks.iter().enumerate() {
+                    // 该蒙版流的自包含滤镜图语句（内部定义出 im.label，如 tx0）
+                    nodes.push(im.statement.clone());
+                    let out = format!("{}m{}", label, i);
+                    nodes.push(format!("[{cur}][{lbl}]alphamerge[{out}]",
+                        cur = cur, lbl = im.label, out = out));
+                    cur = out;
+                }
+                // 注意 tail 以逗号开头（如 ",fps=30"），但此处 cur 是标签（[vs0m0]），
+                // 标签后直接接滤镜、不能留逗号，否则 ffmpeg 解析出空滤镜名 "No such filter: ''"。
+                nodes.push(format!("[{cur}]{}[{label}]", tail.trim_start_matches(','), cur = cur, label = label));
+            }
+        }
+    }
+    nodes
 }
 
 fn offset_x(c: &Clip, w: u32) -> i64 {
@@ -176,7 +215,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => { vci += 1; continue; } };
                 let src = format!("vs{}", vci);
                 let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps);
-                nodes.push(chain);
+                nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));

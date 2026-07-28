@@ -19,6 +19,10 @@ export function defaultMaskParams(shape: MaskShape): Record<string, number> {
       return { x: 0.5, y: 0.5, radius: 0.3, sides: 6, rotation: 0, feather: 0 };
     case 'star':
       return { x: 0.5, y: 0.5, radius: 0.3, innerRatio: 0.5, sides: 5, rotation: 0, feather: 0 };
+    case 'heart':
+      return { x: 0.5, y: 0.5, radius: 0.3, rotation: 0, feather: 0 };
+    case 'text':
+      return { x: 0.5, y: 0.5, size: 0.15, rotation: 0, feather: 0 };
     default:
       return { x: 0.5, y: 0.5, width: 0.5, height: 0.5, rotation: 0, roundness: 0, feather: 0 };
   }
@@ -101,6 +105,27 @@ function tracePath(ctx: CanvasRenderingContext2D, w: number, h: number, mask: Ma
       }
       ctx.closePath();
     }
+  } else if (mask.shape === 'heart') {
+    const cx = (p.x ?? 0.5) * w;
+    const cy = (p.y ?? 0.5) * h;
+    const m = Math.min(w, h);
+    const R = Math.max(1, (p.radius ?? 0.3) * m);
+    const rotRad = ((p.rotation ?? 0) * Math.PI) / 180;
+    ctx.translate(cx, cy);
+    ctx.rotate(rotRad);
+    ctx.beginPath();
+    // 经典心形参数方程（顶点朝上）：x=16sin³t, y=13cos t-5cos2t-2cos3t-cos4t
+    // Canvas y 轴向下，参数方程 y 向上，故 py 取负使心形顶点朝上。
+    const N = 64;
+    for (let k = 0; k <= N; k++) {
+      const t = (k / N) * Math.PI * 2;
+      const hx = 16 * Math.pow(Math.sin(t), 3);
+      const hy = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+      const px = (hx / 17) * R;
+      const py = -(hy / 17) * R;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
   }
 }
 
@@ -122,6 +147,27 @@ function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
 // 把单个蒙版形状（白色=可见）画到 ctx（已 cleared）。含羽化（模糊）与渐变。
 function drawShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: MaskConfig): void {
   const feather = mask.params?.feather ?? mask.feather ?? 0;
+  if (mask.shape === 'text') {
+    const text = mask.text || '';
+    if (!text) return;
+    const p = mask.params || {};
+    const cx = (p.x ?? 0.5) * w;
+    const cy = (p.y ?? 0.5) * h;
+    const m = Math.min(w, h);
+    const fs = Math.max(4, (p.size ?? 0.15) * m);
+    const rotRad = ((p.rotation ?? 0) * Math.PI) / 180;
+    ctx.save();
+    if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * m * 0.5)}px)`;
+    ctx.translate(cx, cy);
+    ctx.rotate(rotRad);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${fs}px sans-serif`;
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+    return;
+  }
   if (mask.shape === 'linear' || mask.shape === 'mirror') {
     const p = mask.params || {};
     const cx = (p.x ?? 0.5) * w;
@@ -193,8 +239,94 @@ export function buildMaskAlphaCanvas(w: number, h: number, masks: MaskConfig[]):
   return out;
 }
 
-// 在已画好（已蒙版）的帧上叠加描边与阴影（预览近似）。
-function drawStrokeShadow(ctx: CanvasRenderingContext2D, w: number, h: number, masks: MaskConfig[]): void {
+// 填充蒙版形状（含文字）。文字走 fillText 路径，其余走 tracePath → fill。
+function fillMaskShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: MaskConfig): void {
+  if (mask.shape === 'text') {
+    const text = mask.text || '';
+    if (!text) return;
+    const p = mask.params || {};
+    const feather = mask.params?.feather ?? mask.feather ?? 0;
+    const cx = (p.x ?? 0.5) * w;
+    const cy = (p.y ?? 0.5) * h;
+    const m = Math.min(w, h);
+    const fs = Math.max(4, (p.size ?? 0.15) * m);
+    const rotRad = ((p.rotation ?? 0) * Math.PI) / 180;
+    ctx.save();
+    if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * m * 0.5)}px)`;
+    ctx.translate(cx, cy);
+    ctx.rotate(rotRad);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${fs}px sans-serif`;
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+    return;
+  }
+  tracePath(ctx, w, h, mask);
+  ctx.fill();
+}
+
+// 描边蒙版形状（含文字）。文字走 strokeText 路径，其余走 tracePath → stroke。
+function strokeMaskShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: MaskConfig): void {
+  if (mask.shape === 'text') {
+    const text = mask.text || '';
+    if (!text) return;
+    const p = mask.params || {};
+    const feather = mask.params?.feather ?? mask.feather ?? 0;
+    const cx = (p.x ?? 0.5) * w;
+    const cy = (p.y ?? 0.5) * h;
+    const m = Math.min(w, h);
+    const fs = Math.max(4, (p.size ?? 0.15) * m);
+    const rotRad = ((p.rotation ?? 0) * Math.PI) / 180;
+    ctx.save();
+    if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * m * 0.5)}px)`;
+    ctx.translate(cx, cy);
+    ctx.rotate(rotRad);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${fs}px sans-serif`;
+    ctx.strokeText(text, 0, 0);
+    ctx.restore();
+    return;
+  }
+  tracePath(ctx, w, h, mask);
+  ctx.stroke();
+}
+
+// 构建阴影层：用 fill() 画填充形状 + blur，产生外发光光晕（不是环）。
+// 返回独立 canvas，由调用方在内容【后面】合成，使阴影只出现在形状外侧。
+function buildShadowLayer(w: number, h: number, masks: MaskConfig[]): HTMLCanvasElement | null {
+  const enabled = masks.filter((m) => m.enabled && m.shadow?.enabled);
+  if (enabled.length === 0) return null;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d')!;
+  const minSide = Math.min(w, h);
+  for (const m of enabled) {
+    const sh = m.shadow!;
+    ctx.save();
+    const shadowOpacity = clamp01(sh.opacity ?? 1);
+    const shadowColor = sh.color || '#000000';
+    const blurPx = Math.max(2, (sh.blur ?? 0.05) * minSide * 0.5);
+    const a = ((sh.angle ?? 0) * Math.PI) / 180;
+    const dist = Math.max(0, sh.distance ?? 0) * minSide;
+    const dx = Math.cos(a) * dist;
+    const dy = Math.sin(a) * dist;
+    // fill() 画完整形状 + blur → 模糊的填充轮廓 = 外发光光晕
+    // （旧方案用 stroke() 画轮廓线 → 产生白环/细线条，已废弃）
+    ctx.translate(dx, dy);
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.globalAlpha = shadowOpacity;
+    ctx.fillStyle = shadowColor;
+    fillMaskShape(ctx, w, h, m);
+    ctx.restore();
+  }
+  return c;
+}
+
+// 在已画好的帧上叠加描边（阴影由 buildShadowLayer + composeMaskedFrame 单独处理）。
+function drawStrokeOnly(ctx: CanvasRenderingContext2D, w: number, h: number, masks: MaskConfig[]): void {
   const enabled = masks.filter((m) => m.enabled);
   const minSide = Math.min(w, h);
   for (const m of enabled) {
@@ -204,30 +336,7 @@ function drawStrokeShadow(ctx: CanvasRenderingContext2D, w: number, h: number, m
       ctx.strokeStyle = m.stroke.color || '#ffffff';
       ctx.lineWidth = Math.max(0.5, (m.stroke.size ?? 0) * minSide);
       if ((m.stroke.blur ?? 0) > 0) ctx.filter = `blur(${Math.max(0.5, (m.stroke.blur as number) * minSide * 0.1)}px)`;
-      tracePath(ctx, w, h, m);
-      ctx.stroke();
-      ctx.restore();
-    }
-    if (m.shadow?.enabled) {
-      ctx.save();
-      // 不透明：烘焙进 shadowColor 的 alpha（比依赖 globalAlpha 更稳健、跨浏览器一致）。
-      // 注意：shadowColor 自带 alpha，这里 globalAlpha 保持 1，避免双重相乘压暗。
-      const shadowOpacity = clamp01(m.shadow.opacity ?? 1);
-      const shadowColor = m.shadow.color || '#000000';
-      const blurPx = Math.max(2, (m.shadow.blur ?? 0.05) * minSide * 0.5);
-      const a = ((m.shadow.angle ?? 0) * Math.PI) / 180;
-      const dist = Math.max(0, m.shadow.distance ?? 0) * minSide;
-      const dx = Math.cos(a) * dist;
-      const dy = Math.sin(a) * dist;
-      // 直接画模糊描边替代 Canvas Shadow API：后者在 fillStyle=transparent 时，
-      // 零偏移阴影可能被浏览器优化掉（Electron/Chromium 实测不可见）。
-      ctx.translate(dx, dy);
-      ctx.filter = `blur(${blurPx}px)`;
-      ctx.globalAlpha = shadowOpacity;
-      ctx.strokeStyle = shadowColor;
-      ctx.lineWidth = blurPx;
-      tracePath(ctx, w, h, m);
-      ctx.stroke();
+      strokeMaskShape(ctx, w, h, m);
       ctx.restore();
     }
   }
@@ -259,11 +368,22 @@ export function composeMaskedFrame(
   c.width = vw; c.height = vh;
   const ctx = c.getContext('2d')!;
   try {
-    ctx.drawImage(source, 0, 0, vw, vh);
-    ctx.globalCompositeOperation = 'destination-in';
-    ctx.drawImage(alpha, 0, 0, vw, vh);
-    ctx.globalCompositeOperation = 'source-over';
-    drawStrokeShadow(ctx, vw, vh, masks);
+    // 1. 阴影层画在最底（fill+blur = 外发光光晕，不是环）
+    const shadowLayer = buildShadowLayer(vw, vh, masks);
+    if (shadowLayer) ctx.drawImage(shadowLayer, 0, 0);
+
+    // 2. 蒙版视频画在上面（覆盖形状内部的阴影，只留外侧光晕）
+    const masked = document.createElement('canvas');
+    masked.width = vw; masked.height = vh;
+    const mctx = masked.getContext('2d')!;
+    mctx.drawImage(source, 0, 0, vw, vh);
+    mctx.globalCompositeOperation = 'destination-in';
+    mctx.drawImage(alpha, 0, 0, vw, vh);
+    mctx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(masked, 0, 0);
+
+    // 3. 描边画在最上
+    drawStrokeOnly(ctx, vw, vh, masks);
   } catch {
     return null;
   }

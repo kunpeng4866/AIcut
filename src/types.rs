@@ -52,7 +52,7 @@ pub struct MaskShadow {
 }
 
 /// 蒙版（片段透明度形状）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Mask {
     pub shape: String,
     #[serde(default)]
@@ -61,6 +61,9 @@ pub struct Mask {
     pub invert: bool,
     #[serde(default)]
     pub feather: f64,
+    /// 文字蒙版内容（shape=="text" 时使用），用 ffmpeg drawtext 生成字形流。
+    #[serde(default)]
+    pub text: String,
     #[serde(default)]
     pub stroke: MaskStroke,
     #[serde(default)]
