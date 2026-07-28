@@ -145,37 +145,66 @@ function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
   ctx.closePath();
 }
 
-// 把单个蒙版形状（白色=可见）画到 ctx（已 cleared）。含羽化（模糊）与渐变。
+// 把单个蒙版形状（白色=可见）画到 ctx（已 cleared）。含羽化与渐变。
+// 剪映式蒙版羽化：各向同性高斯模糊，以短边 min(w,h) 为归一化基准。
+//   circle      → 解析式径向渐变（r-fp/2→r+fp/2），无需 temp canvas
+//   linear/mirror → 羽化折叠进渐变半宽，渐变本质已是软边
+//   其余形状    → 两阶段 temp canvas：绘纯白形状 → 各向同性 blur → 合成
 function drawShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: MaskConfig): void {
   const feather = mask.params?.feather ?? mask.feather ?? 0;
+  const minSide = Math.min(w, h);           // 统一短边归一化
+
+  // ── text ──
   if (mask.shape === 'text') {
     const text = mask.text || '';
     if (!text) return;
     const p = mask.params || {};
     const cx = (p.x ?? 0.5) * w;
     const cy = (p.y ?? 0.5) * h;
-    const m = Math.min(w, h);
-    const fs = Math.max(4, (p.size ?? 0.15) * m);
+    const fs = Math.max(4, (p.size ?? 0.15) * minSide);
     const rotRad = ((p.rotation ?? 0) * Math.PI) / 180;
-    ctx.save();
-    if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * m * 0.5)}px)`;
-    ctx.translate(cx, cy);
-    ctx.rotate(rotRad);
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `${fs}px sans-serif`;
-    ctx.fillText(text, 0, 0);
-    ctx.restore();
+
+    if (feather > 0.005 && feather * minSide > 0.5) {
+      const fp = feather * minSide;
+      const tmp = document.createElement('canvas');
+      tmp.width = w; tmp.height = h;
+      const tc = tmp.getContext('2d')!;
+      tc.save();
+      tc.translate(cx, cy);
+      tc.rotate(rotRad);
+      tc.fillStyle = '#fff';
+      tc.textAlign = 'center';
+      tc.textBaseline = 'middle';
+      tc.font = `${fs}px sans-serif`;
+      tc.fillText(text, 0, 0);
+      tc.restore();
+      ctx.save();
+      ctx.filter = `blur(${Math.max(0.5, fp / 2)}px)`;
+      ctx.drawImage(tmp, 0, 0);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rotRad);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `${fs}px sans-serif`;
+      ctx.fillText(text, 0, 0);
+      ctx.restore();
+    }
     return;
   }
+
+  // ── linear / mirror：羽化折叠进渐变半宽 ──
   if (mask.shape === 'linear' || mask.shape === 'mirror') {
     const p = mask.params || {};
     const cx = (p.x ?? 0.5) * w;
     const cy = (p.y ?? 0.5) * h;
     const ang = ((p.angle ?? 0) * Math.PI) / 180;
-    const half = Math.max(1, (p.width ?? 0.3) * Math.min(w, h));
     const dx = Math.cos(ang), dy = Math.sin(ang);
+    // 羽化增大渐变宽度：半宽 = (width + feather) * minSide
+    const half = Math.max(1, ((p.width ?? 0.3) + feather) * minSide);
     const gx0 = cx - dx * half, gy0 = cy - dy * half;
     const gx1 = cx + dx * half, gy1 = cy + dy * half;
     const grad = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
@@ -184,39 +213,60 @@ function drawShape(ctx: CanvasRenderingContext2D, w: number, h: number, mask: Ma
       grad.addColorStop(0.5, 'rgba(255,255,255,1)');
       grad.addColorStop(1, 'rgba(255,255,255,0)');
     } else {
-      // mirror：中间透明、两端不透明（对称渐变带）
       grad.addColorStop(0, 'rgba(255,255,255,1)');
       grad.addColorStop(0.5, 'rgba(255,255,255,0)');
       grad.addColorStop(1, 'rgba(255,255,255,1)');
     }
-    ctx.save();
-    if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * Math.min(w, h) * 0.5)}px)`;
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, w, h);
-    ctx.restore();
     return;
   }
+
+  // ── circle：解析式径向渐变 ──
   if (mask.shape === 'circle') {
-    // 圆形羽化：径向渐变从圆心等比例收缩/扩展，避免 blur 在非方画布上的扭曲
-    const m = Math.min(w, h);
-    const fp = feather * m * 0.5;
-    if (feather > 0 && fp > 0.5) {
-      const cx = (mask.params?.x ?? 0.5) * w;
-      const cy = (mask.params?.y ?? 0.5) * h;
-      const r = Math.max(1, (mask.params?.radius ?? 0.3) * m);
-      const innerR = Math.max(0.5, r - fp);
-      const outerR = r + fp;
+    const cx = (mask.params?.x ?? 0.5) * w;
+    const cy = (mask.params?.y ?? 0.5) * h;
+    const r = Math.max(1, (mask.params?.radius ?? 0.3) * minSide);
+
+    if (feather > 0.005 && feather * minSide > 0.5) {
+      const fp = feather * minSide;                      // 羽化总宽度
+      const innerR = Math.max(0.5, r - fp / 2);          // 内边界（alpha=1）
+      const outerR = r + fp / 2;                          // 外边界（alpha=0）
       const grad = ctx.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
       grad.addColorStop(0, 'rgba(255,255,255,1)');
       grad.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, w, h);
-      return;
+    } else {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
     }
-    // 无羽化或羽化极小：走 tracePath + fill 路径
+    return;
   }
+
+  // ── rect / polygon / star / heart：两阶段 temp canvas + 各向同性模糊 ──
+  // 剪映方式：先绘纯白形状到 temp canvas，再以各向同性高斯模糊合成到目标 ctx。
+  // 此方法保证 blur 作用于完整像素空间，不受画布宽高比或形状位置影响。
+  if (feather > 0.005 && feather * minSide > 0.5) {
+    const fp = feather * minSide;
+    const tmp = document.createElement('canvas');
+    tmp.width = w;
+    tmp.height = h;
+    const tc = tmp.getContext('2d')!;
+    tc.fillStyle = '#fff';
+    tracePath(tc, w, h, mask);          // Step 1: 绘纯白形状
+    tc.fill();
+    ctx.save();
+    ctx.filter = `blur(${Math.max(0.5, fp / 2)}px)`; // Step 2: 各向同性模糊
+    ctx.drawImage(tmp, 0, 0);                         // Step 3: 合成
+    ctx.restore();
+    return;
+  }
+
+  // ── 无羽化：直接绘制 ──
   ctx.save();
-  if (feather > 0) ctx.filter = `blur(${Math.max(0.5, feather * Math.min(w, h) * 0.5)}px)`;
   ctx.fillStyle = '#fff';
   tracePath(ctx, w, h, mask);
   ctx.fill();
