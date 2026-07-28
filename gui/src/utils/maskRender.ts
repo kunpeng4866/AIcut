@@ -172,17 +172,22 @@ function drawStrokeShadow(ctx: CanvasRenderingContext2D, w: number, h: number, m
       ctx.save();
       // 不透明：烘焙进 shadowColor 的 alpha（比依赖 globalAlpha 更稳健、跨浏览器一致）。
       // 注意：shadowColor 自带 alpha，这里 globalAlpha 保持 1，避免双重相乘压暗。
-      ctx.globalAlpha = 1;
-      ctx.shadowColor = hexToRgba(m.shadow.color || '#000000', clamp01(m.shadow.opacity ?? 1));
-      ctx.shadowBlur = Math.max(0, m.shadow.blur ?? 0) * minSide * 0.2;
+      const shadowOpacity = clamp01(m.shadow.opacity ?? 1);
+      const shadowColor = m.shadow.color || '#000000';
+      const blurPx = Math.max(2, (m.shadow.blur ?? 0.05) * minSide * 0.5);
       const a = ((m.shadow.angle ?? 0) * Math.PI) / 180;
       const dist = Math.max(0, m.shadow.distance ?? 0) * minSide;
-      ctx.shadowOffsetX = Math.cos(a) * dist;
-      ctx.shadowOffsetY = Math.sin(a) * dist;
-      // 透明填充 + 实心阴影：仅显示投影，不遮挡内容
-      ctx.fillStyle = 'rgba(0,0,0,0)';
+      const dx = Math.cos(a) * dist;
+      const dy = Math.sin(a) * dist;
+      // 直接画模糊描边替代 Canvas Shadow API：后者在 fillStyle=transparent 时，
+      // 零偏移阴影可能被浏览器优化掉（Electron/Chromium 实测不可见）。
+      ctx.translate(dx, dy);
+      ctx.filter = `blur(${blurPx}px)`;
+      ctx.globalAlpha = shadowOpacity;
+      ctx.strokeStyle = shadowColor;
+      ctx.lineWidth = blurPx;
       tracePath(ctx, w, h, m);
-      ctx.fill();
+      ctx.stroke();
       ctx.restore();
     }
   }
@@ -222,6 +227,7 @@ export function composeMaskedFrame(
   } catch {
     return null;
   }
+
   return c;
 }
 
