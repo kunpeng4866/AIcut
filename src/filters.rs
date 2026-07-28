@@ -379,30 +379,204 @@ pub fn build_filter_spec(kind: &str, params: &HashMap<String, f64>) -> Option<St
 /// 多蒙版：本函数接收该 clip 的全部蒙版，在**单一 geq** 中按 alpha-max 求并集
 /// （a_union = max(a_1, a_2, ...)），与前端预览的 lighter 并集语义对齐；
 /// 单蒙版时输出与旧版逐字节一致。
+///
+/// 描边(stroke)/阴影(shadow) 自增量 2 起由本函数一并合成：内容先被并集蒙版裁剪
+/// （黑遮罩技巧：内容区外 RGB*0），再逐 mask 叠阴影环、再叠描边环（顺序匹配前端
+/// composeMaskedFrame：先 shadow 后 stroke）。环 alpha 由 `ring_alpha_expr` 计算，
+/// 颜色分量已 premultiplied（color*alpha），下游黑=透明、彩色=保留。
 pub fn build_mask_spec(masks: &[Mask]) -> Option<String> {
-    let mut exprs = Vec::new();
+    let mut base_exprs = Vec::new();
     for m in masks {
         if let Some(a) = mask_alpha_expr(m) {
-            exprs.push(a);
+            base_exprs.push(a);
         }
     }
-    if exprs.is_empty() {
+    // alpha-max 并集：多蒙版取各蒙版 base alpha 的最大值（任一蒙版覆盖即可见）。
+    let has_decor = masks.iter().any(|m| m.stroke.enabled || m.shadow.enabled);
+    if base_exprs.is_empty() && !has_decor {
         return None;
     }
-    // alpha-max 并集：多蒙版取各蒙版 alpha 的最大值（任一蒙版覆盖即可见）。
-    let a_union = if exprs.len() == 1 {
-        exprs.into_iter().next().unwrap()
+    let a_union = if base_exprs.is_empty() {
+        "0".to_string()
+    } else if base_exprs.len() == 1 {
+        base_exprs.into_iter().next().unwrap()
     } else {
-        let mut acc = exprs.pop().unwrap();
-        while let Some(e) = exprs.pop() {
+        let mut acc = base_exprs.pop().unwrap();
+        while let Some(e) = base_exprs.pop() {
             acc = format!("max({}, {})", e, acc);
         }
         acc
     };
+    // 分层合成（premultiplied over）：内容先被并集蒙版裁剪（黑遮罩），再叠阴影、再叠描边。
+    let mut col_r = format!("(r(X,Y)*({a_union}))");
+    let mut col_g = format!("(g(X,Y)*({a_union}))");
+    let mut col_b = format!("(b(X,Y)*({a_union}))");
+    for m in masks {
+        // 阴影在描边之下
+        if m.shadow.enabled {
+            if let Some((sr, sg, sb, sa)) = build_shadow_terms(m) {
+                col_r = format!("(({col_r})*(1-({sa}))+({sr})*({sa}))");
+                col_g = format!("(({col_g})*(1-({sa}))+({sg})*({sa}))");
+                col_b = format!("(({col_b})*(1-({sa}))+({sb})*({sa}))");
+            }
+        }
+        // 描边在上
+        if m.stroke.enabled {
+            if let Some((tr, tg, tb, ta)) = build_stroke_terms(m) {
+                col_r = format!("(({col_r})*(1-({ta}))+({tr})*({ta}))");
+                col_g = format!("(({col_g})*(1-({ta}))+({tg})*({ta}))");
+                col_b = format!("(({col_b})*(1-({ta}))+({tb})*({ta}))");
+            }
+        }
+    }
     Some(format!(
-        "geq=r='r(X,Y)*({a_union})':g='g(X,Y)*({a_union})':b='b(X,Y)*({a_union})'",
-        a_union = a_union
+        "geq=r='{col_r}':g='{col_g}':b='{col_b}'"
     ))
+}
+
+/// 返回蒙版形状在给定坐标变量下的**有符号距离**表达式（负=形状内部，0=轮廓）。
+/// 坐标变量 `x_expr`/`y_expr` 默认 "X"/"Y"；阴影传偏移后的坐标以获得偏移环 sd。
+/// 各 shape 的 sd 公式与 `mask_alpha_expr` 内部完全一致，仅坐标变量参数化，供描边/阴影环复用。
+fn mask_sd_expr(mask: &Mask, x_expr: &str, y_expr: &str) -> Option<String> {
+    if mask.shape.is_empty() {
+        return None;
+    }
+    let x = mask.params.get("x").copied().unwrap_or(0.5);
+    let y = mask.params.get("y").copied().unwrap_or(0.5);
+    match mask.shape.as_str() {
+        "circle" => {
+            let r = mask.params.get("radius").copied().unwrap_or(0.3);
+            let dist = format!("sqrt(({xe}-{x}*W)^2+({ye}-{y}*H)^2)", xe = x_expr, ye = y_expr, x = fmt(x), y = fmt(y));
+            let r_px = format!("({r}*min(W,H))", r = fmt(r));
+            Some(format!("(({dist})-({r_px}))", dist = dist, r_px = r_px))
+        }
+        "rect" => {
+            let w = mask.params.get("width").copied().unwrap_or(0.5);
+            let h = mask.params.get("height").copied().unwrap_or(0.5);
+            let rot = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let round = mask.params.get("roundness").copied().unwrap_or(0.0);
+            let a = rot * std::f64::consts::PI / 180.0;
+            let ca = a.cos();
+            let sa = a.sin();
+            let hw_expr = format!("(({w})*W/2)", w = fmt(w));
+            let hh_expr = format!("(({h})*H/2)", h = fmt(h));
+            let r0_expr = format!("(({r})*min({hw},{hh}))", r = fmt(round), hw = hw_expr, hh = hh_expr);
+            let dx = format!("(({xe}-({x})*W)*({ca})+({ye}-({y})*H)*({sa}))",
+                xe = x_expr, ye = y_expr, x = fmt(x), y = fmt(y), ca = fmt(ca), sa = fmt(sa));
+            let dy = format!("(-({xe}-({x})*W)*({sa})+({ye}-({y})*H)*({ca}))",
+                xe = x_expr, ye = y_expr, x = fmt(x), y = fmt(y), sa = fmt(sa), ca = fmt(ca));
+            let qx = format!("(abs({dx})-(({hw})-({r0})))", dx = dx, hw = hw_expr, r0 = r0_expr);
+            let qy = format!("(abs({dy})-(({hh})-({r0})))", dy = dy, hh = hh_expr, r0 = r0_expr);
+            let sd = format!("(min(max({qx},{qy}),0)+sqrt(max({qx},0)*max({qx},0)+max({qy},0)*max({qy},0))-({r0}))",
+                qx = qx, qy = qy, r0 = r0_expr);
+            Some(sd)
+        }
+        "linear" | "mirror" => {
+            let ang = mask.params.get("angle").copied().unwrap_or(0.0) * std::f64::consts::PI / 180.0;
+            let ca = ang.cos();
+            let sa = ang.sin();
+            let width = mask.params.get("width").copied().unwrap_or(0.3);
+            let feather = mask.feather.max(0.0);
+            let half = format!("({width}*min(W,H)*(1+{feather}*2))", width = fmt(width), feather = fmt(feather));
+            let d = format!("(({xe}-({x})*W)*({ca})+({ye}-({y})*H)*({sa}))",
+                xe = x_expr, ye = y_expr, x = fmt(x), y = fmt(y), ca = fmt(ca), sa = fmt(sa));
+            Some(format!("(abs({d})-({half}))", d = d, half = half))
+        }
+        "polygon" => {
+            let radius = mask.params.get("radius").copied().unwrap_or(0.3);
+            let sides = mask.params.get("sides").copied().unwrap_or(3.0).max(3.0);
+            let rotation = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let px = format!("(({xe})-({x})*W)", xe = x_expr, x = fmt(x));
+            let py = format!("(({ye})-({y})*H)", ye = y_expr, y = fmt(y));
+            let r_expr = format!("sqrt({px}*{px}+{py}*{py})", px = px, py = py);
+            let ang = format!("atan2({py},{px})", py = py, px = px);
+            let half_seg = fmt(std::f64::consts::PI / sides);
+            let seg = fmt(2.0 * std::f64::consts::PI / sides);
+            let rot_rad = fmt(rotation * std::f64::consts::PI / 180.0);
+            let aa = format!("(mod({ang}+PI/2+{half_seg}-({rot_rad}),{seg})-{half_seg})",
+                ang = ang, half_seg = half_seg, rot_rad = rot_rad, seg = seg);
+            let r_px = format!("({radius}*min(W,H))", radius = fmt(radius));
+            let edge_dist = format!("(({r_px})*cos({half_seg})/cos({aa}))", r_px = r_px, half_seg = half_seg, aa = aa);
+            Some(format!("(({r_expr})-({edge_dist}))", r_expr = r_expr, edge_dist = edge_dist))
+        }
+        "star" => {
+            let radius = mask.params.get("radius").copied().unwrap_or(0.3);
+            let inner_ratio = mask.params.get("innerRatio").copied().unwrap_or(0.5).clamp(0.0, 1.0);
+            let sides = mask.params.get("sides").copied().unwrap_or(3.0).max(3.0);
+            let rotation = mask.params.get("rotation").copied().unwrap_or(0.0);
+            let px = format!("(({xe})-({x})*W)", xe = x_expr, x = fmt(x));
+            let py = format!("(({ye})-({y})*H)", ye = y_expr, y = fmt(y));
+            let r_expr = format!("sqrt({px}*{px}+{py}*{py})", px = px, py = py);
+            let ang = format!("atan2({py},{px})", py = py, px = px);
+            let half_seg = fmt(std::f64::consts::PI / sides);
+            let seg = fmt(2.0 * std::f64::consts::PI / sides);
+            let rot_rad = fmt(rotation * std::f64::consts::PI / 180.0);
+            let aa = format!("(mod({ang}+PI/2+{half_seg}-({rot_rad}),{seg})-{half_seg})",
+                ang = ang, half_seg = half_seg, rot_rad = rot_rad, seg = seg);
+            let r_px = format!("({radius}*min(W,H))", radius = fmt(radius));
+            let rin_px = format!("({ir}*{r_px})", ir = fmt(inner_ratio), r_px = r_px);
+            let t = format!("(abs({aa})/{half_seg})", aa = aa, half_seg = half_seg);
+            let edge_dist_star = format!("(({r_px})+(({rin_px})-({r_px}))*({t}))", r_px = r_px, rin_px = rin_px, t = t);
+            Some(format!("(({r_expr})-({edge_dist_star}))", r_expr = r_expr, edge_dist_star = edge_dist_star))
+        }
+        _ => None,
+    }
+}
+
+/// hex `#rrggbb`（可选前导 #）→ (r,g,b) ∈ 0..1。空/非法回退白色 (1,1,1)。
+fn hex_to_rgb_f64(hex: &str) -> (f64, f64, f64) {
+    let h = hex.trim_start_matches('#');
+    if h.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&h[0..2], 16),
+            u8::from_str_radix(&h[2..4], 16),
+            u8::from_str_radix(&h[4..6], 16),
+        ) {
+            return (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+        }
+    }
+    (1.0, 1.0, 1.0)
+}
+
+/// 环（ring）alpha 表达式：沿轮廓居中、半宽 `hw_expr`、软边 `se_expr`，不透明度 `opacity` 烘焙进 alpha。
+/// 公式与前端 drawStrokeShadow 一致：`ringA = clip((hw + se/2 - |sd|)/se, 0, 1) * opacity`。
+fn ring_alpha_expr(sd_expr: &str, hw_expr: &str, se_expr: &str, opacity: f64) -> String {
+    let op = opacity.max(0.0).min(1.0);
+    format!(
+        "((clip((({hw})+({se})/2-abs({sd}))/({se}),0,1))*({op}))",
+        hw = hw_expr, se = se_expr, sd = sd_expr, op = fmt(op)
+    )
+}
+
+/// 描边项：(R,G,B, A) 四个 geq 表达式。颜色分量 0..1，alpha 已烘焙不透明度。
+/// 前端 `lineWidth = max(0.5, size*minSide)` 为**居中描边**，真实半宽 = `max(0.5, size*minSide)/2`；
+/// 软边 `seStroke = max(0.5, blur*minSide*0.1)`（blur>0 时才有模糊，否则硬边）。
+fn build_stroke_terms(mask: &Mask) -> Option<(String, String, String, String)> {
+    let sd = mask_sd_expr(mask, "X", "Y")?;
+    let hw = format!("max(0.5,({s}*min(W,H)))/2", s = fmt(mask.stroke.size));
+    let se = format!("max(0.5,({b}*min(W,H)*0.1))", b = fmt(mask.stroke.blur));
+    let a = ring_alpha_expr(&sd, &hw, &se, mask.stroke.opacity);
+    let (r, g, b) = hex_to_rgb_f64(&mask.stroke.color);
+    // geq 像素值范围 0..255，颜色分量须 *255 再 premultiply。
+    Some((fmt(r * 255.0), fmt(g * 255.0), fmt(b * 255.0), a))
+}
+
+/// 阴影项：(R,G,B, A)。阴影为同一轮廓偏移 (dx,dy) 后的加粗模糊环。
+/// `dx = cos(angle)*distance*minSide`，`dy = sin(angle)*distance*minSide`；
+/// 半宽 `hwShadow = blurPx/2`，软边 `seShadow = blurPx = max(2, blur*minSide*0.5)`。
+fn build_shadow_terms(mask: &Mask) -> Option<(String, String, String, String)> {
+    let ang = mask.shadow.angle * std::f64::consts::PI / 180.0;
+    let ca = ang.cos();
+    let sa = ang.sin();
+    let dx = format!("(({ca})*({dist})*min(W,H))", ca = fmt(ca), dist = fmt(mask.shadow.distance));
+    let dy = format!("(({sa})*({dist})*min(W,H))", sa = fmt(sa), dist = fmt(mask.shadow.distance));
+    let sd = mask_sd_expr(mask, &format!("(X-({dx}))"), &format!("(Y-({dy}))"))?;
+    let blur_px = format!("max(2,({b}*min(W,H)*0.5))", b = fmt(mask.shadow.blur));
+    let hw = format!("(({blur})/2)", blur = blur_px);
+    let a = ring_alpha_expr(&sd, &hw, &blur_px, mask.shadow.opacity);
+    let (r, g, b) = hex_to_rgb_f64(&mask.shadow.color);
+    // geq 像素值范围 0..255，颜色分量须 *255 再 premultiply。
+    Some((fmt(r * 255.0), fmt(g * 255.0), fmt(b * 255.0), a))
 }
 
 /// 计算单个蒙版的 geq alpha 表达式（0..1，已应用 invert）。
