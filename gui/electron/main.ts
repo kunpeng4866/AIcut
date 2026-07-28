@@ -552,7 +552,7 @@ function parseShellArgs(cmd: string): string[] {
     if (inQuote) {
       if (ch === inQuote) inQuote = null;
       else current += ch;
-    } else if (ch === '"' || ch === "'") {
+    } else if (ch === '"') {
       inQuote = ch;
     } else if (ch === ' ' || ch === '\t') {
       if (current) { args.push(current); current = ''; }
