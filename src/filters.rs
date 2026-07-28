@@ -626,8 +626,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let dist = format!("sqrt((X-{x}*W)^2+(Y-{y}*H)^2)", x = fmt(x), y = fmt(y));
             let r_px = format!("({r}*min(W,H))", r = fmt(r));
             let fp = format!("max(1,({feather}*min(W,H)))", feather = fmt(feather));
-            // 对称羽化圆：中心(feather*minSide/2 内) alpha=1，边界 0，边缘按 fp 平滑过渡
-            let mut a_expr = format!("clip(0.5-({dist}-{r_px})/({fp}),0,1)", dist = dist, r_px = r_px, fp = fp);
+            // 内侧羽化圆：dist<R 内 alpha=1，dist>R 外 alpha=0，边缘按 fp 线性平滑过渡（非对称，边界处 alpha=0 避免黑遮罩环）
+            let mut a_expr = format!("clip(({r_px}-{dist})/({fp}),0,1)", r_px = r_px, dist = dist, fp = fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -669,8 +669,8 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let qy = format!("(abs({dy})-(({hh})-({r0})))", dy = dy, hh = hh_expr, r0 = r0_expr);
             let sd = format!("(min(max({qx},{qy}),0)+sqrt(max({qx},0)*max({qx},0)+max({qy},0)*max({qy},0))-({r0}))",
                 qx = qx, qy = qy, r0 = r0_expr);
-            // 形状内 alpha（1 内 / 0 外，边缘按 ex 平滑过渡）
-            let mut a_expr = format!("clip(0.5-({sd})/({ex}),0,1)", sd = sd, ex = ex_expr);
+            // 形状内侧 alpha：sd<0 内 alpha=1，sd>0 外 alpha=0，边缘按 ex 平滑过渡（非对称，边界处 alpha=0 避免黑遮罩环）
+            let mut a_expr = format!("clip(-({sd})/({ex}),0,1)", sd = sd, ex = ex_expr);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -724,7 +724,7 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let edge_dist = format!("(({})*cos({})/cos({}))", r_px, half_seg, aa);
             let sd = format!("({}-({}))", r_expr, edge_dist);
             let fp = format!("max(1,({}*min(W,H)))", fmt(feather));
-            let mut a_expr = format!("clip(0.5-({})/({}),0,1)", sd, fp);
+            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
@@ -758,7 +758,7 @@ fn mask_alpha_expr(mask: &Mask) -> Option<String> {
             let edge_dist_star = format!("(({})+(({})-({}))*({}))", r_px, rin_px, r_px, t);
             let sd = format!("({}-({}))", r_expr, edge_dist_star);
             let fp = format!("max(1,({}*min(W,H)))", fmt(feather));
-            let mut a_expr = format!("clip(0.5-({})/({}),0,1)", sd, fp);
+            let mut a_expr = format!("clip(-({})/({}),0,1)", sd, fp);
             if mask.invert {
                 a_expr = format!("(1-({a_expr}))", a_expr = a_expr);
             }
