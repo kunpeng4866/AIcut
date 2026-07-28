@@ -1081,7 +1081,7 @@ export default function PreviewCanvas() {
                 const maskList = (clip.masks || []).filter((m) => m.enabled);
                 let shadowFilter: string | null = null;
                 if (maskList.length > 0) {
-                  const maskUrl = buildMaskImageUrl(maskList);
+                  const maskUrl = buildMaskImageUrl(maskList, asset?.width || project.canvas.width, asset?.height || project.canvas.height);
                   if (maskUrl) {
                     outStyle.WebkitMaskImage = maskUrl;
                     outStyle.maskImage = maskUrl;

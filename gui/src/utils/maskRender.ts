@@ -392,8 +392,15 @@ export function composeMaskedFrame(
 }
 
 // HTML5 用：把蒙版 alpha 画布转成 CSS mask-image 的 dataURL（含羽化/反转/并集）。返回 null 表示无蒙版。
-export function buildMaskImageUrl(masks: MaskConfig[]): string | null {
-  const alpha = buildMaskAlphaCanvas(256, 256, masks);
+// aspectW/aspectH：视频素材的原始宽高（如 1920×1088）。传入后蒙版 canvas 按此比例创建，
+// 避免固定 256×256 方形 canvas 在 CSS maskSize:'100% 100%' 下被拉伸导致圆形变椭圆。
+// 不传时回退 256×256（向前兼容）。
+export function buildMaskImageUrl(masks: MaskConfig[], aspectW?: number, aspectH?: number): string | null {
+  const bw = 256;
+  const bh = (aspectW && aspectH && aspectW > 0 && aspectH > 0)
+    ? Math.max(1, Math.round(bw * (aspectH / aspectW)))
+    : bw;
+  const alpha = buildMaskAlphaCanvas(bw, bh, masks);
   if (!alpha) return null;
   try {
     return alpha.toDataURL();
