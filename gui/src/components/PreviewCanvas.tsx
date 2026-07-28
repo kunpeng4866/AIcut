@@ -133,10 +133,10 @@ function clipNeedsManualDrive(clip: ClipConfig, t: number): boolean {
 interface ActiveAudioClip { clip: ClipConfig; asset: AssetConfig; trackId: string }
 
 const theme = {
-  root: { display: 'flex', flexDirection: 'column', height: '100%', background: '#1a1a2e', fontFamily: 'system-ui' } as React.CSSProperties,
+  root: { display: 'flex', flexDirection: 'column', height: '100%', background: '#000', fontFamily: 'system-ui' } as React.CSSProperties,
   stage: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative' } as React.CSSProperties,
   video: { maxWidth: '100%', maxHeight: '100%' } as React.CSSProperties,
-  canvas: { width: '100%', height: '100%', display: 'block', background: '#1a1a2e' } as React.CSSProperties,
+  canvas: { width: '100%', height: '100%', display: 'block', background: '#000' } as React.CSSProperties,
   hiddenMedia: { display: 'none' } as React.CSSProperties,
   placeholder: { color: '#555', fontSize: 14, textAlign: 'center' } as React.CSSProperties,
   controls: { height: 48, background: '#1a1a2e', borderTop: '1px solid #0f3460', display: 'flex', alignItems: 'center', padding: '0 12px', gap: 10, flexShrink: 0 } as React.CSSProperties,
@@ -147,7 +147,7 @@ const theme = {
   progressHandle: { position: 'absolute', width: 12, height: 12, background: '#eee', borderRadius: '50%', top: -3, transform: 'translateX(-50%)' } as React.CSSProperties,
   volume: { display: 'flex', alignItems: 'center', gap: 4 } as React.CSSProperties,
   volumeSlider: { width: 60, accentColor: '#e94560', cursor: 'pointer' } as React.CSSProperties,
-  frame: { position: 'relative', flex: '0 0 auto', overflow: 'hidden', background: '#1a1a2e', boxShadow: '0 0 0 1px #0f3460' } as React.CSSProperties,
+  frame: { position: 'relative', flex: '0 0 auto', overflow: 'hidden', background: '#000', boxShadow: '0 0 0 1px #0f3460' } as React.CSSProperties,
   frameVideo: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' } as React.CSSProperties,
   aspectSelectWrap: { position: 'absolute', right: 10, bottom: 10, zIndex: 30 } as React.CSSProperties,
   aspectSelect: { background: 'rgba(10,15,30,0.85)', color: '#eee', border: '1px solid #e94560', borderRadius: 6, padding: '5px 8px', fontSize: 12, cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.5)', maxWidth: 220 } as React.CSSProperties,
