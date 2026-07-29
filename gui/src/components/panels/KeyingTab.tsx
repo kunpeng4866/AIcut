@@ -142,10 +142,10 @@ function ManualPaintCanvas({ videoPath, canvasRef }: { videoPath: string; canvas
       <div style={{ position: 'relative', width: '100%', aspectRatio: String(aspect), background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 8 }}>
         <video ref={videoRef} src={videoPath} muted playsInline loop autoPlay
           onLoadedMetadata={setupCanvas}
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }} />
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 1, pointerEvents: 'none' }} />
         <canvas ref={canvasRef}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', cursor: 'crosshair', touchAction: 'none' }} />
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', cursor: 'crosshair', touchAction: 'none', zIndex: 2, pointerEvents: 'auto' }} />
       </div>
       <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
         <button style={btn(brush === 'fg')} onClick={() => setBrush('fg')}>前景</button>
