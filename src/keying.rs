@@ -46,12 +46,20 @@ pub fn keying_generate(input: &str, opts_json: &str) -> Result<Value, AppError> 
         .to_str()
         .ok_or_else(|| AppError::Render("bridge.py 路径包含非 UTF-8 字符".into()))?;
 
+    // rmbg2 (BRIA RMBG-2.0 / BiRefNet) 极重，必须放开 OpenMP 多线程，否则单帧
+    // 推理数十秒、整条 matte 生成十几分钟不可用；modnet/manual 维持单线程避免争核。
+    let is_rmbg2 = serde_json::from_str::<Value>(opts_json)
+        .ok()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str().map(|s| s == "rmbg2")))
+        .unwrap_or(false);
+    let omp_threads = if is_rmbg2 { "8" } else { "1" };
+
     let output = Command::new(&py)
         .env("PYTHONIOENCODING", "utf-8") // Windows 下管道 stdout 默认按本地 codepage，中文会乱码/解析失败
         .env("PYTHONUTF8", "1")
-        // 限单线程，避免 OpenMP/多线程在部分环境下的不稳定
-        .env("OMP_NUM_THREADS", "1")
-        .env("MKL_NUM_THREADS", "1")
+        // 限单线程，避免 OpenMP/多线程在部分环境下的不稳定（rmbg2 除外，见上）
+        .env("OMP_NUM_THREADS", omp_threads)
+        .env("MKL_NUM_THREADS", omp_threads)
         .arg(bridge_str)
         .arg(input)
         .arg(opts_json)

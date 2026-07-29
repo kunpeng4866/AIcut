@@ -427,8 +427,8 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
             <select value={k.model ?? 'modnet'} disabled={processing}
               onChange={(e) => setSmartField({ model: e.target.value })}
               style={{ flex: 1, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: '4px 6px', fontSize: 11 }}>
-              <option value="modnet">modnet</option>
-              <option value="rmbg2" disabled>rmbg2（敬请期待）</option>
+              <option value="modnet">modnet（MODNet）</option>
+              <option value="rmbg2">rmbg2（BRIA RMBG-2.0）</option>
             </select>
           </div>
 

@@ -32,6 +32,16 @@ GITHUB_RELEASE_URL = "https://github.com/ZHKKKe/MODNet/releases/download/ONNX/mo
 # 占位/镜像是同一权重；此处仅为可读标识。
 MODEL_FILENAME = "modnet.onnx"
 
+# P4：rmbg2 = BRIA RMBG-2.0（Apache-2.0，BiRefNet 架构，通用去背景）。
+# hf-mirror.com 不代理 briaai/*（会 308 跳转到被沙箱 egress 拦截的 huggingface.co），
+# 故 rmbg2 ONNX 经 ModelScope 国内镜像拉取（返回原始文件字节）。
+# 使用 FP32 权重（rmbg2.onnx，约 976MB / BiRefNet ~230M 参数）：经实测本机
+# onnxruntime CPU 对 BiRefNet 的 deformable conv 无 INT8 内核，动态 INT8 量化后
+# 单帧 1024² 推理反而慢 ~11 倍（24s vs 2.2s），故默认 FP32 + 多线程
+#（keying.rs 对 rmbg2 放开 OMP_NUM_THREADS）。推理峰值 ~12GB 内存，本机 32GB 充足。
+RMBG2_MODEL_FILENAME = "rmbg2.onnx"
+MODELSCOPE_RMBG2_URL = "https://modelscope.cn/api/v1/models/briaai/RMBG-2.0/repo?Revision=master&FilePath=onnx/model.onnx"
+
 
 # ───────────────────────── 媒体探测 ─────────────────────────
 
@@ -116,32 +126,90 @@ def _ensure_model(log) -> str | None:
     return None
 
 
+def _ensure_rmbg2_model(log) -> str | None:
+    """返回 rmbg2 (BRIA RMBG-2.0) ONNX 路径；不可用则 None（调用方回退占位 matte）。
+
+    使用 FP32 权重（rmbg2.onnx）：经实测，本机 onnxruntime CPU 对 BiRefNet 的
+    deformable conv 无 INT8 内核，动态 INT8 量化后单帧 1024² 推理反而慢 ~11 倍
+    （24s vs 2.2s），故默认用 FP32 + 多线程（keying.rs 对 rmbg2 放开 OMP_NUM_THREADS）。
+    FP32 约 976MB、推理峰值 ~12GB 内存，本机 32GB 充足。
+
+    优先级：
+      1. 环境变量 AICUT_RMBG2_MODEL 指定本地路径（原样使用）；
+      2. 本地 FP32（rmbg2.onnx）；
+      3. ModelScope 镜像拉取 FP32（hf-mirror.com 不代理 briaai/*）。
+    """
+    env_path = os.environ.get("AICUT_RMBG2_MODEL")
+    if env_path and os.path.isfile(env_path):
+        log("使用环境变量指定的 rmbg2 模型: " + env_path)
+        return env_path
+
+    fp32_cache = os.path.join(CACHE_DIR, RMBG2_MODEL_FILENAME)
+    if not (os.path.isfile(fp32_cache) and os.path.getsize(fp32_cache) > 1024):
+        for url in [MODELSCOPE_RMBG2_URL]:
+            try:
+                log("尝试下载 rmbg2 模型: " + url)
+                tmp = fp32_cache + ".part"
+                req = urllib.request.Request(url, headers={"User-Agent": "aicut-keying"})
+                with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as f:
+                    shutil.copyfileobj(resp, f)
+                if os.path.getsize(tmp) > 1024:
+                    os.replace(tmp, fp32_cache)
+                    log("rmbg2 模型下载成功: " + fp32_cache)
+                    break
+                os.remove(tmp)
+            except Exception as e:  # noqa: BLE001
+                log("rmbg2 下载失败({})：{}".format(url, e))
+
+    if os.path.isfile(fp32_cache) and os.path.getsize(fp32_cache) > 1024:
+        log("使用 rmbg2 FP32 模型: " + fp32_cache)
+        return fp32_cache
+
+    log("rmbg2 模型不可用，回退 numpy 占位 matte")
+    return None
+
+
+
 # ───────────────────────── 推理器 ─────────────────────────
 
 class _Predictor:
-    """封装「真实 MODNet 模型」或「numpy 占位」两种预测路径。"""
+    """封装「真实模型（MODNet / RMBG-2.0）」或「numpy 占位」预测路径。
 
-    def __init__(self, model_path: str | None, log):
+    model_kind:
+      - 'modnet'：最长边缩到 512 再对齐 32 倍数（5 级编码器要求），输出已归一化；
+      - 'rmbg2' (BRIA RMBG-2.0, BiRefNet)：方图 1024x1024 推理，ImageNet 归一化，
+        官方 ONNX 已含 sigmoid，输出已归一化到 [0,1]。
+    两者均输出 HxW float32 matte ∈ [0,1]（0=背景, 255=前景 约定见文件头）。
+    """
+
+    def __init__(self, model_path: str | None, log, model_kind: str = "modnet"):
         self.log = log
+        self.model_kind = model_kind if model_kind in ("modnet", "rmbg2") else "modnet"
         self.use_real = False
         self.session = None
         self.input_name = None
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
+        # 推理输入尺寸：rmbg2 固定 1024 方图（BiRefNet 设计为 1024，512 下 deformable
+        # conv/ASPP 对齐会崩；1024 经多线程 CPU 推理 45 帧≈2min，实用；modnet 动态）。
+        self.infer_size = 1024 if self.model_kind == "rmbg2" else 512
         if model_path:
             try:
                 import onnxruntime as ort  # type: ignore
                 import numpy as np  # type: ignore
                 self.np = np
                 so = ort.SessionOptions()
-                so.intra_op_num_threads = 1
-                so.inter_op_num_threads = 1
+                # MODNet 轻量，单线程避免与其他进程争核；BiRefNet(RMBG-2.0) 极重，
+                # 必须放开多线程，否则单帧推理数十秒、整条 matte 生成十几分钟不可用。
+                if self.model_kind != "rmbg2":
+                    so.intra_op_num_threads = 1
+                    so.inter_op_num_threads = 1
                 self.session = ort.InferenceSession(
                     model_path, so, providers=["CPUExecutionProvider"]
                 )
                 self.input_name = self.session.get_inputs()[0].name
                 self.use_real = True
-                log("MODNet ONNX 加载成功，使用真实模型推理")
+                log("{} ONNX 加载成功，使用真实模型推理".format(self.model_kind))
             except Exception as e:  # noqa: BLE001
                 self.log("ONNX 推理不可用({})，回退占位 matte".format(e))
                 self.use_real = False
@@ -157,21 +225,28 @@ class _Predictor:
         if self.use_real:
             from PIL import Image  # type: ignore
             img = Image.fromarray(rgb).convert("RGB")
-            iw, ih = img.size
-            scale = 512.0 / max(iw, ih)
-            nw, nh = max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))
-            # MODNet 编码器含 5 级下采样，要求送入模型的 H/W 均为 32 的整数倍，
-            # 否则上采样回对齐时 Concat 节点维度不匹配（报 Axis N 80 vs 73）。
-            nw = max(32, int(round(nw / 32.0)) * 32)
-            nh = max(32, int(round(nh / 32.0)) * 32)
-            img_r = img.resize((nw, nh), Image.BILINEAR)
+            if self.model_kind == "rmbg2":
+                # RMBG-2.0 / BiRefNet 设计为 1024 方图（拉伸）推理，输出再缩回原尺寸。
+                img_r = img.resize((self.infer_size, self.infer_size), Image.BILINEAR)
+            else:
+                iw, ih = img.size
+                scale = 512.0 / max(iw, ih)
+                nw, nh = max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))
+                # MODNet 编码器含 5 级下采样，要求送入模型的 H/W 均为 32 的整数倍，
+                # 否则上采样回对齐时 Concat 节点维度不匹配（报 Axis N 80 vs 73）。
+                nw = max(32, int(round(nw / 32.0)) * 32)
+                nh = max(32, int(round(nh / 32.0)) * 32)
+                img_r = img.resize((nw, nh), Image.BILINEAR)
             arr = np.asarray(img_r, dtype=np.float32) / 255.0
             arr = arr.transpose(2, 0, 1)
             arr = (arr - np.array(self.mean).reshape(3, 1, 1)) / np.array(self.std).reshape(3, 1, 1)
             blob = np.expand_dims(arr, 0).astype(np.float32)
             out = self.session.run(None, {self.input_name: blob})[0]
-            m = out[0, 0]
-            # Xenova/modnet ONNX 已输出归一化 matte（0..1），直接截断即可。
+            m = out[0, 0].astype(np.float32)
+            # BRIA RMBG-2.0 官方 ONNX 已含 sigmoid，输出已归一化到 [0,1]；
+            # 个别导出可能为 logits，这里自适应：超出 [0,1] 范围则施加 sigmoid。
+            if m.max() > 1.0 + 1e-3 or m.min() < -1e-3:
+                m = 1.0 / (1.0 + np.exp(-np.clip(m, -20.0, 20.0)))
             m = np.clip(m, 0.0, 1.0)
             # 上采样回原帧尺寸
             m_img = Image.fromarray((m * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)
@@ -197,6 +272,7 @@ def generate_matte(input_path: str, opts: dict) -> dict:
     def log(msg: str):
         log_lines.append(msg)
         sys.stderr.write("[core] " + msg + "\n")
+        sys.stderr.flush()
 
     if not os.path.isfile(input_path):
         raise FileNotFoundError("输入视频不存在: " + input_path)
@@ -217,8 +293,15 @@ def generate_matte(input_path: str, opts: dict) -> dict:
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
 
-    model_path = _ensure_model(log)
-    predictor = _Predictor(model_path, log)
+    # P4：按 opts['model'] 选择智能模型（modnet 默认 / rmbg2 = BRIA RMBG-2.0）。
+    model_kind = opts.get("model") or "modnet"
+    if model_kind not in ("modnet", "rmbg2"):
+        model_kind = "modnet"
+    if model_kind == "rmbg2":
+        model_path = _ensure_rmbg2_model(log)
+    else:
+        model_path = _ensure_model(log)
+    predictor = _Predictor(model_path, log, model_kind)
 
     ff = _ffmpeg_exe()
     reader = subprocess.Popen(
@@ -270,7 +353,7 @@ def generate_matte(input_path: str, opts: dict) -> dict:
         "height": h,
         "fps": fps,
         "frames": frame_count,
-        "model": "modnet" if predictor.use_real else "placeholder",
+        "model": model_kind if predictor.use_real else "placeholder",
         "mode": "matte",
     }
 
