@@ -476,3 +476,6 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     },
   };
 });
+
+// [TEST HOOK] 临时暴露供 Playwright 驱动验证，验证后回退删除
+(globalThis as any).__projectStore = useProjectStore;

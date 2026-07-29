@@ -111,3 +111,6 @@ export const useUIStore = create<UIState>((set) => ({
   setRightPanelWidth: (w) => set({ rightPanelWidth: Math.max(180, Math.min(500, w)) }),
   setTimelineHeight: (h) => set({ timelineHeight: Math.max(120, Math.min(500, h)) }),
 }));
+
+// [TEST HOOK] 临时暴露供 Playwright 驱动验证，验证后回退删除
+(globalThis as any).__uiStore = useUIStore;
