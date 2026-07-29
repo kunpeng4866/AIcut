@@ -272,11 +272,11 @@ fn main() {
             }
             let opts_merged = serde_json::to_string(&opts_val).unwrap_or_else(|_| opts.clone());
             match mode.as_str() {
-                "matte" => match aicut_engine::keying_generate(&input, &opts_merged) {
+                "matte" | "manual" => match aicut_engine::keying_generate(&input, &opts_merged) {
                     Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
-                    Err(e) => { eprintln!("keying matte 失败: {}", e); process::exit(1); }
+                    Err(e) => { eprintln!("keying {} 失败: {}", mode, e); process::exit(1); }
                 },
-                other => { eprintln!("未知 keying 模式: {} (可用: matte)", other); process::exit(2); }
+                other => { eprintln!("未知 keying 模式: {} (可用: matte, manual)", other); process::exit(2); }
             }
         }
         other => {

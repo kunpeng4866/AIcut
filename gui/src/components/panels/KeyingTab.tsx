@@ -1,11 +1,19 @@
 // 抠像属性面板（KeyingTab）：启用开关、模式选择、键色（含吸管）、相似度、边缘柔化、溢出抑制。
-// M1 仅 chroma 色度抠图有实际渲染管线；smart 为智能抠像（P1）分支，manual 为占位模式。
+// M1 仅 chroma 色度抠图有实际渲染管线；smart 为智能抠像（P1）分支，manual 为画笔手动抠像（P2）。
 // 写入方式：结构变更（启用/模式/颜色/模型/生成）走 updateClip（拖前 pushHistorySnapshot），
 //           参数拖动（阈值/柔化）走 updateClipLive。
-import { useState } from 'react';
+import { useState, useRef } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { createDefaultKeying, uid } from '../../utils/clipFactories';
 import type { ClipConfig, KeyingConfig, KeyingMode } from '../../types';
+
+// 本地 pathToUrl（与 WebGPUPreview/PreviewCanvas 内实现一致，避免循环依赖）
+const pathToUrl = (path: string): string => {
+  if (/^(https?|aicut-asset|blob):/.test(path)) return path;
+  const normalized = path.replace(/\\/g, '/');
+  return `aicut-asset:///${normalized}`;
+};
 
 // 复用面板配色（深色 #16213e / #0f3460 边框 / #e94560 强调）
 const S = {
@@ -82,19 +90,97 @@ function matteOutputPath(assetPath: string): string {
   return `${dir}${stem}_matte.mp4`;
 }
 
+// ───────────────────────── P2 手动抠像：画笔涂鸦画布 ─────────────────────────
+// 约定（与 python/keying/core.py generate_manual_matte 对齐）：
+//   前景涂抹 = 不透明白色 (R=255,A=255)；背景涂抹 = 不透明黑色 (R=0,A=255)；未涂抹 = A=0 透明。
+type Brush = 'fg' | 'bg' | 'erase';
+function ManualPaintCanvas({ videoPath, canvasRef }: { videoPath: string; canvasRef: React.RefObject<HTMLCanvasElement> }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [brush, setBrush] = useState<Brush>('fg');
+  const [brushSize, setBrushSize] = useState(22);
+  const [aspect, setAspect] = useState(16 / 9);
+  const drawing = useRef(false);
+  const last = useRef<{ x: number; y: number } | null>(null);
+  const undoStack = useRef<string[]>([]);
+
+  const setupCanvas = () => {
+    const c = canvasRef.current; const v = videoRef.current;
+    if (!c || !v || !v.videoWidth) return;
+    const nw = v.videoWidth, nh = v.videoHeight;
+    const scale = Math.min(1, 480 / Math.max(nw, nh));
+    c.width = Math.max(1, Math.round(nw * scale));
+    c.height = Math.max(1, Math.round(nh * scale));
+    c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+    setAspect(nw / nh);
+  };
+  const pos = (e: ReactPointerEvent) => {
+    const c = canvasRef.current!; const r = c.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * c.width, y: (e.clientY - r.top) / r.height * c.height };
+  };
+  const stroke = (x: number, y: number) => {
+    const ctx = canvasRef.current!.getContext('2d')!;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (brush === 'erase') { ctx.globalCompositeOperation = 'destination-out'; ctx.strokeStyle = 'rgba(0,0,0,1)'; }
+    else { ctx.globalCompositeOperation = 'source-over'; ctx.strokeStyle = brush === 'fg' ? 'rgba(255,255,255,1)' : 'rgba(0,0,0,1)'; }
+    ctx.lineWidth = brushSize;
+    ctx.beginPath();
+    if (last.current) ctx.moveTo(last.current.x, last.current.y);
+    else { ctx.arc(x, y, brushSize / 2, 0, Math.PI * 2); ctx.fill(); }
+    ctx.lineTo(x, y); ctx.stroke();
+    last.current = { x, y };
+  };
+  const pushUndo = () => { const c = canvasRef.current; if (!c) return; undoStack.current.push(c.toDataURL()); if (undoStack.current.length > 12) undoStack.current.shift(); };
+  const onDown = (e: ReactPointerEvent) => { (e.target as Element).setPointerCapture?.(e.pointerId); drawing.current = true; pushUndo(); last.current = null; const p = pos(e); stroke(p.x, p.y); };
+  const onMove = (e: ReactPointerEvent) => { if (!drawing.current) return; const p = pos(e); stroke(p.x, p.y); };
+  const onUp = () => { drawing.current = false; last.current = null; };
+  const undo = () => { const c = canvasRef.current; if (!c) return; const d = undoStack.current.pop(); if (!d) return; const img = new Image(); img.onload = () => { const ctx = c.getContext('2d')!; ctx.clearRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0); }; img.src = d; };
+  const clear = () => { const c = canvasRef.current; if (!c) return; c.getContext('2d')!.clearRect(0, 0, c.width, c.height); };
+
+  const btn = (active: boolean) => ({ ...S.btn, ...(active ? S.btnActive : {}) });
+  return (
+    <div>
+      <div style={{ position: 'relative', width: '100%', aspectRatio: String(aspect), background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 8 }}>
+        <video ref={videoRef} src={videoPath} muted playsInline loop autoPlay
+          onLoadedMetadata={setupCanvas}
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }} />
+        <canvas ref={canvasRef}
+          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', cursor: 'crosshair', touchAction: 'none' }} />
+      </div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
+        <button style={btn(brush === 'fg')} onClick={() => setBrush('fg')}>前景</button>
+        <button style={btn(brush === 'bg')} onClick={() => setBrush('bg')}>背景</button>
+        <button style={btn(brush === 'erase')} onClick={() => setBrush('erase')}>橡皮</button>
+        <button style={S.btn} onClick={undo}>撤销</button>
+        <button style={S.btn} onClick={clear}>清空</button>
+      </div>
+      <div style={{ ...S.row, marginBottom: 8 }}>
+        <span style={S.label}>笔刷</span>
+        <input type="range" min={4} max={80} step={1} value={brushSize}
+          onChange={(e) => setBrushSize(parseInt(e.target.value) || 22)}
+          style={{ flex: 1, accentColor: '#e94560' }} />
+        <span style={{ color: '#eee', fontSize: 11, width: 28 }}>{brushSize}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
   const updateClipLive = useProjectStore((s) => s.updateClipLive);
   const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
+  const project = useProjectStore((s) => s.project);
 
   const keying = clip.keying || null;
+  const srcAsset = project.assets.find((a: any) => a.id === clip.assetId);
 
   const commit = (next: KeyingConfig | undefined) => updateClip(trackId, clip.id, { keying: next } as Partial<ClipConfig>);
   const commitLive = (next: KeyingConfig) => updateClipLive(trackId, clip.id, { keying: next } as Partial<ClipConfig>);
 
-  // 智能抠像（P1）专属状态：处理中 + 错误提示
+  // 智能/手动抠像（P1/P2）专属状态：处理中 + 错误提示
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const paintCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // 未启用：提供一键开启（用默认 chroma 配置）
   if (!keying) {
@@ -108,7 +194,7 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     );
   }
 
-  // k：P1 新增字段（model/threshold/matteAssetId）尚未并入本仓库 types.ts（归属后端子代理），
+  // k：P1/P2 新增字段（model/threshold/matteAssetId）尚未并入本仓库 types.ts（归属后端子代理），
   // 此处以局部 any 视图读取，避免改动共享类型契约文件。
   const k = keying as any;
 
@@ -130,6 +216,18 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     const c = await pickColorWithEyedropper();
     if (c) setColor(c);
   };
+
+  // 共享：matte 阈值 / 边缘柔化滑块（smart 与 manual 复用；预览/导出均依此曲线）
+  const MatteAdjust = (
+    <div key="matte-adjust">
+      <ParamSlider label="阈值" value={k.threshold ?? 0.5} min={0} max={1} step={0.01} unit="%" editable
+        onChange={(v) => updateClipLive(trackId, clip.id, { keying: { ...keying, mode: keying.mode, model: k.model ?? 'modnet', threshold: v, matteAssetId: k.matteAssetId } } as any)}
+        onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="边缘柔化" value={k.edgeSoftness ?? 0} min={0} max={1} step={0.01} unit="%" editable
+        onChange={(v) => updateClipLive(trackId, clip.id, { keying: { ...keying, mode: keying.mode, model: k.model ?? 'modnet', edgeSoftness: v, matteAssetId: k.matteAssetId } } as any)}
+        onEditStart={pushHistorySnapshot} />
+    </div>
+  );
 
   // 智能抠像：取源素材真实路径 → 调 IPC 生成蒙版 → 注册素材 + 回写 keying.matteAssetId
   const runSmartKeying = async () => {
@@ -171,6 +269,61 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       const msg = e?.message || String(e);
       setError(msg);
       alert('智能抠像失败：' + msg);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  // 手动抠像：取画布 guide（data URL）→ 调 IPC 生成蒙版（可基于已有智能蒙版修正）
+  const runManualKeying = async () => {
+    if (processing) return;
+    const store = useProjectStore.getState();
+    const asset = store.project.assets.find((a: any) => a.id === clip.assetId);
+    if (!asset || !asset.path) {
+      alert('找不到源素材路径，无法执行手动抠像');
+      return;
+    }
+    const assetPath = asset.path;
+    const model = k.model ?? 'modnet';
+    const threshold = k.threshold ?? 0.5;
+    const softness = k.edgeSoftness ?? 0.1;
+    // 已有蒙版则在其上修正
+    let smartMattePath = '';
+    if (k.matteAssetId) {
+      const ma = store.project.assets.find((a: any) => a.id === k.matteAssetId);
+      if (ma && ma.path) smartMattePath = ma.path;
+    }
+    const guide = paintCanvasRef.current?.toDataURL('image/png') || '';
+    if (!guide) {
+      alert('请先在画布上涂抹前景/背景');
+      return;
+    }
+    const base = matteOutputPath(assetPath).replace(/_matte\.mp4$/, '');
+    const output = `${base}_manual_matte.mp4`;
+    setError(null);
+    setProcessing(true);
+    try {
+      pushHistorySnapshot();
+      const res: any = await (window as any).aicut.keying.generate(
+        assetPath,
+        JSON.stringify({ mode: 'manual', guide, smartMattePath, threshold, softness, fps: asset.fps ?? 30, output })
+      );
+      if (!res?.success) throw new Error(res?.error || '手动抠像失败');
+      const result = (res.data ?? {}) as any;
+      if (result.error) throw new Error(result.error);
+      const assetId = uid('asset');
+      store.addAsset({
+        id: assetId, type: 'video', path: result.mattePath,
+        duration: result.duration, width: result.width, height: result.height, fps: result.fps,
+      });
+      store.updateClip(trackId, clip.id, {
+        keying: { ...keying, mode: 'manual', model, threshold, edgeSoftness: softness, matteAssetId: assetId },
+      } as any);
+    } catch (e: any) {
+      console.error('手动抠像失败', e);
+      const msg = e?.message || String(e);
+      setError(msg);
+      alert('手动抠像失败：' + msg);
     } finally {
       setProcessing(false);
     }
@@ -235,23 +388,14 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
             </select>
           </div>
 
-          {/* 已生成蒙版：显示状态 + 阈值/柔化滑块（拖动仅预览，不重新推理） */}
           {k.matteAssetId ? (
-            <>
-              <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>已生成蒙版，可重新生成</div>
-              <ParamSlider label="阈值" value={k.threshold ?? 0.5} min={0} max={1} step={0.01} unit="%" editable
-                onChange={(v) => updateClipLive(trackId, clip.id, { keying: { ...keying, mode: 'smart', model: k.model ?? 'modnet', threshold: v, matteAssetId: k.matteAssetId } } as any)}
-                onEditStart={pushHistorySnapshot} />
-              {/* 边缘柔化复用 chroma 的 edgeSoftness 字段 */}
-              <ParamSlider label="边缘柔化" value={k.edgeSoftness ?? 0} min={0} max={1} step={0.01} unit="%" editable
-                onChange={(v) => updateClipLive(trackId, clip.id, { keying: { ...keying, mode: 'smart', model: k.model ?? 'modnet', edgeSoftness: v, matteAssetId: k.matteAssetId } } as any)}
-                onEditStart={pushHistorySnapshot} />
-            </>
+            <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>已生成蒙版，可重新生成</div>
           ) : (
             <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成蒙版，点击下方按钮开始推理</div>
           )}
 
-          {/* 开始 / 重新生成按钮 */}
+          {k.matteAssetId && MatteAdjust}
+
           <button style={{ ...S.btn, width: '100%', background: '#e94560', color: '#fff', border: '1px solid #e94560' }}
             disabled={processing}
             onClick={runSmartKeying}>
@@ -264,10 +408,35 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
         </div>
       )}
 
-      {/* 手动模式仍为占位 */}
+      {/* 手动抠像（P2）专属 UI */}
       {keying.mode === 'manual' && (
-        <div style={{ color: '#e9a23b', fontSize: 11, marginBottom: 8 }}>
-          M1 仅「色度」模式有实时预览；手动为占位，预览将回退原帧。
+        <div>
+          <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>
+            P2 手动抠像：在画布上涂抹——前景（白）保留、背景（黑）去除；生成后叠加到预览。
+            {k.matteAssetId ? '当前基于已有蒙版修正边缘。' : '建议先做智能抠像，再手动修补边缘。'}
+          </div>
+
+          {srcAsset?.path && (
+            <ManualPaintCanvas videoPath={pathToUrl(srcAsset.path)} canvasRef={paintCanvasRef} />
+          )}
+
+          {k.matteAssetId ? (
+            <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>已生成蒙版，可重新涂抹后生成</div>
+          ) : (
+            <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成蒙版，涂抹后点击下方按钮</div>
+          )}
+
+          {k.matteAssetId && MatteAdjust}
+
+          <button style={{ ...S.btn, width: '100%', background: '#e94560', color: '#fff', border: '1px solid #e94560' }}
+            disabled={processing}
+            onClick={runManualKeying}>
+            {processing ? '处理中…' : (k.matteAssetId ? '重新生成蒙版' : '生成蒙版')}
+          </button>
+
+          {error && (
+            <div style={{ color: '#e9a23b', fontSize: 11, marginTop: 8, wordBreak: 'break-all' }}>错误：{error}</div>
+          )}
         </div>
       )}
     </div>

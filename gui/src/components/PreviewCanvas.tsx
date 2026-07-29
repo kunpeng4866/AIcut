@@ -174,7 +174,8 @@ const KeyedCanvas = ({
   // 智能抠像（smart）：隐藏 matte 视频 + 离屏 canvas
   const matteVideoRef = useRef<HTMLVideoElement | null>(null);
   const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const isSmart = !!(keying.mode === 'smart' && keying.matteAssetId && matteAsset);
+  // 智能/手动抠像：两者都走 matte 视频合成（matteAssetId 指向 AI 或画笔生成的灰度 matte）
+  const isMatte = !!(keying.matteAssetId && matteAsset && (keying.mode === 'smart' || keying.mode === 'manual'));
 
   useEffect(() => {
     let raf = 0;
@@ -187,7 +188,7 @@ const KeyedCanvas = ({
         if (canvas.width !== vw) canvas.width = vw;
         if (canvas.height !== vh) canvas.height = vh;
         try {
-          if (isSmart) {
+          if (isMatte) {
             // 智能抠像：取 matte 帧（与源视频同步 currentTime），再 applyMatte
             let mv = matteVideoRef.current;
             if (!mv && matteAsset) {
@@ -244,7 +245,7 @@ const KeyedCanvas = ({
       if (mv) { try { mv.pause(); mv.removeAttribute('src'); mv.load(); } catch (_) {} matteVideoRef.current = null; }
       matteCanvasRef.current = null;
     };
-  }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isSmart, matteAsset]);
+  }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isMatte, matteAsset]);
 
   return (
     <>
@@ -1215,10 +1216,10 @@ export default function PreviewCanvas() {
                 );
                 // 抠像（HTML5 回退）：chroma / smart 模式用 KeyedCanvas 像素合成，替代原 video 元素。
                 const isKeying = !!(clip.keying && clip.keying.enabled &&
-                  (clip.keying.mode === 'chroma' || clip.keying.mode === 'smart'));
+                  (clip.keying.mode === 'chroma' || clip.keying.mode === 'smart' || clip.keying.mode === 'manual'));
                 if (isKeying) {
                   // 智能抠像（smart）需要按 matteAssetId 取出真实 matte 资产路径
-                  const matteAsset = (clip.keying?.mode === 'smart' && clip.keying.matteAssetId)
+                  const matteAsset = ((clip.keying?.mode === 'smart' || clip.keying?.mode === 'manual') && clip.keying.matteAssetId)
                     ? project.assets.find((a) => a.id === clip.keying!.matteAssetId)
                     : undefined;
                   const keyedEl = (

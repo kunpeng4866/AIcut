@@ -273,3 +273,159 @@ def generate_matte(input_path: str, opts: dict) -> dict:
         "model": "modnet" if predictor.use_real else "placeholder",
         "mode": "matte",
     }
+
+
+# ───────────────────────── 手动抠像（manual）─────────────────────────
+# 新增依赖（不与上方智能抠像共用，避免改动 generate_matte 及其以上内容）。
+import base64  # noqa: E402
+import io  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image, ImageFilter  # noqa: E402
+
+
+def generate_manual_matte(input_path: str, opts: dict) -> dict:
+    """手动抠像：依前端涂抹引导图（guide）生成灰度 matte 视频。
+
+    opts 约定：
+      - guide: data URL 字符串 ``data:image/png;base64,<b64>``，RGBA 画布：
+            前景涂抹 = 不透明白 (255,255,255,255)；背景涂抹 = 不透明黑 (0,0,0,255)；
+            未涂抹 = A=0（透明）。
+      - smartMattePath（可选）: 已存在灰度 matte mp4 绝对路径；读取其首帧作 base。
+      - softness（可选）: 羽化强度，默认 0.1。
+      - output（可选）: 输出路径，否则 <stem>_matte.mp4。
+
+    返回 dict 字段与 generate_matte 一致（model/mode 为 "manual"）。
+    """
+    t0 = time.time()
+
+    def log(msg: str):
+        sys.stderr.write("[core] " + msg + "\n")
+
+    if not os.path.isfile(input_path):
+        raise FileNotFoundError("输入视频不存在: " + input_path)
+
+    probe = _ffprobe(input_path)
+    w, h = probe["width"], probe["height"]
+    fps = probe["fps"]
+    if fps <= 0 or not math.isfinite(fps):
+        fps = 30.0
+    if w <= 0 or h <= 0:
+        raise RuntimeError("无效视频尺寸 {}x{}".format(w, h))
+
+    # ── 解析 guide data URL → RGBA np array（gh x gw x 4）──
+    guide = opts.get("guide")
+    if not isinstance(guide, str) or not guide.startswith("data:"):
+        raise ValueError("opts['guide'] 必须是 data URL 字符串（data:image/png;base64,...）")
+    try:
+        header, b64 = guide.split(",", 1)
+    except ValueError:
+        raise ValueError("guide data URL 缺少 ',' 分隔符")
+    if ";base64" not in header:
+        raise ValueError("guide data URL 必须为 base64 编码")
+    raw = base64.b64decode(b64)
+    ga = np.array(Image.open(io.BytesIO(raw)).convert("RGBA"))
+    gh, gw = ga.shape[:2]
+
+    A = ga[:, :, 3].astype(np.float32)
+    R = ga[:, :, 0].astype(np.float32)
+    fg_mask = (A > 32) & (R > 127)
+    bg_mask = (A > 32) & (R <= 127)
+
+    # ── base alpha：读取 smart matte 首帧（缩放到 guide 分辨率）或全 0 ──
+    smart_path = opts.get("smartMattePath")
+    if smart_path and os.path.isfile(smart_path) and os.path.getsize(smart_path) > 0:
+        try:
+            sp = _ffprobe(smart_path)
+            sw, sh = sp["width"], sp["height"]
+            ff = _ffmpeg_exe()
+            p = subprocess.run(
+                [ff, "-v", "error", "-i", smart_path,
+                 "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            need = sw * sh
+            if p.returncode == 0 and len(p.stdout) >= need:
+                frame = np.frombuffer(p.stdout, dtype=np.uint8)[:need].reshape(sh, sw).astype(np.float32) / 255.0
+                if (sw, sh) != (gw, gh):
+                    frame = np.asarray(
+                        Image.fromarray((np.clip(frame, 0, 1) * 255).astype(np.uint8)).resize((gw, gh), Image.BILINEAR),
+                        dtype=np.float32,
+                    ) / 255.0
+                base = frame
+                log("已读取 smart matte 首帧作为 base（{}x{}）".format(gw, gh))
+            else:
+                log("smart matte 首帧读取失败，回退全 0 base")
+                base = np.zeros((gh, gw), dtype=np.float32)
+        except Exception as e:  # noqa: BLE001
+            log("smart matte 读取异常({})，回退全 0 base".format(e))
+            base = np.zeros((gh, gw), dtype=np.float32)
+    else:
+        base = np.zeros((gh, gw), dtype=np.float32)
+
+    # ── 合成 alpha（guide 分辨率）──
+    softness = float(opts.get("softness", 0.1))
+    radius = max(0.5, softness * min(gw, gh) * 0.05)
+
+    def _feather(mask_bool: np.ndarray) -> np.ndarray:
+        m = mask_bool.astype(np.float32)
+        return np.asarray(
+            Image.fromarray((np.clip(m, 0, 1) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(radius)),
+            dtype=np.float32,
+        ) / 255.0
+
+    fg_f = _feather(fg_mask)
+    bg_f = _feather(bg_mask)
+
+    alpha = base * (1.0 - fg_f - bg_f) + fg_f * 1.0
+    alpha = np.clip(alpha, 0.0, 1.0)
+    # 若 fg/bg 都未涂抹，alpha == base（纯智能 matte，等价于不修正），不会出错。
+
+    # ── 输出路径 ──
+    output_path = opts.get("output") or ""
+    if not output_path:
+        stem, ext = os.path.splitext(input_path)
+        output_path = stem + "_matte.mp4"
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 缩回源尺寸 (w,h) → alpha_full（float32 0..1）
+    alpha_full = np.asarray(
+        Image.fromarray((np.clip(alpha, 0, 1) * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR),
+        dtype=np.float32,
+    ) / 255.0
+
+    # ── 用 ffmpeg rawvideo 管道写 N 帧相同灰度帧（与 generate_matte 一致）──
+    N = max(1, int(round(probe["duration"] * fps)))
+    ff = _ffmpeg_exe()
+    writer = subprocess.Popen(
+        [ff, "-y", "-v", "error",
+         "-f", "rawvideo", "-pix_fmt", "gray",
+         "-s", "{}x{}".format(w, h), "-r", "{:.4f}".format(fps), "-i", "pipe:0",
+         "-an", "-c:v", "libx264", "-pix_fmt", "gray", output_path],
+        stdin=subprocess.PIPE,
+    )
+    gray = (np.clip(alpha_full, 0, 1) * 255).astype(np.uint8)
+    try:
+        for _ in range(N):
+            writer.stdin.write(gray.tobytes())
+    finally:
+        if writer.stdin:
+            writer.stdin.close()
+        writer.wait()
+
+    if writer.returncode != 0:
+        raise RuntimeError("ffmpeg 编码 manual matte 失败(退出码 {})".format(writer.returncode))
+
+    elapsed = time.time() - t0
+    log("完成 manual matte：{}x{} {} 帧，用时 {:.2f}s".format(w, h, N, elapsed))
+
+    return {
+        "mattePath": os.path.abspath(output_path),
+        "duration": round(probe["duration"], 3),
+        "width": w,
+        "height": h,
+        "fps": fps,
+        "frames": N,
+        "model": "manual",
+        "mode": "manual",
+    }

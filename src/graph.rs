@@ -108,9 +108,10 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     if let Some(kf) = build_keying_spec(&c.keying, w, h).and_then(|s| s.filter) {
         core.push_str(&format!(",{}", kf));
     }
-    // 智能抠像 matte 输入索引（仅 smart 模式 + matte_asset_id 命中时 Some）
+    // 智能/手动抠像 matte 输入索引（smart / manual 模式 + matte_asset_id 命中时 Some；
+    // 两者都走 matte 视频 alphamerge，与模式无关）
     let matte_idx = c.keying.as_ref().and_then(|k| {
-        if k.enabled && k.mode == "smart" {
+        if k.enabled && (k.mode == "smart" || k.mode == "manual") {
             k.matte_asset_id.as_ref().and_then(|id| matte_map.get(id).copied())
         } else { None }
     });
@@ -236,12 +237,12 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         }
     }
     cmd.inputs = inputs;
-    // 智能抠像(smart)的 matte 素材：作为额外输入加入本次导出（独立 -i），
-    // 记录其全局输入索引供 build_video_chain 引用 [idx:v]。
+    // 智能/手动抠像(smart/manual)的 matte 素材：作为额外输入加入本次导出（独立 -i），
+    // 记录其全局输入索引供 build_video_chain 引用 [idx:v]。两者共用同一条 alphamerge 路径。
     let mut matte_map: HashMap<String, usize> = HashMap::new();
     for (_, c) in &video_clips {
         if let Some(k) = &c.keying {
-            if k.enabled && k.mode == "smart" {
+            if k.enabled && (k.mode == "smart" || k.mode == "manual") {
                 if let Some(id) = &k.matte_asset_id {
                     if !matte_map.contains_key(id) {
                         if let Some(a) = project.asset_by_id(id) {

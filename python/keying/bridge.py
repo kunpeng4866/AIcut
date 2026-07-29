@@ -16,7 +16,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from core import generate_matte
+from core import generate_matte, generate_manual_matte
 
 
 def main(argv) -> int:
@@ -39,8 +39,10 @@ def main(argv) -> int:
     try:
         if opts.get("mode") == "matte":
             result = generate_matte(input_path, opts)
+        elif opts.get("mode") == "manual":
+            result = generate_manual_matte(input_path, opts)
         else:
-            sys.stderr.write("[bridge] 未知/缺失 mode({})，仅支持 'matte'\n".format(opts.get("mode")))
+            sys.stderr.write("[bridge] 未知/缺失 mode({})，仅支持 'matte'/'manual'\n".format(opts.get("mode")))
             return 2
     except Exception as e:  # noqa: BLE001
         sys.stdout = real_stdout

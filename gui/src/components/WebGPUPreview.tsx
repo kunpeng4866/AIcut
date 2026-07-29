@@ -446,7 +446,7 @@ export function useWebGPUPreview({
 
           // 智能抠像（smart）预览合成：在 chroma 分支之后。把灰度 matte 视频的 luma 作为 alpha
           // 叠加到已合成帧上。matteAssetId 存在时取当前时刻 matte 帧并与源视频同步 currentTime。
-          if (clip.keying && clip.keying.enabled && clip.keying.mode === 'smart' && clip.keying.matteAssetId) {
+          if (clip.keying && clip.keying.enabled && (clip.keying.mode === 'smart' || clip.keying.mode === 'manual') && clip.keying.matteAssetId) {
             try {
               // 取当前片段的源 <video> 用于同步 matte 播放头（注意：循环体内的 video 不可见于此 forEach 作用域）
               const srcVideo = videoRefs.current.get(clip.id) || null;

@@ -154,10 +154,13 @@ pub fn is_simple_project(project: &Project) -> bool {
 
 /// 判断工程所有抠像是否都能被 graph.rs 导出路径消费。
 ///
-/// 返回 true 当且仅当：每个 clip 无 keying，或 keying 处于 chroma / smart 模式且 smart 已含 matteAssetId。
+/// 返回 true 当且仅当：每个 clip 无 keying，或 keying 处于 chroma / smart / manual 模式且
+/// smart 与 manual 均已含 matteAssetId。
 /// - chroma：graph.rs 用 chromakey 滤镜（M1 支持）。
-/// - smart + matteAssetId：graph.rs 用 matte 视频 alphamerge（本增量支持）。
-/// - smart 无 matteAssetId / manual / 其它模式：完整路径 ExportPipeline 才支持，返回 false。
+/// - smart + matteAssetId：graph.rs 用 matte 视频 alphamerge（P1 支持）。
+/// - manual + matteAssetId：同样走 graph.rs alphamerge（P2 支持；manual 模式由画笔生成的
+///   matte 视频与 smart 同一条 alphamerge 路径，与模式无关）。
+/// - smart/manual 无 matteAssetId / 其它模式：完整路径 ExportPipeline 才支持，返回 false。
 ///
 /// 返回 true 时 is_simple_project 可保持 true，让 keying 走 graph.rs；
 /// 返回 false 且工程确有激活的 keying 时，is_simple_project 返回 false。
@@ -170,13 +173,13 @@ fn can_keying_via_graph(project: &Project) -> bool {
                 }
                 match k.mode.as_str() {
                     "chroma" => {} // graph.rs 支持
-                    "smart" => {
-                        // smart 必须有 matteAssetId 才能走 graph.rs alphamerge 路径
+                    "smart" | "manual" => {
+                        // smart/manual 必须有 matteAssetId 才能走 graph.rs alphamerge 路径
                         if k.matte_asset_id.is_none() {
                             return false;
                         }
                     }
-                    _ => return false, // manual / 其它：完整路径
+                    _ => return false, // 其它模式：完整路径
                 }
             }
         }
