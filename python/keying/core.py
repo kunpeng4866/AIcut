@@ -160,6 +160,10 @@ class _Predictor:
             iw, ih = img.size
             scale = 512.0 / max(iw, ih)
             nw, nh = max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))
+            # MODNet 编码器含 5 级下采样，要求送入模型的 H/W 均为 32 的整数倍，
+            # 否则上采样回对齐时 Concat 节点维度不匹配（报 Axis N 80 vs 73）。
+            nw = max(32, int(round(nw / 32.0)) * 32)
+            nh = max(32, int(round(nh / 32.0)) * 32)
             img_r = img.resize((nw, nh), Image.BILINEAR)
             arr = np.asarray(img_r, dtype=np.float32) / 255.0
             arr = arr.transpose(2, 0, 1)
