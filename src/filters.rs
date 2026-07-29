@@ -486,6 +486,25 @@ pub fn build_mask_spec(masks: &[Mask], w: u32, h: u32, fps: u32, dur: f64) -> Op
     Some(MaskSpec { geq, image_masks: text_masks })
 }
 
+/// 抠像滤镜构建结果。
+/// - `filter`：chromakey 滤镜后缀（插入 video 链 core 与 tail 之间）；None 表示不抠像。
+pub struct KeyingSpec {
+    pub filter: Option<String>,
+}
+
+/// 将 KeyingConfig 转换为 FFmpeg chromakey 滤镜串（M1 仅支持 chroma 模式）。
+/// - 非 enabled 或非 chroma 模式 → 返回 None（不挂载滤镜）。
+/// - chromakey 接受 0xRRGGBB 颜色；spill 在 M1 仅前端预览生效，后端用 chromakey 近似。
+pub fn build_keying_spec(keying: &Option<KeyingConfig>, _w: u32, _h: u32) -> Option<KeyingSpec> {
+    let k = match keying { Some(k) if k.enabled && k.mode == "chroma" => k, _ => return None };
+    let hex = k.color.trim_start_matches('#');
+    let color_arg = format!("0x{}", hex); // chromakey 接受 0xRRGGBB
+    let sim = fmt(k.similarity);
+    let blend = fmt(k.edge_softness);
+    let f = format!("chromakey=color={}:similarity={}:blend={}", color_arg, sim, blend);
+    Some(KeyingSpec { filter: Some(f) })
+}
+
 /// 为 shape=="text" 的蒙版生成 drawtext 滤镜语句（自包含的多语句滤镜图）。
 /// 产出 RGBA 蒙版流（黑底白字，luma=字形覆盖度），供 graph.rs 用 alphamerge 合到主视频。
 pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64) -> Option<ImageMask> {

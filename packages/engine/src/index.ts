@@ -90,6 +90,16 @@ export interface MaskConfig {
   feather?: number;
 }
 
+/** 抠像（与 gui/src/types.ts KeyingConfig 逐字对应，后端 serde 同名） */
+export interface KeyingConfig {
+  enabled: boolean;
+  mode: 'chroma' | 'smart' | 'manual';
+  color: string;        // '#rrggbb' 小写
+  similarity: number;   // 0..1
+  edgeSoftness: number; // 0..1
+  spill: number;        // 0..1
+}
+
 /** 滤镜实例（来自 Clip.filters） */
 export interface FilterInstanceConfig {
   kind: string;
@@ -112,6 +122,7 @@ export interface ClipConfig {
   speed?: number;
   effects?: EffectConfig[];
   masks?: MaskConfig[];
+  keying?: KeyingConfig;
   filters?: FilterInstanceConfig[];
   keyframes?: Record<string, KeyframeTrackConfig>;
 }

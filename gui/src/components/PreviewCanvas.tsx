@@ -13,6 +13,7 @@ import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition
 import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
+import { applyKeying } from '../utils/keyingRender';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -151,6 +152,69 @@ const theme = {
   frameVideo: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' } as React.CSSProperties,
   aspectSelectWrap: { position: 'absolute', right: 10, bottom: 10, zIndex: 30 } as React.CSSProperties,
   aspectSelect: { background: 'rgba(10,15,30,0.85)', color: '#eee', border: '1px solid #e94560', borderRadius: 6, padding: '5px 8px', fontSize: 12, cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.5)', maxWidth: 220 } as React.CSSProperties,
+};
+
+// 抠像画布（HTML5 回退路径）：chroma key 必须用 canvas 像素合成，CSS mask 无法实现。
+// 内部渲染一个隐藏 <video>（注册到 videoRefs，复用既有播放/暂停驱动逻辑），
+// 再用 rAF 把视频当前帧 drawImage 到可见 canvas 并 applyKeying，透明区露出下层 DOM。
+// 与 WebGPUPreview 的 applyKeying 调用点对称：均在「蒙版合成之后」对最终帧做抠像。
+const KeyedCanvas = ({
+  clip, asset, outStyle, videoRefs, onLoadedMetadata, onTogglePlay,
+}: {
+  clip: ClipConfig;
+  asset: AssetConfig;
+  outStyle: React.CSSProperties;
+  videoRefs: React.MutableRefObject<Map<string, HTMLVideoElement>>;
+  onLoadedMetadata: () => void;
+  onTogglePlay: () => void;
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const keying = clip.keying!;
+
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const canvas = canvasRef.current;
+      const v = videoRefs.current.get(clip.id);
+      if (canvas && v && v.readyState >= 2) {
+        const vw = v.videoWidth || asset?.width || 1280;
+        const vh = v.videoHeight || asset?.height || 720;
+        if (canvas.width !== vw) canvas.width = vw;
+        if (canvas.height !== vh) canvas.height = vh;
+        try {
+          const keyed = applyKeying(v, vw, vh, keying);
+          if (keyed) {
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.drawImage(keyed, 0, 0);
+          }
+        } catch {
+          /* 抠像失败则本帧跳过，保留上一帧 */
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [clip.id, keying, asset?.width, asset?.height, videoRefs]);
+
+  return (
+    <>
+      <video
+        key={`${clip.id}__src`}
+        ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
+        src={asset ? pathToUrl(asset.path) : ''}
+        style={{ display: 'none' }}
+        onLoadedMetadata={onLoadedMetadata}
+        muted
+        playsInline
+      />
+      <canvas
+        ref={canvasRef}
+        style={{ ...outStyle, pointerEvents: 'auto' }}
+        onClick={onTogglePlay}
+      />
+    </>
+  );
 };
 
 export default function PreviewCanvas() {
@@ -1100,6 +1164,27 @@ export default function PreviewCanvas() {
                     onClick={handleTogglePlay}
                   />
                 );
+                // 抠像（HTML5 回退）：chroma 模式用 KeyedCanvas 像素合成，替代原 video 元素。
+                const isKeying = !!(clip.keying && clip.keying.enabled && clip.keying.mode === 'chroma');
+                if (isKeying) {
+                  const keyedEl = (
+                    <KeyedCanvas
+                      key={clip.id}
+                      clip={clip}
+                      asset={asset}
+                      outStyle={outStyle}
+                      videoRefs={videoRefs}
+                      onLoadedMetadata={onLoadedMetadataFor(clip)}
+                      onTogglePlay={handleTogglePlay}
+                    />
+                  );
+                  // 蒙版阴影 wrapper 仍可用：keyed canvas 的 alpha 轮廓会生成阴影
+                  return shadowFilter ? (
+                    <div key={clip.id} style={{ position: 'absolute', inset: 0, filter: shadowFilter, pointerEvents: 'none' }}>
+                      {keyedEl}
+                    </div>
+                  ) : keyedEl;
+                }
                 return shadowFilter ? (
                   <div key={clip.id} style={{ position: 'absolute', inset: 0, filter: shadowFilter, pointerEvents: 'none' }}>
                     {videoEl}

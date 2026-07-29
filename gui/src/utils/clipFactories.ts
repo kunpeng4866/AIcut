@@ -1,6 +1,6 @@
 // 共享片段工厂：把"建轨 + 加片段 + 选中"等重复逻辑集中，供左侧面板各组件复用。
 // 所有函数直接读/写 project store 与 ui store，调用方无需关心轨道查找细节。
-import type { AssetConfig, ClipConfig, MaskConfig } from '../types';
+import type { AssetConfig, ClipConfig, KeyingConfig, MaskConfig } from '../types';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 
@@ -108,5 +108,18 @@ export function createImageStickerClip(asset: AssetConfig, timelineIn = 0): Clip
     transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
     volume: 1, speed: 1,
     effects: [], masks: [] as MaskConfig[], filters: [], keyframes: {},
+    keying: undefined,
+  };
+}
+
+// 生成一段默认抠像配置（M1 仅 chroma 色度抠图可用）
+export function createDefaultKeying(): KeyingConfig {
+  return {
+    enabled: true,
+    mode: 'chroma',
+    color: '#00ff00',
+    similarity: 0.4,
+    edgeSoftness: 0.1,
+    spill: 0.5,
   };
 }

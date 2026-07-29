@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 // ════════════════════ 曲线变速 ════════════════════
 
-use crate::filters::{build_clip_filters, build_filter_spec, build_mask_spec, fmt};
+use crate::filters::{build_clip_filters, build_filter_spec, build_keying_spec, build_mask_spec, fmt};
 
 /// 从"速度曲线"构建分段线性 setpts 表达式。
 ///
@@ -98,6 +98,11 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     if rot.abs() > 0.01 { core.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
     if !clip_filters.is_empty() { core.push_str(&format!(",{}", clip_filters)); }
+    // 抠像：chromakey 作用于原始 YUV 视频流，必须放在蒙版 geq/alphamerge 之前——
+    // mask 路径会把视频转 RGBA，而 chromakey 仅接受 YUV 输入，故 keying 须在 core 阶段提前施加。
+    if let Some(kf) = build_keying_spec(&c.keying, w, h).and_then(|s| s.filter) {
+        core.push_str(&format!(",{}", kf));
+    }
     // opacity + fps 作为尾部统一施加（在蒙版合成之后），保证各路输入帧率一致、透明度正确。
     let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
     let tail = if opacity < 1.0 {

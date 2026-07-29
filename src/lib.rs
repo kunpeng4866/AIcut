@@ -122,6 +122,12 @@ pub fn is_simple_project(project: &Project) -> bool {
             let has_mask = project.tracks.iter().flat_map(|t| &t.clips).any(|c| !c.masks.is_empty());
             if has_mask { return false; }
         }
+        // 抠像支持程度判断：仅 chroma 模式可走 graph.rs 快速路径；smart/manual 走完整路径。
+        if !can_keying_via_graph(project) {
+            let has_keying = project.tracks.iter().flat_map(|t| &t.clips)
+                .any(|c| c.keying.as_ref().map_or(false, |k| k.enabled));
+            if has_keying { return false; }
+        }
         if !clip.keyframes.is_empty() {
             return false;
         }
@@ -145,7 +151,25 @@ pub fn is_simple_project(project: &Project) -> bool {
     true
 }
 
-/// 判断工程所有 mask 是否都能被 graph.rs 导出路径消费。
+/// 判断工程所有抠像是否都能被 graph.rs 导出路径消费。
+///
+/// 返回 true 当且仅当：每个 clip 无 keying，或 keying 处于 chroma 模式（M1 后端支持）。
+/// smart / manual 模式在 M1 后端不支持，返回 false（强制走 ExportPipeline 完整路径）。
+///
+/// 返回 true 时 is_simple_project 可保持 true，让 keying 走 graph.rs；
+/// 返回 false 且工程确有激活的 keying 时，is_simple_project 返回 false。
+fn can_keying_via_graph(project: &Project) -> bool {
+    for track in &project.tracks {
+        for clip in &track.clips {
+            if let Some(k) = &clip.keying {
+                if k.enabled && k.mode != "chroma" {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
 ///
 /// 支持：circle / linear / mirror / polygon / star（任意参数）；rect 仅限轴对齐（rotation==0）。
 /// 多蒙版（同一 clip 上 >1）现已支持为 alpha-max 并集导出（graph.rs 单一 geq + max 合成）。
@@ -309,7 +333,7 @@ mod tests {
             time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None, transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None,
         }
     }
 

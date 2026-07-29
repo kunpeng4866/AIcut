@@ -70,6 +70,26 @@ pub struct Mask {
     pub shadow: MaskShadow,
 }
 
+/// 抠像配置（片段级色度抠像）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeyingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_keying_mode")]
+    pub mode: String,
+    #[serde(default = "default_keying_color")]
+    pub color: String,
+    #[serde(default)]
+    pub similarity: f64,
+    #[serde(rename = "edgeSoftness", default)]
+    pub edge_softness: f64,
+    #[serde(default)]
+    pub spill: f64,
+}
+
+fn default_keying_mode() -> String { "chroma".to_string() }
+fn default_keying_color() -> String { "#00ff00".to_string() }
+
 /// 滤镜实例（来自 Clip.filters）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterInstance {

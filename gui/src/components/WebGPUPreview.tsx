@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ClipConfig, AssetConfig, MaskConfig } from '../types';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
+import { applyKeying } from '../utils/keyingRender';
 
 // 从 transform CSS 字符串（如 "scale(1.12)"）解析缩放因子，供 zoom 转场折进 WebGPU 用户 scale
 function parseScale(s: string | null | undefined): number {
@@ -363,6 +364,17 @@ export function useWebGPUPreview({
               if (composed) uploadSource = composed;
             } catch {
               /* 合成失败则回退原帧 */
+            }
+          }
+
+          // 抠像合成（最小侵入式）：在蒙版合成之后，对已合成帧再做 chroma key 离屏合成。
+          // 不改动现有 WGSL shader 与后续 transform/opacity/滤镜管线。不满足条件时回退原帧。
+          if (clip.keying && clip.keying.enabled && clip.keying.mode === 'chroma') {
+            try {
+              const keyed = applyKeying(uploadSource, vw, vh, clip.keying);
+              if (keyed) uploadSource = keyed;
+            } catch {
+              /* 抠像失败则回退原帧 */
             }
           }
 

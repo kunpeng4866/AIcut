@@ -109,6 +109,16 @@ export interface MaskConfig {
   stroke?: MaskStroke;
   shadow?: MaskShadow;
 }
+// ── 抠像（Keying）数据模型（前后端统一，与后端 Keying 结构对应）──
+export type KeyingMode = 'chroma' | 'smart' | 'manual';
+export interface KeyingConfig {
+  enabled: boolean;
+  mode: KeyingMode;
+  color: string;        // '#rrggbb' 小写
+  similarity: number;   // 0..1 键色相似度阈值
+  edgeSoftness: number; // 0..1 边缘柔化宽度
+  spill: number;        // 0..1 溢出（键色反光）抑制强度
+}
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'
   duration?: number;               // 秒，默认 0.5，夹取 0.1–3.0
