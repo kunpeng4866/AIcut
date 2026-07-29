@@ -19,6 +19,7 @@ pub mod provider;
 pub mod plugin;
 pub mod tts;
 pub mod speech;
+pub mod keying;
 pub mod timeline;
 pub mod clock;
 pub mod pipeline;
@@ -153,8 +154,10 @@ pub fn is_simple_project(project: &Project) -> bool {
 
 /// 判断工程所有抠像是否都能被 graph.rs 导出路径消费。
 ///
-/// 返回 true 当且仅当：每个 clip 无 keying，或 keying 处于 chroma 模式（M1 后端支持）。
-/// smart / manual 模式在 M1 后端不支持，返回 false（强制走 ExportPipeline 完整路径）。
+/// 返回 true 当且仅当：每个 clip 无 keying，或 keying 处于 chroma / smart 模式且 smart 已含 matteAssetId。
+/// - chroma：graph.rs 用 chromakey 滤镜（M1 支持）。
+/// - smart + matteAssetId：graph.rs 用 matte 视频 alphamerge（本增量支持）。
+/// - smart 无 matteAssetId / manual / 其它模式：完整路径 ExportPipeline 才支持，返回 false。
 ///
 /// 返回 true 时 is_simple_project 可保持 true，让 keying 走 graph.rs；
 /// 返回 false 且工程确有激活的 keying 时，is_simple_project 返回 false。
@@ -162,8 +165,18 @@ fn can_keying_via_graph(project: &Project) -> bool {
     for track in &project.tracks {
         for clip in &track.clips {
             if let Some(k) = &clip.keying {
-                if k.enabled && k.mode != "chroma" {
-                    return false;
+                if !k.enabled {
+                    continue;
+                }
+                match k.mode.as_str() {
+                    "chroma" => {} // graph.rs 支持
+                    "smart" => {
+                        // smart 必须有 matteAssetId 才能走 graph.rs alphamerge 路径
+                        if k.matte_asset_id.is_none() {
+                            return false;
+                        }
+                    }
+                    _ => return false, // manual / 其它：完整路径
                 }
             }
         }
@@ -261,6 +274,11 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<serde_json::Value
 /// 媒体分离：音频分离(av) 或 人声分离(vocal)。调用 Python 桥实现。
 pub fn speech_separate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
     speech::speech_separate(input, opts_json)
+}
+
+/// 智能抠像：调用 Python 桥生成灰度 matte 视频，返回 matte 路径/尺寸/帧率等 JSON。
+pub fn keying_generate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
+    keying::keying_generate(input, opts_json)
 }
 
 // ═══════════════════��� N-API 绑定（条件编译） ════════════════════

@@ -39,3 +39,6 @@ tmp_assemble_test/
 __pycache__/
 **/__pycache__/
 *.pyc
+
+# 智能抠像：模型权重不入库（运行时从 ~/.cache/aicut/models/ 或 AICUT_MODNET_MODEL 加载）
+python/keying/models/

@@ -74,6 +74,12 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('speech:separate', input, optsJson),
   },
 
+  // ── 智能抠像 ──
+  keying: {
+    generate: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('keying:generate', input, optsJson),
+  },
+
   // ── 草稿 ──
   saveDraft: (name: string, content: string) => ipcRenderer.invoke('draft:save', name, content),
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),

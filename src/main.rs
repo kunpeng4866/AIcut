@@ -249,8 +249,38 @@ fn main() {
                 other => { eprintln!("未知 speech 模式: {} (可用: analyze, assemble, separate)", other); process::exit(2); }
             }
         }
+        "keying" => {
+            // aicut-engine keying --mode matte --input <path> --opts <json>
+            let mut mode = String::new();
+            let mut input = String::new();
+            let mut opts = String::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--mode"  => { mode  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--input" => { input = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--opts"  => { opts  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    other => { eprintln!("未知参数: {}", other); process::exit(2); }
+                }
+            }
+            // 把 mode 并入 opts JSON 再转发给 Python 桥（bridge.py 从 opts 读 mode），
+            // 保证 CLI 与 Electron（前端已塞入 mode）两条路径行为一致。
+            let mut opts_val: serde_json::Value = serde_json::from_str(&opts)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            if let serde_json::Value::Object(ref mut map) = opts_val {
+                map.insert("mode".to_string(), serde_json::Value::String(mode.clone()));
+            }
+            let opts_merged = serde_json::to_string(&opts_val).unwrap_or_else(|_| opts.clone());
+            match mode.as_str() {
+                "matte" => match aicut_engine::keying_generate(&input, &opts_merged) {
+                    Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
+                    Err(e) => { eprintln!("keying matte 失败: {}", e); process::exit(1); }
+                },
+                other => { eprintln!("未知 keying 模式: {} (可用: matte)", other); process::exit(2); }
+            }
+        }
         other => {
-            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech)", other);
+            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech, keying)", other);
             process::exit(2);
         }
     }

@@ -3,9 +3,17 @@
 // 负责：设备初始化、WGSL 渲染管线、rAF 渲染循环（多视频帧上传→多 pass Over 合成→渲染）、资源清理
 import { useEffect, useRef, useState } from 'react';
 import type { ClipConfig, AssetConfig, MaskConfig } from '../types';
+import { useProjectStore } from '../store/projectStore';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
-import { applyKeying } from '../utils/keyingRender';
+import { applyKeying, applyMatte } from '../utils/keyingRender';
+
+// 文件路径转 aicut-asset:// URL（与 PreviewCanvas 内 pathToUrl 保持一致；此处本地副本避免循环依赖）
+const pathToUrl = (path: string): string => {
+  if (/^(https?|aicut-asset|blob):/.test(path)) return path;
+  const normalized = path.replace(/\\/g, '/');
+  return `aicut-asset:///${normalized}`;
+};
 
 // 从 transform CSS 字符串（如 "scale(1.12)"）解析缩放因子，供 zoom 转场折进 WebGPU 用户 scale
 function parseScale(s: string | null | undefined): number {
@@ -147,6 +155,60 @@ export function useWebGPUPreview({
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 智能抠像（smart）matte 视频缓存：matteAssetId → 隐藏 <video>；离屏 canvas 复用。
+  const matteVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 当前工程（含 assets），供按 matteAssetId 查真实路径。直接写 ref 避免触发重渲染。
+  const projectRef = useRef(useProjectStore.getState().project);
+  projectRef.current = useProjectStore((s) => s.project);
+
+  // 取当前时刻的 matte 帧（灰度）绘制到离屏 canvas 并返回。
+  // matte 视频与源视频同步 currentTime：源暂停则 matte 也暂停并精确 seek；源播放则 matte 跟随播放、
+  // 仅在漂移 > 0.05s 时纠正 seek，避免每帧 seek 卡顿。未就绪（readyState<2）返回 null。
+  const getMatteFrame = (
+    matteAssetId: string,
+    srcTime: number,
+    srcPaused: boolean,
+    srcRate: number,
+    targetW: number,
+    targetH: number,
+  ): HTMLCanvasElement | null => {
+    const asset = projectRef.current?.assets?.find((a) => a.id === matteAssetId);
+    if (!asset) return null;
+    let video = matteVideoCacheRef.current.get(matteAssetId);
+    if (!video) {
+      video = document.createElement('video');
+      video.src = pathToUrl(asset.path);
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      matteVideoCacheRef.current.set(matteAssetId, video);
+      video.play().catch(() => {});
+    }
+    if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return null;
+    // 同步源视频的播放速率（变速片段下 matte 与源需同速，否则随时间漂移）
+    if (isFinite(srcRate) && srcRate > 0) video.playbackRate = srcRate;
+
+    if (srcPaused) {
+      video.pause();
+      if (!video.seeking) video.currentTime = Math.max(0, srcTime);
+    } else {
+      video.play().catch(() => {});
+      if (!video.seeking && Math.abs(video.currentTime - srcTime) > 0.05) {
+        video.currentTime = Math.max(0, srcTime);
+      }
+    }
+
+    let mc = matteCanvasRef.current;
+    if (!mc) { mc = document.createElement('canvas'); matteCanvasRef.current = mc; }
+    if (mc.width !== targetW) mc.width = targetW;
+    if (mc.height !== targetH) mc.height = targetH;
+    const mctx = mc.getContext('2d');
+    if (!mctx) return null;
+    mctx.drawImage(video, 0, 0, targetW, targetH);
+    return mc;
+  };
+
   // 最新播放头时间 / 转场入片段层：渲染循环每帧读取，避免重建渲染循环
   const currentTimeRef = useRef<number>(currentTime ?? 0);
   const transitionIncomingRef = useRef<Array<{ outClipId: string; clip: ClipConfig; opacity: number; offsetX: number; clipPath: string | null; maskRect: MaskRect; direction: string; transform?: string | null; filter?: string | null }>>(transitionIncoming ?? []);
@@ -280,6 +342,10 @@ export function useWebGPUPreview({
       deviceRef.current?.destroy();
       deviceRef.current = null;
       setReady(false);
+      // 释放智能抠像 matte 视频缓存，避免内存泄漏
+      matteVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); (v as any).load?.(); } catch (_) {} });
+      matteVideoCacheRef.current.clear();
+      matteCanvasRef.current = null;
     };
   }, [enabled, canvasWidth, canvasHeight]);
 
@@ -375,6 +441,23 @@ export function useWebGPUPreview({
               if (keyed) uploadSource = keyed;
             } catch {
               /* 抠像失败则回退原帧 */
+            }
+          }
+
+          // 智能抠像（smart）预览合成：在 chroma 分支之后。把灰度 matte 视频的 luma 作为 alpha
+          // 叠加到已合成帧上。matteAssetId 存在时取当前时刻 matte 帧并与源视频同步 currentTime。
+          if (clip.keying && clip.keying.enabled && clip.keying.mode === 'smart' && clip.keying.matteAssetId) {
+            try {
+              const srcTime = video ? video.currentTime : currentTimeRef.current;
+              const srcPaused = video ? video.paused : true;
+              const srcRate = video ? video.playbackRate : 1;
+              const matteCanvas = getMatteFrame(clip.keying.matteAssetId, srcTime, srcPaused, srcRate, vw, vh);
+              if (matteCanvas) {
+                const keyed = applyMatte(uploadSource, matteCanvas, clip.keying.threshold ?? 0.5, clip.keying.edgeSoftness ?? 0.1);
+                if (keyed) uploadSource = keyed;
+              }
+            } catch {
+              /* matte 合成失败则回退原帧 */
             }
           }
 

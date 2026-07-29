@@ -68,3 +68,59 @@ export function applyKeying(
   ctx.putImageData(img, 0, 0);
   return canvas;
 }
+
+// smoothstep 曲线（GLSL 语义）：edge0==edge1 时退化为硬阶跃
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  if (edge1 <= edge0) return x >= edge0 ? 1 : 0;
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+// 智能抠像（smart mode）预览合成：把灰度 matte 视频的 luma 作为 alpha 叠加到源视频。
+// matte 约定：luma = matte 值（0=背景,255=前景）。
+// source: 当前源帧；matteCanvas: 已绘制好当前帧 matte 的 canvas（灰度，尺寸 vw×vh）；
+// threshold:0..1；softness:0..1（边缘柔化带宽）。返回带 alpha 的 canvas；不满足时返回 null。
+export function applyMatte(
+  source: CanvasImageSource,
+  matteCanvas: HTMLCanvasElement,
+  threshold: number,
+  softness: number,
+): HTMLCanvasElement | null {
+  if (!matteCanvas || matteCanvas.width <= 0 || matteCanvas.height <= 0) return null;
+
+  const vw = matteCanvas.width;
+  const vh = matteCanvas.height;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = vw;
+  canvas.height = vh;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(source, 0, 0, vw, vh);
+
+  const img = ctx.getImageData(0, 0, vw, vh);
+  const d = img.data;
+
+  const mctx = matteCanvas.getContext('2d');
+  if (!mctx) return null;
+  const matteImg = mctx.getImageData(0, 0, vw, vh);
+  const m = matteImg.data;
+
+  const lo = threshold - softness * 0.5;
+  const hi = threshold + softness * 0.5;
+
+  for (let i = 0; i < d.length; i += 4) {
+    // matte 为灰度，取 R 通道即 luma（matte/255）
+    const mv = m[i] / 255;
+    let a: number;
+    if (softness <= 0) {
+      a = mv >= threshold ? 255 : 0; // 硬阈值
+    } else {
+      a = smoothstep(lo, hi, mv) * 255;
+    }
+    d[i + 3] = a;
+  }
+
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}

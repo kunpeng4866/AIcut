@@ -69,10 +69,10 @@ fn keyframed(clip: &Clip, path: &str, base: f64) -> f64 {
         .unwrap_or(base)
 }
 
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, idx, w, h, &label, fps);
+    let chain = build_video_chain(c, idx, w, h, &label, fps, matte_map);
     nodes.extend(chain);
     Some(label)
 }
@@ -80,7 +80,11 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
 /// 构建单个 clip 的视频滤镜图，返回**多条**滤镜图语句（以 `;` 连接）。
 /// 普通情况只有一条（核心变换链 + 蒙版 + opacity + fps）；文字蒙版会产出额外的
 /// drawtext 蒙版流语句与 alphamerge 合成语句。最终语句产出 `[label]` 视频流。
-fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32) -> Vec<String> {
+///
+/// `matte_map`：智能抠像(smart)用 matte 素材 → 全局输入索引（由 build_render_command 收集）。
+/// 若 clip 启用 smart 抠像且 matte_asset_id 命中，则把该 matte 输入作为额外 alpha 源，
+/// 经 threshold 曲线映射为 alpha 后与源视频 alphamerge（替代 chromakey 的 YUV→alpha 手段）。
+fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>) -> Vec<String> {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
@@ -98,12 +102,19 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     if rot.abs() > 0.01 { core.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
     if !clip_filters.is_empty() { core.push_str(&format!(",{}", clip_filters)); }
-    // 抠像：chromakey 作用于原始 YUV 视频流，必须放在蒙版 geq/alphamerge 之前——
+    // 抠像：chroma 模式用 chromakey（作用于原始 YUV 视频流），必须放在蒙版 geq/alphamerge 之前——
     // mask 路径会把视频转 RGBA，而 chromakey 仅接受 YUV 输入，故 keying 须在 core 阶段提前施加。
+    // smart 模式不走 core（改在尾部用 matte alphamerge 叠加 alpha），此处不插入任何滤镜。
     if let Some(kf) = build_keying_spec(&c.keying, w, h).and_then(|s| s.filter) {
         core.push_str(&format!(",{}", kf));
     }
-    // opacity + fps 作为尾部统一施加（在蒙版合成之后），保证各路输入帧率一致、透明度正确。
+    // 智能抠像 matte 输入索引（仅 smart 模式 + matte_asset_id 命中时 Some）
+    let matte_idx = c.keying.as_ref().and_then(|k| {
+        if k.enabled && k.mode == "smart" {
+            k.matte_asset_id.as_ref().and_then(|id| matte_map.get(id).copied())
+        } else { None }
+    });
+    // opacity + fps 作为尾部统一施加（在蒙版/matte 合成之后），保证各路输入帧率一致、透明度正确。
     let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
     let tail = if opacity < 1.0 {
         format!(",colorchannelmixer=aa={},fps={}", fmt(opacity), fps)
@@ -112,22 +123,25 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     };
     let mut nodes: Vec<String> = Vec::new();
     // 蒙版：geq 形状（heart/circle/...）走单输入 geq；文字(text) 走独立 drawtext 流 + alphamerge。
+    // 中间标签 mlabel = 蒙版合成后、matte 合成前、尾部之前的视频流。
+    let mlabel = format!("{}m", label);
     let mspec = build_mask_spec(&c.masks, w, h, fps, dur);
+    let mut pre_tail = mlabel.clone();
     match mspec {
         None => {
-            // 无蒙版：核心链直接尾部施加 opacity/fps → label
-            nodes.push(format!("{}{}[{}]", core, tail, label));
+            // 无蒙版：核心链直接产出 mlabel
+            nodes.push(format!("{}[{}]", core, mlabel));
         }
         Some(spec) => {
             if spec.image_masks.is_empty() {
                 // 纯 geq 形状（heart/star/...）或装饰：单语句兼容旧行为
                 match &spec.geq {
-                    Some(g) => nodes.push(format!("{},{}{}[{}]", core, g, tail, label)),
-                    None => nodes.push(format!("{}{}[{}]", core, tail, label)),
+                    Some(g) => nodes.push(format!("{},{}[{}]", core, g, mlabel)),
+                    None => nodes.push(format!("{}[{}]", core, mlabel)),
                 }
             } else {
                 // 多语句：主视频(可选 geq) → 中间标签 vid → 逐张 alphamerge → 尾部 opacity/fps → label
-                let vid = format!("{}v", label);
+                let vid = mlabel.clone();
                 match &spec.geq {
                     Some(g) => nodes.push(format!("{},{}[{}]", core, g, vid)),
                     None => {
@@ -139,17 +153,40 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
                 for (i, im) in spec.image_masks.iter().enumerate() {
                     // 该蒙版流的自包含滤镜图语句（内部定义出 im.label，如 tx0）
                     nodes.push(im.statement.clone());
-                    let out = format!("{}m{}", label, i);
+                    let out = format!("{}k{}", label, i);
                     nodes.push(format!("[{cur}][{lbl}]alphamerge[{out}]",
                         cur = cur, lbl = im.label, out = out));
                     cur = out;
                 }
-                // 注意 tail 以逗号开头（如 ",fps=30"），但此处 cur 是标签（[vs0m0]），
-                // 标签后直接接滤镜、不能留逗号，否则 ffmpeg 解析出空滤镜名 "No such filter: ''"。
-                nodes.push(format!("[{cur}]{}[{label}]", tail.trim_start_matches(','), cur = cur, label = label));
+                pre_tail = cur;
             }
         }
     }
+    // 智能抠像：把 matte（灰度视频）映射为 alpha 并 alphamerge 到源。
+    // matte luma = 抠像值（0=背景,255=前景）；经 threshold/softness 曲线映射为 0..255 再作 alpha。
+    // 顺序：在 mask 合成之后、opacity/fps 之前（与 chroma 的 alpha 合成点一致）。
+    if let Some(mi) = matte_idx {
+        let k = c.keying.as_ref().unwrap();
+        let thr = k.threshold.unwrap_or(0.5);
+        let soft = k.edge_softness;
+        let half = soft / 2.0;
+        // 软化带宽 denom：softness≈0 时退化为硬阈值（denom=1，clip((v-thr)/1) 即 v>=thr?1:0）
+        let denom = if soft < 1e-3 { 1.0 } else { soft };
+        let geq_expr = format!(
+            "clip((lum(X,Y)/255-({t}-{h}))/({d}),0,1)*255",
+            t = fmt(thr), h = fmt(half), d = fmt(denom)
+        );
+        let mt_label = format!("{}mt", label);
+        // matte 输入先缩放到与源一致尺寸（灰度 mp4 与源同分辨率；显式 scale 防尺寸偏差），
+        // 再用 geq 把 luma 经 threshold/softness 映射为 alpha 层（luma=alpha）。
+        nodes.push(format!("[{mi}:v]scale={sw}:{sh},geq=lum='{geq_expr}'[{mt_label}]", sw = sw, sh = sh));
+        let va = format!("{}va", label);
+        // alphamerge 取第二个输入（matte）的 luma 作为 alpha；源(可能 RGBA/YUV)叠加 alpha → 透明视频。
+        nodes.push(format!("[{pre_tail}][{mt_label}]alphamerge[{va}]"));
+        pre_tail = va;
+    }
+    // 尾部：opacity + fps（tail 以逗号开头，pre_tail 是标签，标签后直接接滤镜不能留逗号）。
+    nodes.push(format!("[{pre_tail}]{}[{label}]", tail.trim_start_matches(',')));
     nodes
 }
 
@@ -199,6 +236,23 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         }
     }
     cmd.inputs = inputs;
+    // 智能抠像(smart)的 matte 素材：作为额外输入加入本次导出（独立 -i），
+    // 记录其全局输入索引供 build_video_chain 引用 [idx:v]。
+    let mut matte_map: HashMap<String, usize> = HashMap::new();
+    for (_, c) in &video_clips {
+        if let Some(k) = &c.keying {
+            if k.enabled && k.mode == "smart" {
+                if let Some(id) = &k.matte_asset_id {
+                    if !matte_map.contains_key(id) {
+                        if let Some(a) = project.asset_by_id(id) {
+                            matte_map.insert(id.clone(), cmd.inputs.len());
+                            cmd.inputs.push(a.path.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut nodes: Vec<String> = Vec::new();
     // 视频滤镜图: 按轨道分组
     let video_tracks: Vec<(usize, Vec<&Clip>)> = {
@@ -219,14 +273,14 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c = clips[0];
                 let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => { vci += 1; continue; } };
                 let src = format!("vs{}", vci);
-                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps);
+                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps, &matte_map);
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
-                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                 vci += 1;
                 // 累积时间线原点 = 本轨首个片段的主时间线起点。xfade 的 offset 是相对
                 // 累积视频流时间轴的，而转场窗锚点在出片段（prev）的主时间线
@@ -241,7 +295,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
                     let trans_params = clip_transition_params(prev).or_else(|| clip_transition_params(curr));
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
-                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
                     if has_transition {
                         let (xstyle, xdur_raw) = trans_opt.unwrap();

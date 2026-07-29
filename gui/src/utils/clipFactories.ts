@@ -121,5 +121,7 @@ export function createDefaultKeying(): KeyingConfig {
     similarity: 0.4,
     edgeSoftness: 0.1,
     spill: 0.5,
+    model: 'modnet',
+    threshold: 0.5,
   };
 }

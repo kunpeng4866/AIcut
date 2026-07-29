@@ -98,6 +98,10 @@ export interface KeyingConfig {
   similarity: number;   // 0..1
   edgeSoftness: number; // 0..1
   spill: number;        // 0..1
+  // ── P1 智能抠像（与后端统一契约）──
+  model?: 'modnet' | 'rmbg2';
+  threshold?: number;
+  matteAssetId?: string;
 }
 
 /** 滤镜实例（来自 Clip.filters） */

@@ -70,7 +70,7 @@ pub struct Mask {
     pub shadow: MaskShadow,
 }
 
-/// 抠像配置（片段级色度抠像）
+/// 抠像配置（片段级色度抠像 / 智能抠像）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeyingConfig {
     #[serde(default)]
@@ -85,6 +85,13 @@ pub struct KeyingConfig {
     pub edge_softness: f64,
     #[serde(default)]
     pub spill: f64,
+    // ── P1 智能抠像（与前端/导出统一契约）──
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub threshold: Option<f64>,
+    #[serde(rename = "matteAssetId", default)]
+    pub matte_asset_id: Option<String>,
 }
 
 fn default_keying_mode() -> String { "chroma".to_string() }

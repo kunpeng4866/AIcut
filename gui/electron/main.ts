@@ -22,6 +22,7 @@ try {
   process.env.AICUT_PYTHON_BIN = process.env.AICUT_PYTHON_BIN
     || 'C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe';
   process.env.AICUT_SPEECH_BRIDGE = join(__dirname, '../../python/speech_edit/bridge.py');
+  process.env.AICUT_KEYING_BRIDGE = join(__dirname, '../../python/keying/bridge.py');
 } catch { /* dev 兜底 */ }
 
 // ── 路径常量 ──
@@ -321,6 +322,17 @@ ipcMain.handle('speech:assemble', async (_e, input: string, optsJson: string) =>
 ipcMain.handle('speech:separate', async (_e, input: string, optsJson: string) => {
   try {
     const stdout = await callEngine('speech', '--mode', 'separate', '--input', input ?? '', '--opts', optsJson ?? '');
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
+// ── 智能抠像 ──
+ipcMain.handle('keying:generate', async (_e, input: string, optsJson: string) => {
+  try {
+    const stdout = await callEngine('keying', '--mode', 'matte', '--input', input ?? '', '--opts', optsJson ?? '');
     const data = JSON.parse(stdout);
     return { success: true, data };
   } catch (e: any) {

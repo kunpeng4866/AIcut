@@ -54,6 +54,8 @@ export interface ClipConfig {
   // 音频淡入/淡出（秒）：片段开头从静音渐起到满音量、结尾从满音量渐弱到静音；0 = 无
   audioFadeIn?: number;
   audioFadeOut?: number;
+  // 抠像：色度/智能/手动（非破坏式）
+  keying?: KeyingConfig;
 }
 // 转场配置（与后端 Transition 结构对应）
 export type TransitionType =
@@ -118,6 +120,10 @@ export interface KeyingConfig {
   similarity: number;   // 0..1 键色相似度阈值
   edgeSoftness: number; // 0..1 边缘柔化宽度
   spill: number;        // 0..1 溢出（键色反光）抑制强度
+  // ── P1 智能抠像（与后端统一契约）──
+  model?: 'modnet' | 'rmbg2';  // 智能抠像模型（默认 modnet）
+  threshold?: number;          // 0..1 前景/背景阈值（matte 二值化参考）
+  matteAssetId?: string;       // 已生成的 matte 资产 id（导出时回引）
 }
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'
