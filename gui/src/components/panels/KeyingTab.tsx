@@ -149,11 +149,14 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     try {
       // 结构变更：先压一次历史快照（生成会 addAsset + updateClip，二者内部亦各压快照）
       pushHistorySnapshot();
-      const resText: string = await (window as any).aicut.keying.generate(
+      // 与 speech:* 一致的 IPC 契约：handler 返回 { success, data, error } 对象，
+      // 不可对返回值再做 JSON.parse（否则会得到 "[object Object]" is not valid JSON）。
+      const res: any = await (window as any).aicut.keying.generate(
         assetPath,
         JSON.stringify({ mode: 'matte', model, threshold, fps: asset.fps ?? 30, output })
       );
-      const result = JSON.parse(resText) as any;
+      if (!res?.success) throw new Error(res?.error || '智能抠像失败');
+      const result = (res.data ?? {}) as any;
       if (result.error) throw new Error(result.error);
       const assetId = uid('asset');
       store.addAsset({
