@@ -66,6 +66,14 @@ const MODES: { value: KeyingMode; label: string }[] = [
 ];
 const MODE_LABEL: Record<KeyingMode, string> = { chroma: '色度', smart: '智能', manual: '手动' };
 
+// 背景合成类型（P3）
+const BG_TYPES: { value: string; label: string }[] = [
+  { value: 'none', label: '无' },
+  { value: 'color', label: '纯色' },
+  { value: 'image', label: '图片' },
+  { value: 'video', label: '视频' },
+];
+
 // 浏览器原生吸管（Chrome/Edge 支持），失败则静默忽略
 function pickColorWithEyedropper(): Promise<string | null> {
   const w = window as any;
@@ -215,6 +223,42 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
   const onEyedropper = async () => {
     const c = await pickColorWithEyedropper();
     if (c) setColor(c);
+  };
+
+  // ── 背景合成（P3）：抠出主体后，在透明区背后铺背景 ──
+  const bg = (keying as any).background as any;
+  const bgType = bg?.type || 'none';
+  const bgColor = bg?.color || '#000000';
+  const bgAssetId = bg?.assetId;
+  const bgAsset = bgAssetId ? project.assets.find((a: any) => a.id === bgAssetId) : undefined;
+  const setBgType = (type: string) => {
+    const cur = (keying as any).background || {};
+    pushHistorySnapshot();
+    commit({ ...keying, background: { ...cur, type } } as any);
+  };
+  const setBgColor = (color: string) => {
+    const cur = (keying as any).background || {};
+    pushHistorySnapshot();
+    commit({ ...keying, background: { ...cur, type: cur.type || 'color', color } } as any);
+  };
+  const pickBackground = async () => {
+    if (processing) return;
+    const type = bgType === 'image' ? 'image' : 'video';
+    const paths: string[] = await (window as any).aicut.openFiles();
+    if (!paths || paths.length === 0) return;
+    const path = paths[0];
+    let info: any = {};
+    try { info = ((await (window as any).aicut.probe(path))?.info) || {}; } catch { /* 探测失败用默认值 */ }
+    const store = useProjectStore.getState();
+    const assetId = uid('asset');
+    store.addAsset({
+      id: assetId, type, path,
+      duration: info?.duration || 5, width: info?.width || 1920, height: info?.height || 1080,
+      codec: info?.codec || 'h264', fps: info?.fps || 30,
+    });
+    const cur = (keying as any).background || {};
+    pushHistorySnapshot();
+    commit({ ...keying, background: { ...cur, type, assetId, color: cur.color || '#000000' } } as any);
   };
 
   // 共享：matte 阈值 / 边缘柔化滑块（smart 与 manual 复用；预览/导出均依此曲线）
@@ -439,6 +483,46 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
           )}
         </div>
       )}
+
+      <div style={S.divider} />
+
+      {/* 背景合成（P3） */}
+      <div>
+        <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>
+          背景合成：抠出主体后，在透明区背后铺背景（纯色 / 图片 / 视频）。
+        </div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' }}>
+          {BG_TYPES.map((b) => (
+            <ToggleBtn key={b.value} active={bgType === b.value} onClick={() => setBgType(b.value)}>{b.label}</ToggleBtn>
+          ))}
+        </div>
+
+        {bgType === 'color' && (
+          <div style={S.row}>
+            <span style={S.label}>颜色</span>
+            <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)}
+              style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+            <input type="text" value={bgColor} onChange={(e) => setBgColor(e.target.value)} style={S.input} />
+          </div>
+        )}
+
+        {(bgType === 'image' || bgType === 'video') && (
+          <div>
+            <button style={{ ...S.btn, width: '100%' }} onClick={pickBackground} disabled={processing}>
+              {bgAssetId ? '重新选择背景素材' : `选择背景${bgType === 'image' ? '图片' : '视频'}`}
+            </button>
+            {bgAsset && (
+              <div style={{ fontSize: 11, color: '#7CFC9A', marginTop: 6, wordBreak: 'break-all' }}>
+                已选：{bgAsset.path}
+              </div>
+            )}
+          </div>
+        )}
+
+        {bgType === 'none' && (
+          <div style={{ fontSize: 11, color: '#888' }}>未启用背景（透明区显示下层或棋盘格）</div>
+        )}
+      </div>
     </div>
   );
 }

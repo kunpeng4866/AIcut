@@ -70,6 +70,19 @@ pub struct Mask {
     pub shadow: MaskShadow,
 }
 
+/// 背景合成配置：抠出主体后，在透明区背后铺一层背景。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeyingBackground {
+    #[serde(rename = "type", default = "default_bg_type")]
+    pub bg_type: String, // 'none' | 'color' | 'image' | 'video'
+    #[serde(default = "default_keying_color")]
+    pub color: String,   // type==='color' 时生效，'#rrggbb'
+    #[serde(rename = "assetId", default)]
+    pub asset_id: Option<String>, // type==='image'|'video' 时生效
+}
+
+fn default_bg_type() -> String { "none".to_string() }
+
 /// 抠像配置（片段级色度抠像 / 智能抠像）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeyingConfig {
@@ -92,6 +105,9 @@ pub struct KeyingConfig {
     pub threshold: Option<f64>,
     #[serde(rename = "matteAssetId", default)]
     pub matte_asset_id: Option<String>,
+    // ── 背景合成（P3）──
+    #[serde(default)]
+    pub background: Option<KeyingBackground>,
 }
 
 fn default_keying_mode() -> String { "chroma".to_string() }

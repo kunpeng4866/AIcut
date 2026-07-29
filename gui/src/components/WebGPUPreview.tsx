@@ -6,7 +6,7 @@ import type { ClipConfig, AssetConfig, MaskConfig } from '../types';
 import { useProjectStore } from '../store/projectStore';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
-import { applyKeying, applyMatte } from '../utils/keyingRender';
+import { applyKeying, applyMatte, compositeBackground } from '../utils/keyingRender';
 
 // 文件路径转 aicut-asset:// URL（与 PreviewCanvas 内 pathToUrl 保持一致；此处本地副本避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -207,6 +207,60 @@ export function useWebGPUPreview({
     if (!mctx) return null;
     mctx.drawImage(video, 0, 0, targetW, targetH);
     return mc;
+  };
+
+  // 背景合成（P3）：取当前时刻的背景帧，供 compositeBackground 垫在 keyed 之下。
+  // 返回：颜色串 '#rrggbb' | 已就绪的图片/视频元素 | null（无背景或未就绪）。
+  const bgImageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const bgVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const getBackgroundFrame = (
+    keying: any,
+    srcTime: number,
+    srcPaused: boolean,
+    srcRate: number,
+    vw: number,
+    vh: number,
+  ): string | CanvasImageSource | null => {
+    const bg = keying?.background;
+    if (!bg || bg.type === 'none' || !bg.type) return null;
+    if (bg.type === 'color') return bg.color || '#000000';
+    if (!bg.assetId) return null;
+    const asset = projectRef.current?.assets?.find((a: any) => a.id === bg.assetId);
+    if (!asset) return null;
+    if (bg.type === 'image') {
+      let img = bgImageCacheRef.current.get(bg.assetId);
+      if (!img) {
+        img = new Image();
+        img.src = pathToUrl(asset.path);
+        bgImageCacheRef.current.set(bg.assetId, img);
+      }
+      if (!img.complete || img.naturalWidth === 0) return null;
+      return img;
+    }
+    // video：隐藏 <video> 与源视频同步播放头（循环播放，按源时间取模）
+    let video = bgVideoCacheRef.current.get(bg.assetId);
+    if (!video) {
+      video = document.createElement('video');
+      video.src = pathToUrl(asset.path);
+      video.muted = true;
+      video.playsInline = true;
+      video.loop = true;
+      video.preload = 'auto';
+      bgVideoCacheRef.current.set(bg.assetId, video);
+      video.play().catch(() => {});
+    }
+    if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return null;
+    const dur = video.duration && isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    if (isFinite(srcRate) && srcRate > 0) video.playbackRate = srcRate;
+    const t = dur > 0 ? srcTime % dur : srcTime;
+    if (srcPaused) {
+      video.pause();
+      if (!video.seeking) video.currentTime = Math.max(0, t);
+    } else {
+      video.play().catch(() => {});
+      if (!video.seeking && Math.abs(video.currentTime - t) > 0.05) video.currentTime = Math.max(0, t);
+    }
+    return video;
   };
 
   // 最新播放头时间 / 转场入片段层：渲染循环每帧读取，避免重建渲染循环
@@ -460,6 +514,24 @@ export function useWebGPUPreview({
               }
             } catch {
               /* matte 合成失败则回退原帧 */
+            }
+          }
+
+          // 背景合成（P3）：在抠像之后，把 keyed 帧垫到背景之上。
+          // 仅当 uploadSource 已是带 alpha 的 canvas（抠像生效）才合成；源不透明时 bg 无意义。
+          if (clip.keying && clip.keying.enabled && clip.keying.background && uploadSource instanceof HTMLCanvasElement) {
+            try {
+              const srcV = videoRefs.current.get(clip.id) || null;
+              const sTime = srcV ? srcV.currentTime : currentTimeRef.current;
+              const sPaused = srcV ? srcV.paused : true;
+              const sRate = srcV ? srcV.playbackRate : 1;
+              const bgFrame = getBackgroundFrame(clip.keying, sTime, sPaused, sRate, vw, vh);
+              if (bgFrame) {
+                const composited = compositeBackground(uploadSource, bgFrame, vw, vh);
+                if (composited) uploadSource = composited;
+              }
+            } catch {
+              /* 背景合成失败则回退 keyed 帧 */
             }
           }
 

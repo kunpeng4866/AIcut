@@ -69,10 +69,10 @@ fn keyframed(clip: &Clip, path: &str, base: f64) -> f64 {
         .unwrap_or(base)
 }
 
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, idx, w, h, &label, fps, matte_map);
+    let chain = build_video_chain(c, idx, w, h, &label, fps, matte_map, bg_map);
     nodes.extend(chain);
     Some(label)
 }
@@ -84,7 +84,7 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
 /// `matte_map`：智能抠像(smart)用 matte 素材 → 全局输入索引（由 build_render_command 收集）。
 /// 若 clip 启用 smart 抠像且 matte_asset_id 命中，则把该 matte 输入作为额外 alpha 源，
 /// 经 threshold 曲线映射为 alpha 后与源视频 alphamerge（替代 chromakey 的 YUV→alpha 手段）。
-fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>) -> Vec<String> {
+fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>) -> Vec<String> {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
@@ -186,6 +186,37 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
         nodes.push(format!("[{pre_tail}][{mt_label}]alphamerge[{va}]"));
         pre_tail = va;
     }
+    // 背景合成（P3）：把 keyed（带 alpha）垫到背景之上，再接尾部 opacity/fps。
+    // 背景可为纯色（内部 color 滤镜源）或图片/视频（额外 -i，已收集到 bg_map）。
+    // 顺序：在 mask/matte 合成之后、opacity/fps 之前（与 alpha 合成点一致）。
+    if let Some(k) = c.keying.as_ref() {
+        if k.enabled {
+            if let Some(bg) = k.background.as_ref() {
+                if bg.bg_type != "none" {
+                    let bg_label = format!("{}bg", label);
+                    match bg.bg_type.as_str() {
+                        "color" => {
+                            let hex = bg.color.trim_start_matches('#');
+                            nodes.push(format!("color=c=0x{}:s={}x{}:r={}[{}]", hex, w, h, fps, bg_label));
+                            let bgout = format!("{}bgout", label);
+                            // 背景 color 源是无限长，必须 shortest=1 否则 overlay 会一直等待导致 ffmpeg 卡死
+                            nodes.push(format!("[{bg_label}][{pre_tail}]overlay=shortest=1[{bgout}]"));
+                            pre_tail = bgout;
+                        }
+                        "image" | "video" => {
+                            if let Some(bi) = bg.asset_id.as_ref().and_then(|id| bg_map.get(id).copied()) {
+                                nodes.push(format!("[{bi}:v]scale={w}:{h}[{bg_label}]"));
+                                let bgout = format!("{}bgout", label);
+                                nodes.push(format!("[{bg_label}][{pre_tail}]overlay=shortest=1[{bgout}]"));
+                                pre_tail = bgout;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     // 尾部：opacity + fps（tail 以逗号开头，pre_tail 是标签，标签后直接接滤镜不能留逗号）。
     nodes.push(format!("[{pre_tail}]{}[{label}]", tail.trim_start_matches(',')));
     nodes
@@ -254,6 +285,26 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             }
         }
     }
+    // 背景合成（P3）：背景图片/视频作为额外输入加入导出（独立 -i），记录全局输入索引供 build_video_chain 引用。
+    let mut bg_map: HashMap<String, usize> = HashMap::new();
+    for (_, c) in &video_clips {
+        if let Some(k) = &c.keying {
+            if k.enabled {
+                if let Some(bg) = &k.background {
+                    if bg.bg_type == "image" || bg.bg_type == "video" {
+                        if let Some(id) = &bg.asset_id {
+                            if !bg_map.contains_key(id) {
+                                if let Some(a) = project.asset_by_id(id) {
+                                    bg_map.insert(id.clone(), cmd.inputs.len());
+                                    cmd.inputs.push(a.path.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut nodes: Vec<String> = Vec::new();
     // 视频滤镜图: 按轨道分组
     let video_tracks: Vec<(usize, Vec<&Clip>)> = {
@@ -274,14 +325,14 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c = clips[0];
                 let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => { vci += 1; continue; } };
                 let src = format!("vs{}", vci);
-                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps, &matte_map);
+                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps, &matte_map, &bg_map);
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
-                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                 vci += 1;
                 // 累积时间线原点 = 本轨首个片段的主时间线起点。xfade 的 offset 是相对
                 // 累积视频流时间轴的，而转场窗锚点在出片段（prev）的主时间线
@@ -296,7 +347,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
                     let trans_params = clip_transition_params(prev).or_else(|| clip_transition_params(curr));
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
-                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
                     if has_transition {
                         let (xstyle, xdur_raw) = trans_opt.unwrap();

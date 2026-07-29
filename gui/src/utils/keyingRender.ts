@@ -124,3 +124,35 @@ export function applyMatte(
   ctx.putImageData(img, 0, 0);
   return canvas;
 }
+
+// 背景合成（P3）：把带 alpha 的 keyed 帧（已抠像）合成到背景之上。
+// bg 支持三类：
+//   - 颜色串 '#rrggbb'：铺纯色底
+//   - 已就绪的图片/视频/画布元素（CanvasImageSource）：铺满绘制
+//   - null / 空：不铺背景，直接返回 keyed（透明区露出下层）
+// 返回新 canvas（底色 + keyed 叠加）；bg 未就绪时退化为仅 keyed（调用方回退透明）。
+export function compositeBackground(
+  keyed: HTMLCanvasElement,
+  bg: string | CanvasImageSource | null | undefined,
+  vw: number,
+  vh: number,
+): HTMLCanvasElement {
+  if (!bg) return keyed;
+  const canvas = document.createElement('canvas');
+  canvas.width = vw;
+  canvas.height = vh;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return keyed;
+  if (typeof bg === 'string') {
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, vw, vh);
+  } else {
+    try {
+      ctx.drawImage(bg as CanvasImageSource, 0, 0, vw, vh);
+    } catch {
+      /* 背景元素尚未就绪：退回透明底（仅画 keyed） */
+    }
+  }
+  ctx.drawImage(keyed, 0, 0);
+  return canvas;
+}

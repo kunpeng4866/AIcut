@@ -113,6 +113,13 @@ export interface MaskConfig {
 }
 // ── 抠像（Keying）数据模型（前后端统一，与后端 Keying 结构对应）──
 export type KeyingMode = 'chroma' | 'smart' | 'manual';
+// 背景合成：抠出主体后，在透明区背后铺一层背景（纯色 / 图片 / 视频）。
+export type BackgroundType = 'none' | 'color' | 'image' | 'video';
+export interface KeyingBackground {
+  type: BackgroundType;  // 背景类型（默认 'none' 即不铺背景）
+  color?: string;       // type==='color' 时生效，'#rrggbb' 小写
+  assetId?: string;     // type==='image'|'video' 时生效，引用 project.assets 里的背景素材
+}
 export interface KeyingConfig {
   enabled: boolean;
   mode: KeyingMode;
@@ -124,6 +131,8 @@ export interface KeyingConfig {
   model?: 'modnet' | 'rmbg2';  // 智能抠像模型（默认 modnet）
   threshold?: number;          // 0..1 前景/背景阈值（matte 二值化参考）
   matteAssetId?: string;       // 已生成的 matte 资产 id（导出时回引）
+  // ── 背景合成（P3）──
+  background?: KeyingBackground;
 }
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'

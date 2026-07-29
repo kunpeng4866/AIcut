@@ -13,7 +13,7 @@ import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition
 import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
-import { applyKeying, applyMatte } from '../utils/keyingRender';
+import { applyKeying, applyMatte, compositeBackground } from '../utils/keyingRender';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -159,7 +159,7 @@ const theme = {
 // 再用 rAF 把视频当前帧 drawImage 到可见 canvas 并 applyKeying，透明区露出下层 DOM。
 // 与 WebGPUPreview 的 applyKeying 调用点对称：均在「蒙版合成之后」对最终帧做抠像。
 const KeyedCanvas = ({
-  clip, asset, outStyle, videoRefs, onLoadedMetadata, onTogglePlay, matteAsset,
+  clip, asset, outStyle, videoRefs, onLoadedMetadata, onTogglePlay, matteAsset, assets,
 }: {
   clip: ClipConfig;
   asset: AssetConfig;
@@ -168,14 +168,57 @@ const KeyedCanvas = ({
   onLoadedMetadata: () => void;
   onTogglePlay: () => void;
   matteAsset?: AssetConfig;
+  assets: AssetConfig[];
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const keying = clip.keying!;
   // 智能抠像（smart）：隐藏 matte 视频 + 离屏 canvas
   const matteVideoRef = useRef<HTMLVideoElement | null>(null);
   const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 背景合成（P3）：隐藏背景图片/视频元素，垫在 keyed 之下
+  const bgVideoRef = useRef<HTMLVideoElement | null>(null);
+  const bgImageRef = useRef<HTMLImageElement | null>(null);
   // 智能/手动抠像：两者都走 matte 视频合成（matteAssetId 指向 AI 或画笔生成的灰度 matte）
   const isMatte = !!(keying.matteAssetId && matteAsset && (keying.mode === 'smart' || keying.mode === 'manual'));
+
+  // 背景合成（P3）：取背景帧（颜色串 / 图片 / 视频元素）。视频与源同步播放头、循环取模。
+  const applyBackground = (keyed: HTMLCanvasElement, vw: number, vh: number): HTMLCanvasElement => {
+    const bg = keying.background;
+    if (!bg || bg.type === 'none' || !bg.type) return keyed;
+    let bgFrame: string | CanvasImageSource | null = null;
+    if (bg.type === 'color') {
+      bgFrame = bg.color || '#000000';
+    } else if (bg.assetId) {
+      const bgAsset = (assets || []).find((a: any) => a.id === bg.assetId);
+      if (bgAsset) {
+        if (bg.type === 'image') {
+          if (!bgImageRef.current) { bgImageRef.current = new Image(); bgImageRef.current.src = pathToUrl(bgAsset.path); }
+          const img = bgImageRef.current;
+          if (img.complete && img.naturalWidth > 0) bgFrame = img;
+        } else {
+          let video = bgVideoRef.current;
+          if (!video) {
+            video = document.createElement('video');
+            video.src = pathToUrl(bgAsset.path);
+            video.muted = true; video.playsInline = true; video.loop = true; video.preload = 'auto';
+            bgVideoRef.current = video;
+            video.play().catch(() => {});
+          }
+          if (video.readyState >= 2 && video.videoWidth > 0) {
+            const v = videoRefs.current.get(clip.id);
+            const dur = video.duration && isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+            const t = dur > 0 && v ? v.currentTime % dur : 0;
+            if (v && isFinite(v.playbackRate) && v.playbackRate > 0) video.playbackRate = v.playbackRate;
+            if (v && v.paused) { video.pause(); if (!video.seeking) video.currentTime = Math.max(0, t); }
+            else { video.play().catch(() => {}); if (!video.seeking && Math.abs(video.currentTime - t) > 0.05) video.currentTime = Math.max(0, t); }
+            bgFrame = video;
+          }
+        }
+      }
+    }
+    if (!bgFrame) return keyed;
+    return compositeBackground(keyed, bgFrame, vw, vh);
+  };
 
   useEffect(() => {
     let raf = 0;
@@ -219,8 +262,9 @@ const KeyedCanvas = ({
                 mctx.drawImage(mv, 0, 0, vw, vh);
                 const keyed = applyMatte(v, mc, keying.threshold ?? 0.5, keying.edgeSoftness ?? 0.1);
                 if (keyed) {
+                  const drawn = applyBackground(keyed, vw, vh);
                   const ctx = canvas.getContext('2d');
-                  if (ctx) ctx.drawImage(keyed, 0, 0);
+                  if (ctx) ctx.drawImage(drawn, 0, 0);
                 }
               }
             }
@@ -228,8 +272,9 @@ const KeyedCanvas = ({
             // chroma 模式（原逻辑不变）
             const keyed = applyKeying(v, vw, vh, keying);
             if (keyed) {
+              const drawn = applyBackground(keyed, vw, vh);
               const ctx = canvas.getContext('2d');
-              if (ctx) ctx.drawImage(keyed, 0, 0);
+              if (ctx) ctx.drawImage(drawn, 0, 0);
             }
           }
         } catch {
@@ -244,6 +289,9 @@ const KeyedCanvas = ({
       const mv = matteVideoRef.current;
       if (mv) { try { mv.pause(); mv.removeAttribute('src'); mv.load(); } catch (_) {} matteVideoRef.current = null; }
       matteCanvasRef.current = null;
+      const bv = bgVideoRef.current;
+      if (bv) { try { bv.pause(); bv.removeAttribute('src'); bv.load(); } catch (_) {} bgVideoRef.current = null; }
+      bgImageRef.current = null;
     };
   }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isMatte, matteAsset]);
 
@@ -1232,6 +1280,7 @@ export default function PreviewCanvas() {
                       onLoadedMetadata={onLoadedMetadataFor(clip)}
                       onTogglePlay={handleTogglePlay}
                       matteAsset={matteAsset}
+                      assets={project.assets}
                     />
                   );
                   // 蒙版阴影 wrapper 仍可用：keyed canvas 的 alpha 轮廓会生成阴影
