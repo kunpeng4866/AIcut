@@ -70,6 +70,51 @@ fn keyframed(clip: &Clip, path: &str, base: f64) -> f64 {
         .unwrap_or(base)
 }
 
+/// 采样单个抠像关键帧属性在全局时间 t 的值；无轨道回退 base。
+fn sample_keying(clip: &Clip, prop: &str, base: f64, t: f64) -> f64 {
+    clip.keyframes.get(prop).map(|tr| tr.sample(t)).unwrap_or(base)
+}
+
+/// 是否 chroma 抠像且 similarity/edgeSoftness/spill 中存在关键帧。
+fn is_chroma_keyframed(c: &Clip) -> bool {
+    let Some(k) = &c.keying else { return false; };
+    if !k.enabled || k.mode != "chroma" { return false; }
+    ["keying.similarity", "keying.edgeSoftness", "keying.spill"]
+        .iter()
+        .any(|p| c.keyframes.contains_key(*p))
+}
+
+/// 把打了关键帧的 chroma 抠像参数按时间线切分为若干段；返回 (本地开始, 本地结束, 该段有效 KeyingConfig)。
+fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
+    let mut times: Vec<f64> = Vec::new();
+    for key in ["keying.similarity", "keying.edgeSoftness", "keying.spill"] {
+        if let Some(track) = c.keyframes.get(key) {
+            for kf in &track.keyframes {
+                if kf.time > c.timeline_in && kf.time < c.timeline_out {
+                    times.push(kf.time);
+                }
+            }
+        }
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    let mut boundaries = vec![c.timeline_in];
+    boundaries.extend(times);
+    boundaries.push(c.timeline_out);
+    let mut out = Vec::new();
+    for w in boundaries.windows(2) {
+        let (g0, g1) = (w[0], w[1]);
+        if g1 - g0 < 1e-6 { continue; }
+        let mid = (g0 + g1) * 0.5;
+        let mut k = c.keying.clone().unwrap();
+        k.similarity = sample_keying(c, "keying.similarity", k.similarity, mid);
+        k.edge_softness = sample_keying(c, "keying.edgeSoftness", k.edge_softness, mid);
+        k.spill = sample_keying(c, "keying.spill", k.spill, mid);
+        out.push((g0 - c.timeline_in, g1 - c.timeline_in, k));
+    }
+    out
+}
+
 fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
@@ -90,25 +135,61 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
     let sh = (h as f64 * sy).round() as u32;
-    let mut core = format!("[{}:v]scale={}:{}", idx, sw, sh);
-    // 曲线变速优先（time_remap.curve 权威，否则回退 speed_curve），否则线性变速
+    let mut nodes: Vec<String> = Vec::new();
+
+    // 1) 预抠像链：scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
+    let pre_label = format!("{}p", label);
+    let mut pre = format!("[{}:v]scale={}:{}", idx, sw, sh);
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
     if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur) {
-        core.push_str(&format!(",setpts={}", expr));
+        pre.push_str(&format!(",setpts={}", expr));
     } else if (c.speed - 1.0).abs() > 0.001 {
-        core.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
+        pre.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
     }
     let rot = keyframed(c, "transform.rotation", c.transform.rotation);
-    if rot.abs() > 0.01 { core.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
+    if rot.abs() > 0.01 { pre.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
-    if !clip_filters.is_empty() { core.push_str(&format!(",{}", clip_filters)); }
-    // 抠像：chroma 模式用 chromakey（作用于原始 YUV 视频流），必须放在蒙版 geq/alphamerge 之前——
-    // mask 路径会把视频转 RGBA，而 chromakey 仅接受 YUV 输入，故 keying 须在 core 阶段提前施加。
-    // smart 模式不走 core（改在尾部用 matte alphamerge 叠加 alpha），此处不插入任何滤镜。
-    if let Some(kf) = build_keying_spec(&c.keying, w, h).and_then(|s| s.filter) {
-        core.push_str(&format!(",{}", kf));
+    if !clip_filters.is_empty() { pre.push_str(&format!(",{}", clip_filters)); }
+    pre.push_str(&format!("[{}]", pre_label));
+    nodes.push(pre);
+
+    // 2) 抠像：chroma 模式用 chromakey（作用于 YUV），必须在蒙版/alphamerge 之前施加；
+    // 若 similarity/edgeSoftness/spill 有关键帧，则按关键帧边界切分段，每段烘焙不同的 chromakey 值。
+    let keyed_label = format!("{}k", label);
+    if is_chroma_keyframed(c) {
+        let segs = keying_segments(c);
+        let n = segs.len();
+        // 关键修复：ffmpeg 的 filtergraph 中，单个带标签的输出（如缩放后的 [pre]）被多条
+        // trim 链同时引用时，scale/transform 只会传播到第一条分支，其余分支会回退到原始分辨率
+        // （实测 640x360 vs 1280x720 导致 concat 报 -22 Invalid argument）。改用 split=N 把
+        // 已缩放的流扇出为 N 路独立副本，每段各自 trim+chromakey，避免分辨率协商错乱。
+        let split_outs: Vec<String> = (0..n).map(|i| format!("{}sp{}", label, i)).collect();
+        nodes.push(format!(
+            "[{pre}]split={n}{outs}",
+            pre = pre_label, n = n,
+            outs = split_outs.iter().map(|o| format!("[{}]", o)).collect::<String>()
+        ));
+        let mut seg_labels: Vec<String> = Vec::new();
+        for (i, (s0, s1, kcfg)) in segs.iter().enumerate() {
+            let seg_label = format!("{}s{}", label, i);
+            seg_labels.push(seg_label.clone());
+            let kcfg = kcfg.clone();
+            let kf = build_keying_spec(&Some(kcfg), w, h).unwrap().filter.unwrap();
+            nodes.push(format!(
+                "[{pre}]trim=start={s}:end={e},setpts=PTS-STARTPTS,{kf}[{seg}]",
+                pre = split_outs[i], s = fmt(*s0), e = fmt(*s1), kf = kf, seg = seg_label
+            ));
+        }
+        let inputs = seg_labels.iter().map(|s| format!("[{}]", s)).collect::<String>();
+        nodes.push(format!("{}concat=n={}:v=1:a=0[{}]", inputs, seg_labels.len(), keyed_label));
+    } else if let Some(kf) = build_keying_spec(&c.keying, w, h).and_then(|s| s.filter) {
+        nodes.push(format!("[{pre}]{kf}[{keyed}]", pre = pre_label, kf = kf, keyed = keyed_label));
+    } else {
+        nodes.push(format!("[{pre}]null[{keyed}]", pre = pre_label, keyed = keyed_label));
     }
+    let core = format!("[{}]", keyed_label);
+
     // 智能/手动抠像 matte 输入索引（smart / manual 模式 + matte_asset_id 命中时 Some；
     // 两者都走 matte 视频 alphamerge，与模式无关）
     let matte_idx = c.keying.as_ref().and_then(|k| {
@@ -123,7 +204,6 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     } else {
         format!(",fps={}", fps)
     };
-    let mut nodes: Vec<String> = Vec::new();
     // 蒙版：geq 形状（heart/circle/...）走单输入 geq；文字(text) 走独立 drawtext 流 + alphamerge。
     // 中间标签 mlabel = 蒙版合成后、matte 合成前、尾部之前的视频流。
     let mlabel = format!("{}m", label);
@@ -131,8 +211,8 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     let mut pre_tail = mlabel.clone();
     match mspec {
         None => {
-            // 无蒙版：核心链直接产出 mlabel
-            nodes.push(format!("{}[{}]", core, mlabel));
+            // 无蒙版：核心链直接产出 mlabel（core 现在是一个标签，需要 null 过滤器桥接输出标签）
+            nodes.push(format!("{}null[{}]", core, mlabel));
         }
         Some(spec) => {
             if spec.image_masks.is_empty() {

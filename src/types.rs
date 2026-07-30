@@ -135,9 +135,13 @@ pub struct Keyframe {
 /// 缓动函数
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum Easing {
+    #[serde(alias = "线性")]
     Linear,
+    #[serde(alias = "缓入")]
     EaseIn,
+    #[serde(alias = "缓出")]
     EaseOut,
+    #[serde(alias = "缓入缓出")]
     EaseInOut,
     Bezier(f64, f64, f64, f64),
 }
@@ -146,8 +150,28 @@ impl Default for Easing {
     fn default() -> Self { Easing::Linear }
 }
 
+/// 关键帧轨道的反序列化中间件：前端直接存成 `[{time,value,easing}, ...]` 数组，
+/// 历史 Rust 类型则包成 `{"keyframes":[...]}`；两边都兼容，避免已有关键帧工程解析失败。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum KeyframeTrackInput {
+    Wrapped { keyframes: Vec<Keyframe> },
+    Raw(Vec<Keyframe>),
+}
+
+impl From<KeyframeTrackInput> for KeyframeTrack {
+    fn from(v: KeyframeTrackInput) -> Self {
+        let kfs = match v {
+            KeyframeTrackInput::Wrapped { keyframes } => keyframes,
+            KeyframeTrackInput::Raw(k) => k,
+        };
+        Self { keyframes: kfs }
+    }
+}
+
 /// 某属性的关键帧轨道
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "KeyframeTrackInput")]
 pub struct KeyframeTrack {
     #[serde(default)]
     pub keyframes: Vec<Keyframe>,
