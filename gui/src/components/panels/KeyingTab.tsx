@@ -1,12 +1,12 @@
-// 抠像属性面板（KeyingTab）：启用开关、模式选择、键色（含吸管）、相似度、边缘柔化、溢出抑制。
-// M1 仅 chroma 色度抠图有实际渲染管线；smart 为智能抠像（P1）分支，manual 为画笔手动抠像（P2）。
+// 抠像属性面板（KeyingTab）：启用开关、模式选择、键色（含吸管）、相似度、边缘柔化、溢出抑制、背景合成。
+// 三种模式（chroma / smart / manual）共享统一的面板布局、滑块手感与禁用态；吸管取色既可用作键色也可用于背景纯色。
 // 写入方式：结构变更（启用/模式/颜色/模型/生成）走 updateClip（拖前 pushHistorySnapshot），
-//           参数拖动（阈值/柔化）走 updateClipLive。
+//           参数拖动（阈值/柔化/相似度/溢出）走 updateClipLive。
 import { useState, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { createDefaultKeying, uid } from '../../utils/clipFactories';
-import type { ClipConfig, KeyingConfig, KeyingMode } from '../../types';
+import type { ClipConfig, KeyingConfig, KeyingMode, BackgroundType, KeyingBackground } from '../../types';
 
 // 本地 pathToUrl（与 WebGPUPreview/PreviewCanvas 内实现一致，避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -25,38 +25,91 @@ const S = {
   divider: { height: 1, background: '#0f3460', margin: '8px 0' } as const,
 };
 
-// 可复用参数滑块（拖动时走 live，拖前压一次历史快照）
-function ParamSlider({ label, value, min, max, step, unit, editable, onChange, onEditStart }: {
-  label: string; value: number; min: number; max: number; step: number;
-  unit?: string; editable?: boolean; onChange: (v: number) => void; onEditStart?: () => void;
-}) {
-  const fmt = (v: number) => unit === '%' ? `${Math.round(v * 100)}%` : unit === '°' ? `${Math.round(v)}°` : v.toFixed(2);
-  let editing = false;
-  const begin = () => { if (!editing) { editing = true; onEditStart?.(); } };
-  const end = () => { editing = false; };
+// 区块标题：统一四块的视觉层级
+function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ marginBottom: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, alignItems: 'center' }}>
-        <span style={{ color: '#aaa', fontSize: 11 }}>{label}</span>
-        {editable ? (
-          <input type="number" value={value} min={min} max={max} step={step}
-            onFocus={begin} onBlur={end}
-            onChange={(e) => { begin(); onChange(parseFloat(e.target.value) || 0); }}
-            style={{ width: 64, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: '2px 4px', fontSize: 11 }} />
-        ) : (
-          <span style={{ color: '#eee', fontSize: 11 }}>{fmt(value)}</span>
-        )}
-      </div>
-      <input type="range" min={min} max={max} step={step} value={value}
-        onPointerDown={begin} onPointerUp={end} onBlur={end}
-        onChange={(e) => { begin(); onChange(parseFloat(e.target.value)); }}
-        style={{ width: '100%', accentColor: '#e94560' }} />
+    <div style={{ color: '#8895b3', fontSize: 11, fontWeight: 600, letterSpacing: 0.3, marginBottom: 8 }}>
+      {children}
     </div>
   );
 }
 
-function ToggleBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return <button style={{ ...S.btn, ...(active ? S.btnActive : {}) }} onClick={onClick}>{children}</button>;
+// 小灰字提示：解释某参数的语义（用于区分 edgeSoftness 在色度/智能模式下的不同含义）
+function Hint({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ color: '#6b7794', fontSize: 10, lineHeight: 1.4, marginTop: -4, marginBottom: 6 }}>
+      {children}
+    </div>
+  );
+}
+
+// 可复用参数滑块（拖动时走 live，拖前压一次历史快照）；disabled 时整体置灰并禁交互
+function ParamSlider({ label, value, min, max, step, unit, editable, disabled, onChange, onEditStart }: {
+  label: string; value: number; min: number; max: number; step: number;
+  unit?: string; editable?: boolean; disabled?: boolean; onChange: (v: number) => void; onEditStart?: () => void;
+}) {
+  const fmt = (v: number) => unit === '%' ? `${Math.round(v * 100)}%` : unit === '°' ? `${Math.round(v)}°` : v.toFixed(2);
+  let editing = false;
+  const begin = () => { if (!editing && !disabled) { editing = true; onEditStart?.(); } };
+  const end = () => { editing = false; };
+  const textColor = disabled ? '#666' : '#eee';
+  return (
+    <div style={{ marginBottom: 8, opacity: disabled ? 0.5 : 1 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, alignItems: 'center' }}>
+        <span style={{ color: disabled ? '#666' : '#aaa', fontSize: 11 }}>{label}</span>
+        {editable ? (
+          <input type="number" value={value} min={min} max={max} step={step} disabled={disabled}
+            onFocus={begin} onBlur={end}
+            onChange={(e) => { begin(); onChange(parseFloat(e.target.value) || 0); }}
+            style={{ width: 64, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: textColor, padding: '2px 4px', fontSize: 11 }} />
+        ) : (
+          <span style={{ color: textColor, fontSize: 11 }}>{fmt(value)}</span>
+        )}
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        disabled={disabled}
+        onPointerDown={begin} onPointerUp={end} onBlur={end}
+        onChange={(e) => { begin(); onChange(parseFloat(e.target.value)); }}
+        style={{ width: '100%', accentColor: '#e94560', cursor: disabled ? 'not-allowed' : 'pointer' }} />
+    </div>
+  );
+}
+
+function ToggleBtn({ active, disabled, onClick, children }: { active: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return <button style={{ ...S.btn, ...(active ? S.btnActive : {}), opacity: disabled ? 0.5 : 1 }} disabled={disabled} onClick={onClick}>{children}</button>;
+}
+
+// 颜色行：色块 + 文本输入 + 可选吸管（键色与背景纯色复用，保证两处取色交互一致）
+function ColorRow({ label, value, onChange, onPick, disabled }: {
+  label: string; value: string; onChange: (v: string) => void; onPick?: () => void; disabled?: boolean;
+}) {
+  return (
+    <div style={S.row}>
+      <span style={S.label}>{label}</span>
+      <input type="color" value={value} disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: disabled ? 'not-allowed' : 'pointer', background: 'transparent', opacity: disabled ? 0.5 : 1 }} />
+      <input type="text" value={value} disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ ...S.input, opacity: disabled ? 0.5 : 1 }} />
+      {onPick && (
+        <button style={S.btn} disabled={disabled} onClick={onPick} title="屏幕取色">吸管</button>
+      )}
+    </div>
+  );
+}
+
+// 生成按钮：智能/手动抠像共用的一致外观与禁用态
+function GenerateButton({ processing, disabled, onClick, children }: {
+  processing: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode;
+}) {
+  return (
+    <button style={{ ...S.btn, width: '100%', background: '#e94560', color: '#fff', border: '1px solid #e94560', opacity: (disabled || processing) ? 0.6 : 1 }}
+      disabled={disabled || processing}
+      onClick={onClick}>
+      {children}
+    </button>
+  );
 }
 
 const MODES: { value: KeyingMode; label: string }[] = [
@@ -64,7 +117,6 @@ const MODES: { value: KeyingMode; label: string }[] = [
   { value: 'smart', label: '智能' },
   { value: 'manual', label: '手动' },
 ];
-const MODE_LABEL: Record<KeyingMode, string> = { chroma: '色度', smart: '智能', manual: '手动' };
 
 // 背景合成类型（P3）
 const BG_TYPES: { value: string; label: string }[] = [
@@ -76,11 +128,11 @@ const BG_TYPES: { value: string; label: string }[] = [
 
 // 浏览器原生吸管（Chrome/Edge 支持），失败则静默忽略
 function pickColorWithEyedropper(): Promise<string | null> {
-  const w = window as any;
+  const w = window as unknown as { EyeDropper?: new () => { open(): Promise<{ sRGBHex: string }> } };
   if (typeof w.EyeDropper === 'function') {
     try {
       const ed = new w.EyeDropper();
-      return ed.open().then((r: any) => r?.sRGBHex ?? null).catch(() => null);
+      return ed.open().then((r) => r?.sRGBHex ?? null).catch(() => null);
     } catch {
       return Promise.resolve(null);
     }
@@ -180,10 +232,10 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
   const project = useProjectStore((s) => s.project);
 
   const keying = clip.keying || null;
-  const srcAsset = project.assets.find((a: any) => a.id === clip.assetId);
+  const srcAsset = project.assets.find((a) => a.id === clip.assetId);
 
-  const commit = (next: KeyingConfig | undefined) => updateClip(trackId, clip.id, { keying: next } as Partial<ClipConfig>);
-  const commitLive = (next: KeyingConfig) => updateClipLive(trackId, clip.id, { keying: next } as Partial<ClipConfig>);
+  const commit = (next: KeyingConfig | undefined) => updateClip(trackId, clip.id, { keying: next });
+  const commitLive = (next: KeyingConfig) => updateClipLive(trackId, clip.id, { keying: next });
 
   // 智能/手动抠像（P1/P2）专属状态：处理中 + 错误提示
   const [processing, setProcessing] = useState(false);
@@ -202,74 +254,74 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     );
   }
 
-  // k：P1/P2 新增字段（model/threshold/matteAssetId）尚未并入本仓库 types.ts（归属后端子代理），
-  // 此处以局部 any 视图读取，避免改动共享类型契约文件。
-  const k = keying as any;
+  const disabled = !keying.enabled; // 整体禁用态：关闭抠像时所有参数置灰
 
   const setField = (patch: Partial<KeyingConfig>, live = false) => {
     const next = { ...keying, ...patch };
     if (live) commitLive(next);
     else { pushHistorySnapshot(); commit(next); }
   };
-  // 智能抠像结构变更：强制 mode:'smart'，patch 含 P1 字段（model/threshold/matteAssetId）
-  const setSmartField = (patch: any, live = false) => {
-    const next: any = { ...keying, mode: 'smart', ...patch };
-    if (live) updateClipLive(trackId, clip.id, { keying: next } as Partial<ClipConfig>);
-    else { pushHistorySnapshot(); updateClip(trackId, clip.id, { keying: next } as Partial<ClipConfig>); }
-  };
+
   const toggleEnabled = () => setField({ enabled: !keying.enabled });
   const selectMode = (mode: KeyingMode) => setField({ mode });
   const setColor = (color: string) => setField({ color }, true);
   const onEyedropper = async () => {
     const c = await pickColorWithEyedropper();
-    if (c) setColor(c);
+    if (c) setField({ color: c });
   };
 
   // ── 背景合成（P3）：抠出主体后，在透明区背后铺背景 ──
-  const bg = (keying as any).background as any;
+  const bg = keying.background;
   const bgType = bg?.type || 'none';
   const bgColor = bg?.color || '#000000';
   const bgAssetId = bg?.assetId;
-  const bgAsset = bgAssetId ? project.assets.find((a: any) => a.id === bgAssetId) : undefined;
-  const setBgType = (type: string) => {
-    const cur = (keying as any).background || {};
+  const bgAsset = bgAssetId ? project.assets.find((a) => a.id === bgAssetId) : undefined;
+  const setBgType = (type: BackgroundType) => {
+    const cur: KeyingBackground = bg || { type: 'none' };
     pushHistorySnapshot();
-    commit({ ...keying, background: { ...cur, type } } as any);
+    commit({ ...keying, background: { ...cur, type } });
   };
   const setBgColor = (color: string) => {
-    const cur = (keying as any).background || {};
+    const cur: KeyingBackground = bg || { type: 'none' };
     pushHistorySnapshot();
-    commit({ ...keying, background: { ...cur, type: cur.type || 'color', color } } as any);
+    commit({ ...keying, background: { ...cur, type: (cur.type || 'color') as 'color', color } });
+  };
+  const pickBgColor = async () => {
+    const c = await pickColorWithEyedropper();
+    if (c) setBgColor(c);
   };
   const pickBackground = async () => {
     if (processing) return;
     const type = bgType === 'image' ? 'image' : 'video';
-    const paths: string[] = await (window as any).aicut.openFiles();
+    const paths: string[] = await (window as unknown as { aicut: { openFiles(): Promise<string[]> } }).aicut.openFiles();
     if (!paths || paths.length === 0) return;
     const path = paths[0];
-    let info: any = {};
-    try { info = ((await (window as any).aicut.probe(path))?.info) || {}; } catch { /* 探测失败用默认值 */ }
+    let info: { duration?: number; width?: number; height?: number; codec?: string; fps?: number } = {};
+    try {
+      const probe = (window as unknown as { aicut: { probe(p: string): Promise<{ info?: typeof info }> } }).aicut.probe(path);
+      info = (await probe)?.info || {};
+    } catch { /* 探测失败用默认值 */ }
     const store = useProjectStore.getState();
     const assetId = uid('asset');
     store.addAsset({
       id: assetId, type, path,
-      duration: info?.duration || 5, width: info?.width || 1920, height: info?.height || 1080,
-      codec: info?.codec || 'h264', fps: info?.fps || 30,
+      duration: info.duration || 5, width: info.width || 1920, height: info.height || 1080,
+      codec: info.codec || 'h264', fps: info.fps || 30,
     });
-    const cur = (keying as any).background || {};
+    const cur: KeyingBackground = bg || { type: 'none' };
     pushHistorySnapshot();
-    commit({ ...keying, background: { ...cur, type, assetId, color: cur.color || '#000000' } } as any);
+    commit({ ...keying, background: { ...cur, type, assetId, color: cur.color || '#000000' } });
   };
 
   // 共享：matte 阈值 / 边缘柔化滑块（smart 与 manual 复用；预览/导出均依此曲线）
+  // 注意：此处 edgeSoftness 作用于「已生成蒙版」的软硬过渡，与色度模式的边缘柔化语义不同（见下方 Hint）。
   const MatteAdjust = (
     <div key="matte-adjust">
-      <ParamSlider label="阈值" value={k.threshold ?? 0.5} min={0} max={1} step={0.01} unit="%" editable
-        onChange={(v) => updateClipLive(trackId, clip.id, { keying: { ...keying, mode: keying.mode, model: k.model ?? 'modnet', threshold: v, matteAssetId: k.matteAssetId } } as any)}
-        onEditStart={pushHistorySnapshot} />
-      <ParamSlider label="边缘柔化" value={k.edgeSoftness ?? 0} min={0} max={1} step={0.01} unit="%" editable
-        onChange={(v) => updateClipLive(trackId, clip.id, { keying: { ...keying, mode: keying.mode, model: k.model ?? 'modnet', edgeSoftness: v, matteAssetId: k.matteAssetId } } as any)}
-        onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="阈值" value={keying.threshold ?? 0.5} min={0} max={1} step={0.01} unit="%" editable disabled={disabled}
+        onChange={(v) => setField({ threshold: v }, true)} onEditStart={pushHistorySnapshot} />
+      <ParamSlider label="边缘柔化" value={keying.edgeSoftness ?? 0} min={0} max={1} step={0.01} unit="%" editable disabled={disabled}
+        onChange={(v) => setField({ edgeSoftness: v }, true)} onEditStart={pushHistorySnapshot} />
+      <Hint>柔化蒙版（前景/背景）边缘过渡带宽</Hint>
     </div>
   );
 
@@ -277,14 +329,14 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
   const runSmartKeying = async () => {
     if (processing) return;
     const store = useProjectStore.getState();
-    const asset = store.project.assets.find((a: any) => a.id === clip.assetId);
+    const asset = store.project.assets.find((a) => a.id === clip.assetId);
     if (!asset || !asset.path) {
       alert('找不到源素材路径，无法执行智能抠像');
       return;
     }
     const assetPath = asset.path;            // 真实文件系统路径（非 aicut-asset://）
-    const model = k.model ?? 'modnet';
-    const threshold = k.threshold ?? 0.5;
+    const model = keying.model ?? 'modnet';
+    const threshold = keying.threshold ?? 0.5;
     const output = matteOutputPath(assetPath); // 绝对路径 <stem>_matte.mp4
     setError(null);
     setProcessing(true);
@@ -293,12 +345,12 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       pushHistorySnapshot();
       // 与 speech:* 一致的 IPC 契约：handler 返回 { success, data, error } 对象，
       // 不可对返回值再做 JSON.parse（否则会得到 "[object Object]" is not valid JSON）。
-      const res: any = await (window as any).aicut.keying.generate(
+      const res = await (window as unknown as { aicut: { keying: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.keying.generate(
         assetPath,
         JSON.stringify({ mode: 'matte', model, threshold, fps: asset.fps ?? 30, output })
       );
       if (!res?.success) throw new Error(res?.error || '智能抠像失败');
-      const result = (res.data ?? {}) as any;
+      const result = (res.data ?? {}) as { error?: string; mattePath: string; duration: number; width: number; height: number; fps: number };
       if (result.error) throw new Error(result.error);
       const assetId = uid('asset');
       store.addAsset({
@@ -307,10 +359,10 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       });
       store.updateClip(trackId, clip.id, {
         keying: { ...keying, mode: 'smart', model, threshold, matteAssetId: assetId },
-      } as any);
-    } catch (e: any) {
+      });
+    } catch (e: unknown) {
       console.error('智能抠像失败', e);
-      const msg = e?.message || String(e);
+      const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       alert('智能抠像失败：' + msg);
     } finally {
@@ -322,19 +374,19 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
   const runManualKeying = async () => {
     if (processing) return;
     const store = useProjectStore.getState();
-    const asset = store.project.assets.find((a: any) => a.id === clip.assetId);
+    const asset = store.project.assets.find((a) => a.id === clip.assetId);
     if (!asset || !asset.path) {
       alert('找不到源素材路径，无法执行手动抠像');
       return;
     }
     const assetPath = asset.path;
-    const model = k.model ?? 'modnet';
-    const threshold = k.threshold ?? 0.5;
-    const softness = k.edgeSoftness ?? 0.1;
+    const model = keying.model ?? 'modnet';
+    const threshold = keying.threshold ?? 0.5;
+    const softness = keying.edgeSoftness ?? 0.1;
     // 已有蒙版则在其上修正
     let smartMattePath = '';
-    if (k.matteAssetId) {
-      const ma = store.project.assets.find((a: any) => a.id === k.matteAssetId);
+    if (keying.matteAssetId) {
+      const ma = store.project.assets.find((a) => a.id === keying.matteAssetId);
       if (ma && ma.path) smartMattePath = ma.path;
     }
     const guide = paintCanvasRef.current?.toDataURL('image/png') || '';
@@ -348,12 +400,12 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     setProcessing(true);
     try {
       pushHistorySnapshot();
-      const res: any = await (window as any).aicut.keying.generate(
+      const res = await (window as unknown as { aicut: { keying: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.keying.generate(
         assetPath,
         JSON.stringify({ mode: 'manual', guide, smartMattePath, threshold, softness, fps: asset.fps ?? 30, output })
       );
       if (!res?.success) throw new Error(res?.error || '手动抠像失败');
-      const result = (res.data ?? {}) as any;
+      const result = (res.data ?? {}) as { error?: string; mattePath: string; duration: number; width: number; height: number; fps: number };
       if (result.error) throw new Error(result.error);
       const assetId = uid('asset');
       store.addAsset({
@@ -362,10 +414,10 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       });
       store.updateClip(trackId, clip.id, {
         keying: { ...keying, mode: 'manual', model, threshold, edgeSoftness: softness, matteAssetId: assetId },
-      } as any);
-    } catch (e: any) {
+      });
+    } catch (e: unknown) {
       console.error('手动抠像失败', e);
-      const msg = e?.message || String(e);
+      const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       alert('手动抠像失败：' + msg);
     } finally {
@@ -378,73 +430,68 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       <div style={S.row}>
         <span style={S.label}>启用</span>
         <ToggleBtn active={keying.enabled} onClick={toggleEnabled}>{keying.enabled ? '已开启' : '已关闭'}</ToggleBtn>
+        {disabled && <span style={{ color: '#8895b3', fontSize: 10, marginLeft: 4 }}>（参数已锁定）</span>}
         <button style={{ ...S.btn, marginLeft: 'auto', color: '#e94560' }} onClick={() => { pushHistorySnapshot(); commit(undefined); }}>移除</button>
       </div>
 
       <div style={S.divider} />
 
       {/* 模式选择 */}
+      <SectionTitle>抠像模式</SectionTitle>
       <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
         {MODES.map((m) => (
           <ToggleBtn key={m.value} active={keying.mode === m.value} onClick={() => selectMode(m.value)}>{m.label}</ToggleBtn>
         ))}
       </div>
 
-      {/* 键色 + 吸管（仅 chroma 相关） */}
+      {/* 色度参数 */}
       {keying.mode === 'chroma' && (
-        <>
-          <div style={S.row}>
-            <span style={S.label}>键色</span>
-            <input type="color" value={keying.color} onChange={(e) => setColor(e.target.value)}
-              style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
-            <input type="text" value={keying.color} onChange={(e) => setColor(e.target.value)}
-              style={{ flex: 1, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: '4px 6px', fontSize: 11, minWidth: 0 }} />
-            <button style={S.btn} onClick={onEyedropper} title="屏幕取色">吸管</button>
-          </div>
+        <div>
+          <SectionTitle>键色与吸管</SectionTitle>
+          <ColorRow label="键色" value={keying.color} onChange={setColor} onPick={onEyedropper} disabled={disabled} />
 
           <div style={S.divider} />
 
-          {/* 色度参数 */}
-          <ParamSlider label="相似度" value={keying.similarity} min={0} max={1} step={0.01} unit="%" editable
+          <SectionTitle>色度参数</SectionTitle>
+          <ParamSlider label="相似度" value={keying.similarity} min={0} max={1} step={0.01} unit="%" editable disabled={disabled}
             onChange={(v) => setField({ similarity: v }, true)} onEditStart={pushHistorySnapshot} />
-          <ParamSlider label="边缘柔化" value={keying.edgeSoftness} min={0} max={1} step={0.01} unit="%" editable
+          <ParamSlider label="边缘柔化" value={keying.edgeSoftness} min={0} max={1} step={0.01} unit="%" editable disabled={disabled}
             onChange={(v) => setField({ edgeSoftness: v }, true)} onEditStart={pushHistorySnapshot} />
-          <ParamSlider label="溢出抑制" value={keying.spill} min={0} max={1} step={0.01} unit="%" editable
+          <Hint>按颜色距离羽化抠像边缘的宽度</Hint>
+          <ParamSlider label="溢出抑制" value={keying.spill} min={0} max={1} step={0.01} unit="%" editable disabled={disabled}
             onChange={(v) => setField({ spill: v }, true)} onEditStart={pushHistorySnapshot} />
-        </>
+        </div>
       )}
 
       {/* 智能抠像（P1）专属 UI */}
       {keying.mode === 'smart' && (
         <div>
-          <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>
-            P1 智能抠像：调用本地模型推理蒙版视频，仅预览/导出时应用阈值与柔化曲线。
+          <SectionTitle>智能抠像</SectionTitle>
+          <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+            调用本地模型推理蒙版视频，仅预览/导出时应用阈值与柔化曲线。
           </div>
 
-          {/* 模型选择 */}
           <div style={S.row}>
             <span style={S.label}>模型</span>
-            <select value={k.model ?? 'modnet'} disabled={processing}
-              onChange={(e) => setSmartField({ model: e.target.value })}
-              style={{ flex: 1, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: '4px 6px', fontSize: 11 }}>
+            <select value={keying.model ?? 'modnet'} disabled={disabled || processing}
+              onChange={(e) => setField({ model: e.target.value as 'modnet' | 'rmbg2' })}
+              style={{ flex: 1, background: '#0f3460', border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee', padding: '4px 6px', fontSize: 11, opacity: disabled ? 0.5 : 1 }}>
               <option value="modnet">modnet（MODNet）</option>
               <option value="rmbg2">rmbg2（BRIA RMBG-2.0）</option>
             </select>
           </div>
 
-          {k.matteAssetId ? (
+          {keying.matteAssetId ? (
             <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>已生成蒙版，可重新生成</div>
           ) : (
             <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成蒙版，点击下方按钮开始推理</div>
           )}
 
-          {k.matteAssetId && MatteAdjust}
+          {keying.matteAssetId && MatteAdjust}
 
-          <button style={{ ...S.btn, width: '100%', background: '#e94560', color: '#fff', border: '1px solid #e94560' }}
-            disabled={processing}
-            onClick={runSmartKeying}>
-            {processing ? '智能抠像处理中…' : (k.matteAssetId ? '重新生成蒙版' : '开始智能抠像')}
-          </button>
+          <GenerateButton processing={processing} disabled={disabled} onClick={runSmartKeying}>
+            {processing ? '智能抠像处理中…' : (keying.matteAssetId ? '重新生成蒙版' : '开始智能抠像')}
+          </GenerateButton>
 
           {error && (
             <div style={{ color: '#e9a23b', fontSize: 11, marginTop: 8, wordBreak: 'break-all' }}>错误：{error}</div>
@@ -455,28 +502,27 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       {/* 手动抠像（P2）专属 UI */}
       {keying.mode === 'manual' && (
         <div>
-          <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>
-            P2 手动抠像：在画布上涂抹——前景（白）保留、背景（黑）去除；生成后叠加到预览。
-            {k.matteAssetId ? '当前基于已有蒙版修正边缘。' : '建议先做智能抠像，再手动修补边缘。'}
+          <SectionTitle>手动抠像</SectionTitle>
+          <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+            在画布上涂抹——前景（白）保留、背景（黑）去除；生成后叠加到预览。
+            {keying.matteAssetId ? '当前基于已有蒙版修正边缘。' : '建议先做智能抠像，再手动修补边缘。'}
           </div>
 
           {srcAsset?.path && (
             <ManualPaintCanvas videoPath={pathToUrl(srcAsset.path)} canvasRef={paintCanvasRef} />
           )}
 
-          {k.matteAssetId ? (
+          {keying.matteAssetId ? (
             <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>已生成蒙版，可重新涂抹后生成</div>
           ) : (
             <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成蒙版，涂抹后点击下方按钮</div>
           )}
 
-          {k.matteAssetId && MatteAdjust}
+          {keying.matteAssetId && MatteAdjust}
 
-          <button style={{ ...S.btn, width: '100%', background: '#e94560', color: '#fff', border: '1px solid #e94560' }}
-            disabled={processing}
-            onClick={runManualKeying}>
-            {processing ? '处理中…' : (k.matteAssetId ? '重新生成蒙版' : '生成蒙版')}
-          </button>
+          <GenerateButton processing={processing} disabled={disabled} onClick={runManualKeying}>
+            {processing ? '处理中…' : (keying.matteAssetId ? '重新生成蒙版' : '生成蒙版')}
+          </GenerateButton>
 
           {error && (
             <div style={{ color: '#e9a23b', fontSize: 11, marginTop: 8, wordBreak: 'break-all' }}>错误：{error}</div>
@@ -487,42 +533,36 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       <div style={S.divider} />
 
       {/* 背景合成（P3） */}
-      <div>
-        <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>
-          背景合成：抠出主体后，在透明区背后铺背景（纯色 / 图片 / 视频）。
-        </div>
-        <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' }}>
-          {BG_TYPES.map((b) => (
-            <ToggleBtn key={b.value} active={bgType === b.value} onClick={() => setBgType(b.value)}>{b.label}</ToggleBtn>
-          ))}
-        </div>
-
-        {bgType === 'color' && (
-          <div style={S.row}>
-            <span style={S.label}>颜色</span>
-            <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)}
-              style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
-            <input type="text" value={bgColor} onChange={(e) => setBgColor(e.target.value)} style={S.input} />
-          </div>
-        )}
-
-        {(bgType === 'image' || bgType === 'video') && (
-          <div>
-            <button style={{ ...S.btn, width: '100%' }} onClick={pickBackground} disabled={processing}>
-              {bgAssetId ? '重新选择背景素材' : `选择背景${bgType === 'image' ? '图片' : '视频'}`}
-            </button>
-            {bgAsset && (
-              <div style={{ fontSize: 11, color: '#7CFC9A', marginTop: 6, wordBreak: 'break-all' }}>
-                已选：{bgAsset.path}
-              </div>
-            )}
-          </div>
-        )}
-
-        {bgType === 'none' && (
-          <div style={{ fontSize: 11, color: '#888' }}>未启用背景（透明区显示下层或棋盘格）</div>
-        )}
+      <SectionTitle>背景合成</SectionTitle>
+      <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+        抠出主体后，在透明区背后铺背景（纯色 / 图片 / 视频）。
       </div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' }}>
+        {BG_TYPES.map((b) => (
+          <ToggleBtn key={b.value} active={bgType === b.value} disabled={disabled} onClick={() => setBgType(b.value as BackgroundType)}>{b.label}</ToggleBtn>
+        ))}
+      </div>
+
+      {bgType === 'color' && (
+        <ColorRow label="颜色" value={bgColor} onChange={setBgColor} onPick={pickBgColor} disabled={disabled} />
+      )}
+
+      {(bgType === 'image' || bgType === 'video') && (
+        <div>
+          <button style={{ ...S.btn, width: '100%', opacity: disabled ? 0.5 : 1 }} onClick={pickBackground} disabled={disabled || processing}>
+            {bgAssetId ? '重新选择背景素材' : `选择背景${bgType === 'image' ? '图片' : '视频'}`}
+          </button>
+          {bgAsset && (
+            <div style={{ fontSize: 11, color: '#7CFC9A', marginTop: 6, wordBreak: 'break-all' }}>
+              已选：{bgAsset.path}
+            </div>
+          )}
+        </div>
+      )}
+
+      {bgType === 'none' && (
+        <div style={{ fontSize: 11, color: '#888' }}>未启用背景（透明区显示下层或棋盘格）</div>
+      )}
     </div>
   );
 }
