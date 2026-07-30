@@ -28,8 +28,17 @@ pub fn resolve_encoder(preset: &str, codec_type: &str) -> &'static str {
 
 /// 渲染命令容器
 #[derive(Debug, Clone)]
+/// 单个输入文件及其专属输入选项。
+/// - `path`：媒体文件路径。
+/// - `stream_loop`：输入级 `-stream_loop N`（N=-1 表示无限循环），用于让背景图片/视频
+///   撑满前景时长；普通素材为 None（不循环）。
+pub struct InputSpec {
+    pub path: String,
+    pub stream_loop: Option<i64>,
+}
+
 pub struct RenderCommand {
-    pub inputs: Vec<String>,
+    pub inputs: Vec<InputSpec>,
     pub filter_graph: String,
     /// 滤镜图输出标签列表，每个元素追加为一个独立 `-map` 参数。
     /// 视频用 `[vout]` 滤镜标签，音频用 `[a0]`/`[aout]` 滤镜标签或 `0:a` 文件索引。
@@ -62,8 +71,12 @@ impl RenderCommand {
     pub fn build_input_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         for inp in &self.inputs {
+            if let Some(l) = inp.stream_loop {
+                args.push("-stream_loop".to_string());
+                args.push(l.to_string());
+            }
             args.push("-i".to_string());
-            args.push(inp.clone());
+            args.push(inp.path.clone());
         }
         args
     }

@@ -2,6 +2,7 @@
 //! FilterGraphBuilder + build_render_command + 公共 API
 
 use crate::ffmpeg;
+use crate::ffmpeg::InputSpec;
 use crate::project::{Clip, Project, Track};
 use crate::types::*;
 use std::collections::HashMap;
@@ -205,7 +206,10 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
                         }
                         "image" | "video" => {
                             if let Some(bi) = bg.asset_id.as_ref().and_then(|id| bg_map.get(id).copied()) {
-                                nodes.push(format!("[{bi}:v]scale={w}:{h}[{bg_label}]"));
+                                // 背景 cover：放大到覆盖画布再裁剪溢出区域，避免直接 scale 拉伸比例失真
+                                // （scale=W:H 会把非等比素材压变形；force_original_aspect_ratio=increase
+                                // 保证最小边填满，crop 裁掉多余部分）。
+                                nodes.push(format!("[{bi}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}[{bg_label}]"));
                                 let bgout = format!("{}bgout", label);
                                 nodes.push(format!("[{bg_label}][{pre_tail}]overlay=shortest=1[{bgout}]"));
                                 pre_tail = bgout;
@@ -256,15 +260,15 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         }
     }
     let mut asset_to_idx: HashMap<String, usize> = HashMap::new();
-    let mut inputs: Vec<String> = Vec::new();
+    let mut inputs: Vec<InputSpec> = Vec::new();
     for (_, c) in &video_clips {
         if let Some(a) = project.asset_by_id(&c.asset_id) {
-            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(a.path.clone()); }
+            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(InputSpec { path: a.path.clone(), stream_loop: None }); }
         }
     }
     for c in &audio_clips {
         if let Some(a) = project.asset_by_id(&c.asset_id) {
-            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(a.path.clone()); }
+            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(InputSpec { path: a.path.clone(), stream_loop: None }); }
         }
     }
     cmd.inputs = inputs;
@@ -278,7 +282,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     if !matte_map.contains_key(id) {
                         if let Some(a) = project.asset_by_id(id) {
                             matte_map.insert(id.clone(), cmd.inputs.len());
-                            cmd.inputs.push(a.path.clone());
+                            cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None });
                         }
                     }
                 }
@@ -295,8 +299,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                         if let Some(id) = &bg.asset_id {
                             if !bg_map.contains_key(id) {
                                 if let Some(a) = project.asset_by_id(id) {
-                                    bg_map.insert(id.clone(), cmd.inputs.len());
-                                    cmd.inputs.push(a.path.clone());
+                                bg_map.insert(id.clone(), cmd.inputs.len());
+                                // 背景图片/视频：stream_loop=-1 无限循环，配合 overlay=shortest=1
+                                // 在前景结束时终止，从而撑满整个前景时长（修复背景比源短时截断）。
+                                cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: Some(-1) });
                                 }
                             }
                         }
