@@ -55,6 +55,9 @@ const KF_PROPS = [
   { key: 'keying.edgeSoftness', label: '抠像·边缘柔化' },
   { key: 'keying.spill', label: '抠像·溢出抑制' },
   { key: 'keying.threshold', label: '抠像·阈值' },
+  { key: 'beauty.smoothing', label: '美颜·磨皮' },
+  { key: 'beauty.whitening', label: '美颜·美白' },
+  { key: 'beauty.clarity', label: '美颜·清晰' },
 ];
 const VOICE_TYPES = ['无', '男声', '女声', '机器人', '萝莉'];
 
@@ -583,9 +586,17 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
   const kfs: any[] = ((clip.keyframes || {})[prop] as any[]) || [];
   const setKfs = (next: any[]) => updateClip(trackId, clip.id, { keyframes: { ...(clip.keyframes || {}), [prop]: next } } as Partial<ClipConfig>);
   // 抠像属性新增关键帧时，默认取当前 keying 参数值（避免相似性默认 0=全抠的灾难初值）
-  const kfField = prop.startsWith('keying.') ? (prop.slice('keying.'.length) as 'similarity' | 'edgeSoftness' | 'spill' | 'threshold') : null;
-  // 抠像属性新增关键帧时，默认取当前 keying 参数值（避免相似性默认 0=全抠的灾难初值；threshold 默认 0.5）
-  const addValue = kfField && clip.keying ? ((clip.keying as any)[kfField] ?? (kfField === 'threshold' ? 0.5 : 0)) : 0;
+  const kfField = prop.startsWith('keying.')
+    ? (prop.slice('keying.'.length) as 'similarity' | 'edgeSoftness' | 'spill' | 'threshold')
+    : prop.startsWith('beauty.')
+    ? (prop.slice('beauty.'.length) as 'smoothing' | 'whitening' | 'clarity')
+    : null;
+  // 抠像/美颜属性新增关键帧时，默认取当前参数值（避免相似性默认 0=全抠的灾难初值；threshold 默认 0.5）
+  const addValue = kfField && clip.keying
+    ? ((clip.keying as any)[kfField] ?? (kfField === 'threshold' ? 0.5 : 0))
+    : kfField && clip.beauty
+    ? ((clip.beauty as any)[kfField] ?? 0)
+    : 0;
   const add = () => setKfs([...kfs, { time: currentTime, value: addValue, easing: '线性' }].sort((a, b) => a.time - b.time));
   const remove = (i: number) => setKfs(kfs.filter((_, idx) => idx !== i));
   const setEasing = (i: number, e: string) => setKfs(kfs.map((k, idx) => idx === i ? { ...k, easing: e } : k));

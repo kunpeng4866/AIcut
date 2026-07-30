@@ -592,7 +592,14 @@ export function useWebGPUPreview({
                   }
                 }
                 if (uploadSource instanceof HTMLCanvasElement) {
-                  applyBeauty(uploadSource, maskCanvas, clip.beauty);
+                  const t = currentTimeRef.current;
+                  const effBeauty = {
+                    ...clip.beauty,
+                    smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, clip.beauty.smoothing),
+                    whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, clip.beauty.whitening),
+                    clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, clip.beauty.clarity),
+                  };
+                  applyBeauty(uploadSource, maskCanvas, effBeauty);
                 }
               }
             } catch {

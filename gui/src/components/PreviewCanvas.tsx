@@ -297,8 +297,15 @@ const KeyedCanvas = ({
           if (beautyMaskAsset && clip.beauty?.enabled && clip.beauty.maskAssetId) {
             const maskCanvas = drawBeautyMaskFrame(pathToUrl(beautyMaskAsset.path), beautyVideoCacheRef, beautyCanvasRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
             if (maskCanvas) {
+              const t = useUIStore.getState().currentTime;
+              const effBeauty = {
+                ...clip.beauty,
+                smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, clip.beauty.smoothing),
+                whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, clip.beauty.whitening),
+                clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, clip.beauty.clarity),
+              };
               const bctx = canvas.getContext('2d');
-              if (bctx) applyBeauty(canvas, maskCanvas, clip.beauty);
+              if (bctx) applyBeauty(canvas, maskCanvas, effBeauty);
             }
           }
         } catch {

@@ -248,6 +248,7 @@ def generate_skin_mask(input_path: str, opts: dict) -> dict:
 
     frame_bytes = w * h * 3
     written = 0
+    total_skin = 0
     try:
         while written < N:
             raw = reader.stdout.read(frame_bytes)
@@ -259,6 +260,7 @@ def generate_skin_mask(input_path: str, opts: dict) -> dict:
             cand = _skin_candidate(y, cb, cr, hh, ss, skin_tolerance)
             ellipse = _fit_centroid_ellipse(cand, ellipse_scale)
             gray = _smooth_mask(ellipse)
+            total_skin += int((gray > 10).sum())
             writer.stdin.write(gray.tobytes())
             written += 1
     finally:
@@ -275,12 +277,15 @@ def generate_skin_mask(input_path: str, opts: dict) -> dict:
     log("完成皮肤 mask：{}x{} {} 帧，用时 {:.2f}s（tol={:.2f}, scale={:.2f}）".format(
         w, h, written, elapsed, skin_tolerance, ellipse_scale))
 
+    skin_coverage = (total_skin / (w * h * max(1, written))) if written > 0 else 0.0
+
     return {
         "maskPath": os.path.abspath(output_path),
         "width": w,
         "height": h,
         "fps": fps,
         "frames": written,
+        "skinCoverage": skin_coverage,
         "model": "beauty_mask",
         "mode": "mask",
     }

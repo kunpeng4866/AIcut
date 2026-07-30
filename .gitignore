@@ -35,6 +35,9 @@ tmp_diag/
 # 口播剪辑：assemble 本地测试产物（生成物，非源码）
 tmp_assemble_test/
 
+# 抠像/美颜：legacy 与 manual refine 等本地验证截图与脚本（非源码）
+tmp_read/
+
 # Python 缓存
 __pycache__/
 **/__pycache__/

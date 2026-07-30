@@ -130,12 +130,14 @@ pub fn is_simple_project(project: &Project) -> bool {
                 .any(|c| c.keying.as_ref().map_or(false, |k| k.enabled));
             if has_keying { return false; }
         }
-        // 关键帧路由：仅当关键帧全部落在「graph.rs 可处理的抠像参数」(keying.*) 上时，
-        // 才允许走快速路径——抠像关键帧由 build_video_chain 在关键帧边界切段烘焙
-        // （相似度/溢出抑制/边缘柔化随时间变化）。transform/speed/opacity 等关键帧在快速路径
-        // 只取中点固定值（既有行为），与逐帧动画不兼容，故含此类关键帧仍强制走完整路径。
-        let has_non_keying_kf = clip.keyframes.keys().any(|k| !k.starts_with("keying."));
-        if has_non_keying_kf {
+        // 关键帧路由：仅当关键帧全部落在「graph.rs 可烘焙的参数」(keying.* / beauty.*) 上时，
+        // 才允许走快速路径。keying 关键帧由 build_video_chain 在边界切段烘焙（相似度/溢出抑制/
+        // 边缘柔化/阈值随时间变化）；beauty 关键帧由 build_video_chain / build_clip_chain 通过
+        // 同样的分段切段烘焙（smoothing/whitening/clarity 随时间变化）。transform/speed/opacity
+        // 等关键帧在快速路径只取中点固定值（既有行为），与逐帧动画不兼容，故含此类关键帧仍强制走完整路径。
+        let allowed_kf = |k: &String| k.starts_with("keying.") || k.starts_with("beauty.");
+        let has_unsupported_kf = clip.keyframes.keys().any(|k| !allowed_kf(k));
+        if has_unsupported_kf {
             return false;
         }
         if !clip.speed_curve.is_empty() {

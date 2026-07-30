@@ -127,6 +127,46 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
     out
 }
 
+/// 是否美颜已启用且 smoothing/whitening/clarity 中存在关键帧。
+fn is_beauty_keyframed(c: &Clip) -> bool {
+    let Some(b) = &c.beauty else { return false; };
+    if !b.enabled { return false; }
+    ["beauty.smoothing", "beauty.whitening", "beauty.clarity"]
+        .iter()
+        .any(|p| c.keyframes.contains_key(*p))
+}
+
+/// 把打了关键帧的美颜参数按时间线切分为若干段；返回 (本地开始, 本地结束, 该段有效 BeautyConfig)。
+fn beauty_segments(c: &Clip) -> Vec<(f64, f64, BeautyConfig)> {
+    let mut times: Vec<f64> = Vec::new();
+    for key in ["beauty.smoothing", "beauty.whitening", "beauty.clarity"] {
+        if let Some(track) = c.keyframes.get(key) {
+            for kf in &track.keyframes {
+                if kf.time > c.timeline_in && kf.time < c.timeline_out {
+                    times.push(kf.time);
+                }
+            }
+        }
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    let mut boundaries = vec![c.timeline_in];
+    boundaries.extend(times);
+    boundaries.push(c.timeline_out);
+    let mut out = Vec::new();
+    for w in boundaries.windows(2) {
+        let (g0, g1) = (w[0], w[1]);
+        if g1 - g0 < 1e-6 { continue; }
+        let mid = (g0 + g1) * 0.5;
+        let mut b = c.beauty.clone().unwrap();
+        b.smoothing = sample_keying(c, "beauty.smoothing", b.smoothing, mid);
+        b.whitening = sample_keying(c, "beauty.whitening", b.whitening, mid);
+        b.clarity = sample_keying(c, "beauty.clarity", b.clarity, mid);
+        out.push((g0 - c.timeline_in, g1 - c.timeline_in, b));
+    }
+    out
+}
+
 fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
@@ -177,7 +217,49 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
         } else { None }
     });
     if let Some(mi) = beauty_idx {
-        if let Some(chain) = build_beauty_spec(&c.beauty, w, h) {
+        if is_beauty_keyframed(c) {
+            let segs = beauty_segments(c);
+            let n = segs.len();
+            let split_outs: Vec<String> = (0..n).map(|i| format!("{}bsp{}", label, i)).collect();
+            nodes.push(format!(
+                "[{pre}]split={n}{outs}",
+                pre = pre_label, n = n,
+                outs = split_outs.iter().map(|o| format!("[{}]", o)).collect::<String>()
+            ));
+            let mut seg_labels: Vec<String> = Vec::new();
+            for (i, (s0, s1, bcfg)) in segs.iter().enumerate() {
+                let seg_out = format!("{}bs{}", label, i);
+                seg_labels.push(seg_out.clone());
+                let sf = ((*s0) * (fps as f64)).round() as i64;
+                let mut ef = ((*s1) * (fps as f64)).round() as i64;
+                if ef <= sf { ef = sf + 1; }
+                let borig = format!("{}borig{}", label, i);
+                let bsrc = format!("{}bsrc{}", label, i);
+                let bbeauty = format!("{}bbeauty{}", label, i);
+                let bmask = format!("{}bmask{}", label, i);
+                let bra = format!("{}bra{}", label, i);
+                // 每段：源扇出 2 路（orig 作 overlay 底，src 作美颜输入）；mask 同步 trim+setpts 到同窗口
+                nodes.push(format!(
+                    "[{pre}]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,split=2[{borig}][{bsrc}]",
+                    pre = split_outs[i], sf = sf, ef = ef, borig = borig, bsrc = bsrc
+                ));
+                if let Some(chain) = build_beauty_spec(&Some(bcfg.clone()), w, h) {
+                    nodes.push(format!("[{bsrc}]{chain}[{bbeauty}]"));
+                } else {
+                    nodes.push(format!("[{bsrc}][{bbeauty}]"));
+                }
+                nodes.push(format!(
+                    "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,format=gray,scale={sw}:{sh}[{bmask}]",
+                    mi = mi, sf = sf, ef = ef, sw = sw, sh = sh, bmask = bmask
+                ));
+                nodes.push(format!("[{bbeauty}][{bmask}]alphamerge[{bra}]"));
+                nodes.push(format!("[{borig}][{bra}]overlay=format=auto[{seg_out}]"));
+            }
+            let inputs = seg_labels.iter().map(|s| format!("[{}]", s)).collect::<String>();
+            let bout_final = format!("{}bout", label);
+            nodes.push(format!("{}concat=n={}:v=1:a=0[{}]", inputs, seg_labels.len(), bout_final));
+            pre_label = bout_final;
+        } else if let Some(chain) = build_beauty_spec(&c.beauty, w, h) {
             let borig = format!("{}borig", label);
             let bsrc = format!("{}bsrc", label);
             let bbeauty = format!("{}bbeauty", label);

@@ -116,9 +116,10 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
   const commit = (next: BeautyConfig | undefined) => updateClip(trackId, clip.id, { beauty: next });
   const commitLive = (next: BeautyConfig) => updateClipLive(trackId, clip.id, { beauty: next });
 
-  // 生成皮肤遮罩：处理中 + 错误提示
+  // 生成皮肤遮罩：处理中 + 错误提示 + 皮肤覆盖反馈
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [coverage, setCoverage] = useState<number | null>(null);
 
   const disabled = !beauty?.enabled; // 整体禁用态：关闭美颜时所有参数置灰
 
@@ -131,13 +132,13 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
 
   const toggleEnabled = () => setField({ enabled: !beauty!.enabled });
 
-  // 未启用：提供一键开启（用默认配置，与 Rust 默认值一致）
+  // 未启用：提供一键开启（默认配置带非零基线，避免「生成遮罩后无效果」）
   if (!beauty) {
     const DEFAULT_BEAUTY: BeautyConfig = {
       enabled: false,
-      smoothing: 0,
-      whitening: 0,
-      clarity: 0,
+      smoothing: 50,
+      whitening: 25,
+      clarity: 15,
       skinTone: 'none',
     };
     return (
@@ -173,16 +174,21 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
         JSON.stringify({ smoothing: beauty.smoothing, whitening: beauty.whitening, clarity: beauty.clarity, skinTone: beauty.skinTone, fps, output })
       );
       if (!res?.success) throw new Error(res?.error || '生成皮肤遮罩失败');
-      const result = (res.data ?? {}) as { maskPath: string; width: number; height: number; fps: number; frames: number };
+      const result = (res.data ?? {}) as { maskPath: string; width: number; height: number; fps: number; frames: number; skinCoverage?: number };
       const assetId = uid('asset');
       store.addAsset({
         id: assetId, type: 'video', path: result.maskPath,
         duration: (result.frames ?? 0) / (result.fps ?? fps),
         width: result.width, height: result.height, fps: result.fps,
       });
+      // 若三项参数均为 0（旧工程或仅开启未调），套用非零基线，确保生成遮罩后有可见效果
+      const baseline = (beauty.smoothing === 0 && beauty.whitening === 0 && beauty.clarity === 0)
+        ? { smoothing: 50, whitening: 25, clarity: 15 }
+        : {};
       store.updateClip(trackId, clip.id, {
-        beauty: { ...beauty, enabled: true, maskAssetId: assetId },
+        beauty: { ...beauty, ...baseline, enabled: true, maskAssetId: assetId },
       });
+      setCoverage(typeof result.skinCoverage === 'number' ? result.skinCoverage : null);
     } catch (e: unknown) {
       console.error('生成皮肤遮罩失败', e);
       const msg = e instanceof Error ? e.message : String(e);
@@ -238,6 +244,12 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
         <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>
           已生成遮罩，可重新生成
           {maskAsset && <div style={{ color: '#8895b3', fontSize: 10, marginTop: 4, wordBreak: 'break-all' }}>资产：{maskAsset.path}</div>}
+          {coverage !== null && (
+            <div style={{ color: coverage > 0.01 ? '#8895b3' : '#e9a23b', fontSize: 10, marginTop: 4 }}>
+              皮肤覆盖约 {(coverage * 100).toFixed(1)}%
+              {coverage <= 0.01 ? '（偏低，可能未识别到皮肤，可重新生成或检查画面）' : ''}
+            </div>
+          )}
         </div>
       ) : (
         <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成皮肤遮罩，点击下方按钮开始推理</div>
