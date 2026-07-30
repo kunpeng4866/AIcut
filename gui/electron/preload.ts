@@ -80,6 +80,12 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('keying:generate', input, optsJson),
   },
 
+  // ── 美颜·皮肤管理 ──
+  beauty: {
+    generate: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('beauty:generateMask', input, optsJson),
+  },
+
   // ── 草稿 ──
   saveDraft: (name: string, content: string) => ipcRenderer.invoke('draft:save', name, content),
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),

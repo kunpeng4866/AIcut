@@ -213,7 +213,7 @@ mod tests {
             text: None,
             subtitle: None,
             transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
         }
     }
 

@@ -113,6 +113,32 @@ pub struct KeyingConfig {
 fn default_keying_mode() -> String { "chroma".to_string() }
 fn default_keying_color() -> String { "#00ff00".to_string() }
 
+fn default_beauty_enabled() -> bool { false }
+fn default_beauty_smoothing() -> f64 { 0.0 }
+fn default_beauty_whitening() -> f64 { 0.0 }
+fn default_beauty_clarity() -> f64 { 0.0 }
+fn default_beauty_skin_tone() -> String { "none".to_string() }
+
+/// 美颜·皮肤管理配置（片段级，非破坏式）。
+/// 仅做皮肤管理（磨皮/美白/清晰/肤色），不做美体/五官塑形/美妆。
+/// M1 全部为传统图像处理，不依赖 AI 模型；M3 高阶（匀肤/祛斑/黑眼圈）为自研模型，本期不实现。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BeautyConfig {
+    #[serde(default = "default_beauty_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_beauty_smoothing")]
+    pub smoothing: f64,
+    #[serde(default = "default_beauty_whitening")]
+    pub whitening: f64,
+    #[serde(default = "default_beauty_clarity")]
+    pub clarity: f64,
+    #[serde(default = "default_beauty_skin_tone")]
+    pub skin_tone: String,
+    #[serde(default)]
+    pub mask_asset_id: Option<String>,
+}
+
 /// 滤镜实例（来自 Clip.filters）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterInstance {

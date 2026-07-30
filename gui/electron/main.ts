@@ -344,6 +344,18 @@ ipcMain.handle('keying:generate', async (_e, input: string, optsJson: string) =>
   }
 });
 
+// ── 美颜·皮肤管理：生成皮肤区域 mask（灰度 mp4）──
+ipcMain.handle('beauty:generateMask', async (_e, input: string, optsJson: string) => {
+  try {
+    // 美颜 mask 是唯一的生成动作，无需 --mode；optsJson 内由前端塞入全部参数与 output 路径。
+    const stdout = await callEngine('beauty', '--input', input ?? '', '--opts', optsJson ?? '');
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
 // ── 插件 ──
 ipcMain.handle('plugin:list', async () => {
   try {

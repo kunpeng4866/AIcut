@@ -6,9 +6,10 @@ import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, Wip
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 import MaskTab from './panels/MaskTab';
 import KeyingTab from './panels/KeyingTab';
+import BeautyTab from './panels/BeautyTab';
 import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
 
-type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins' | 'mask' | 'keying';
+type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins' | 'mask' | 'keying' | 'beauty';
 
 // 插件 manifest 类型（仅前端 UI 使用，不依赖 engine 包）
 interface ParameterDef {
@@ -35,6 +36,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'plugins', label: '插件' },
   { key: 'mask', label: '蒙版' },
   { key: 'keying', label: '抠像' },
+  { key: 'beauty', label: '美颜' },
 ];
 
 // 滤镜/特效预设已改为从 plugins/ 目录的真实插件加载（见下方 ItemsTab），
@@ -870,10 +872,10 @@ export default function PropertiesPanel() {
   // 仅视频/图片（非音频）clip 显示「蒙版 / 抠像」tab；音频 clip 无蒙版/抠像
   const selTrack = sel ? project.tracks.find((t) => t.id === sel.trackId) : undefined;
   const visibleTabs = sel && selTrack?.type === 'audio'
-    ? TABS.filter((t) => t.key !== 'mask' && t.key !== 'keying')
+    ? TABS.filter((t) => t.key !== 'mask' && t.key !== 'keying' && t.key !== 'beauty')
     : TABS;
   // 若当前 tab 因切到音频轨被隐藏，回退到 transform
-  const tab = sel && selTrack?.type === 'audio' && (activeTab === 'mask' || activeTab === 'keying') ? 'transform' : activeTab;
+  const tab = sel && selTrack?.type === 'audio' && (activeTab === 'mask' || activeTab === 'keying' || activeTab === 'beauty') ? 'transform' : activeTab;
   return (
     <div style={S.panel}>
       <div style={S.tabs}>
@@ -894,6 +896,7 @@ export default function PropertiesPanel() {
           tab === 'plugins' ? <PluginsTab clip={sel.clip} trackId={sel.trackId} /> :
           tab === 'mask' ? <MaskTab clip={sel.clip} trackId={sel.trackId} /> :
           tab === 'keying' ? <KeyingTab clip={sel.clip} trackId={sel.trackId} /> :
+          tab === 'beauty' ? <BeautyTab clip={sel.clip} trackId={sel.trackId} /> :
           <KeyframesTab clip={sel.clip} trackId={sel.trackId} />
         )}
       </div>

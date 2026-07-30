@@ -525,6 +525,60 @@ pub fn build_keying_spec(keying: &Option<KeyingConfig>, _w: u32, _h: u32) -> Opt
     Some(KeyingSpec { filter: Some(f) })
 }
 
+/// 美颜·皮肤管理滤镜构建（M1 传统图像处理，不依赖 AI 模型）。
+///
+/// 返回**逗号连接**的滤镜串（不含输入/输出标签），供调用方包裹为 `[src]<chain>[out]`。
+/// 仅拼接参数 > 0 的滤镜；当全部参数无效（None / 未启用 / 数值全 0 且 skin_tone=="none"）
+/// 时返回 `None`（不挂载滤镜）。各滤镜参数映射见下方实现。
+pub fn build_beauty_spec(beauty: &Option<BeautyConfig>, _w: u32, _h: u32) -> Option<String> {
+    let b = match beauty { Some(b) if b.enabled => b, _ => return None };
+    // 全部无效（无磨皮/美白/清晰 且 无肤色预设）→ 不挂滤镜
+    let all_zero = b.smoothing == 0.0
+        && b.whitening == 0.0
+        && b.clarity == 0.0
+        && b.skin_tone == "none";
+    if all_zero {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    // 磨皮 smoothing(0-100) → bilateral：sigma_s 1..12, sigma_r 0.05..0.25
+    if b.smoothing > 0.0 {
+        let sigma_s = 1.0 + b.smoothing / 100.0 * 11.0;
+        let sigma_r = 0.05 + b.smoothing / 100.0 * 0.20;
+        parts.push(format!("bilateral=sigmaS={}:sigmaR={}", fmt(sigma_s), fmt(sigma_r)));
+    }
+    // 美白 whitening(0-100) → eq：brightness 0..0.25, saturation 1.0..0.85
+    if b.whitening > 0.0 {
+        let brightness = b.whitening / 100.0 * 0.25;
+        let saturation = 1.0 - b.whitening / 100.0 * 0.15;
+        parts.push(format!("eq=brightness={}:saturation={}", fmt(brightness), fmt(saturation)));
+    }
+    // 清晰 clarity(0-100) → unsharp：luma_amount 0..1.5，固定 5x5 窗口
+    if b.clarity > 0.0 {
+        let luma_amount = b.clarity / 100.0 * 1.5;
+        parts.push(format!(
+            "unsharp=luma_msize_x=5:luma_msize_y=5:luma_amount={}",
+            fmt(luma_amount)
+        ));
+    }
+    // 肤色 skin_tone（!= "none"）→ lutrgb 通道增益
+    if b.skin_tone != "none" {
+        match b.skin_tone.as_str() {
+            "cool" => parts.push("lutrgb=r=0.95:b=1.08".to_string()),
+            "warm" => parts.push("lutrgb=r=1.08:b=0.95".to_string()),
+            "wheat" => parts.push("lutrgb=r=1.06:g=1.02:b=0.94".to_string()),
+            "bronze" => parts.push("lutrgb=r=1.10:g=1.04:b=0.88".to_string()),
+            // natural 及其它未知预设：不加 lutrgb（保持原色）
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
+}
+
 /// 为 shape=="text" 的蒙版生成 drawtext 滤镜语句（自包含的多语句滤镜图）。
 /// 产出 RGBA 蒙版流（黑底白字，luma=字形覆盖度），供 graph.rs 用 alphamerge 合到主视频。
 pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64) -> Option<ImageMask> {
@@ -1058,6 +1112,57 @@ mod tests {
         assert_eq!(ffmpeg::degrade_filter("overlay"), Some("overlay".to_string()));
         assert_eq!(ffmpeg::degrade_filter("hflip"), Some("hflip".to_string()));
     }
+
+    // ── 美颜 build_beauty_spec ──
+
+    fn beauty(enabled: bool, smoothing: f64, whitening: f64, clarity: f64, skin: &str, mask: &str) -> Option<BeautyConfig> {
+        Some(BeautyConfig {
+            enabled,
+            smoothing,
+            whitening,
+            clarity,
+            skin_tone: skin.to_string(),
+            mask_asset_id: if mask.is_empty() { None } else { Some(mask.to_string()) },
+        })
+    }
+
+    #[test]
+    fn test_beauty_none_and_disabled() {
+        assert!(build_beauty_spec(&None, 0, 0).is_none());
+        assert!(build_beauty_spec(&beauty(false, 60.0, 0.0, 0.0, "none", ""), 0, 0).is_none());
+        // 全 0 且 skin_tone==none → None
+        assert!(build_beauty_spec(&beauty(true, 0.0, 0.0, 0.0, "none", ""), 0, 0).is_none());
+    }
+
+    #[test]
+    fn test_beauty_smoothing_has_bilateral() {
+        let s = build_beauty_spec(&beauty(true, 60.0, 0.0, 0.0, "none", ""), 0, 0).unwrap();
+        assert!(s.contains("bilateral="), "应含 bilateral，实际: {}", s);
+        assert!(s.contains("sigmaS=") && s.contains("sigmaR="));
+    }
+
+    #[test]
+    fn test_beauty_warm_skin_tone() {
+        let s = build_beauty_spec(&beauty(true, 0.0, 0.0, 0.0, "warm", ""), 0, 0).unwrap();
+        assert!(s.contains("lutrgb=r=1.08:b=0.95"), "warm 预设应含 r=1.08:b=0.95，实际: {}", s);
+    }
+
+    #[test]
+    fn test_beauty_full_chain_order() {
+        // smoothing=60, whitening=40, clarity=30, skinTone='warm'
+        let s = build_beauty_spec(&beauty(true, 60.0, 40.0, 30.0, "warm", ""), 0, 0).unwrap();
+        assert!(s.contains("bilateral="));
+        assert!(s.contains("eq=brightness=0.1:saturation=0.94"), "实际: {}", s);
+        assert!(s.contains("unsharp=luma_msize_x=5:luma_msize_y=5:luma_amount=0.45"), "实际: {}", s);
+        assert!(s.contains("lutrgb=r=1.08:b=0.95"));
+        // 顺序：bilateral,eq,unsharp,lutrgb
+        let bp = s.find("bilateral=").unwrap();
+        let ep = s.find("eq=").unwrap();
+        let up = s.find("unsharp=").unwrap();
+        let lp = s.find("lutrgb=").unwrap();
+        assert!(bp < ep && ep < up && up < lp);
+    }
+
 
     // ── 滤镜注册表 ──
 

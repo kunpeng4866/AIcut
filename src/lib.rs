@@ -20,6 +20,7 @@ pub mod plugin;
 pub mod tts;
 pub mod speech;
 pub mod keying;
+pub mod beauty;
 pub mod timeline;
 pub mod clock;
 pub mod pipeline;
@@ -289,6 +290,11 @@ pub fn keying_generate(input: &str, opts_json: &str) -> Result<serde_json::Value
     keying::keying_generate(input, opts_json)
 }
 
+/// 美颜·皮肤管理：调用 Python 桥生成皮肤区域 mask（灰度 mp4），返回 mask 路径/尺寸/帧率等 JSON。
+pub fn beauty_generate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
+    beauty::beauty_generate(input, opts_json)
+}
+
 // ═══════════════════��� N-API 绑定（条件编译） ════════════════════
 
 /// N-API 导出层。需 `cargo build --features napi` 激活。
@@ -359,7 +365,7 @@ mod tests {
             time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None, transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
         }
     }
 

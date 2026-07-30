@@ -802,7 +802,7 @@ fn test_project_io_roundtrip_with_tracks() {
                 timeline_in: 0.0, timeline_out: 5.0,
                 transform: aicut_engine::project::Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                 volume: 1.0, speed: 1.0,
-                effects: vec![], masks: vec![], keying: None, filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: aicut_engine::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() }, text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0,
+                effects: vec![], masks: vec![], keying: None, filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: aicut_engine::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() }, text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, beauty: None,
             }],
             ..Default::default()
         }],

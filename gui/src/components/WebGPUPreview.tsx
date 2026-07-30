@@ -7,6 +7,7 @@ import { useProjectStore } from '../store/projectStore';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
 import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
+import { applyBeauty, drawBeautyMaskFrame } from '../utils/beautyRender';
 
 // 文件路径转 aicut-asset:// URL（与 PreviewCanvas 内 pathToUrl 保持一致；此处本地副本避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -158,6 +159,9 @@ export function useWebGPUPreview({
   // 智能抠像（smart）matte 视频缓存：matteAssetId → 隐藏 <video>；离屏 canvas 复用。
   const matteVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 美颜（beauty）skin_mask 视频缓存：maskAssetId → 隐藏 <video>；离屏 canvas 复用。
+  const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // 当前工程（含 assets），供按 matteAssetId 查真实路径。直接写 ref 避免触发重渲染。
   const projectRef = useRef(useProjectStore.getState().project);
   projectRef.current = useProjectStore((s) => s.project);
@@ -207,6 +211,21 @@ export function useWebGPUPreview({
     if (!mctx) return null;
     mctx.drawImage(video, 0, 0, targetW, targetH);
     return mc;
+  };
+
+  // 美颜（beauty）取当前时刻的 skin_mask 帧（灰度）绘制到离屏 canvas 并返回。
+  // 与 getMatteFrame 完全对称，仅资产 id 指向 skin_mask 而非 matte。未就绪返回 null。
+  const getBeautyMaskFrame = (
+    maskAssetId: string,
+    srcTime: number,
+    srcPaused: boolean,
+    srcRate: number,
+    targetW: number,
+    targetH: number,
+  ): HTMLCanvasElement | null => {
+    const asset = projectRef.current?.assets?.find((a) => a.id === maskAssetId);
+    if (!asset) return null;
+    return drawBeautyMaskFrame(pathToUrl(asset.path), beautyVideoCacheRef, beautyCanvasRef, srcTime, srcPaused, srcRate, targetW, targetH);
   };
 
   // 背景合成（P3）：取当前时刻的背景帧，供 compositeBackground 垫在 keyed 之下。
@@ -400,6 +419,10 @@ export function useWebGPUPreview({
       matteVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); (v as any).load?.(); } catch (_) {} });
       matteVideoCacheRef.current.clear();
       matteCanvasRef.current = null;
+      // 释放美颜 skin_mask 视频缓存
+      beautyVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); (v as any).load?.(); } catch (_) {} });
+      beautyVideoCacheRef.current.clear();
+      beautyCanvasRef.current = null;
     };
   }, [enabled, canvasWidth, canvasHeight]);
 
@@ -544,6 +567,36 @@ export function useWebGPUPreview({
               }
             } catch {
               /* 背景合成失败则回退 keyed 帧 */
+            }
+          }
+
+          // 美颜（beauty）实时预览合成：在抠像/背景之后，把灰度 skin_mask 的 luma 作为权重，
+          // 对皮肤区域做磨皮/美白/清晰/肤色。与智能抠像对称：先取当前时刻 mask 帧并与源视频同步 currentTime，
+          // 再 applyBeauty（就地修改 uploadSource）。注意读取 clip.beauty.maskAssetId（非 keying.matteAssetId）。
+          if (clip.beauty && clip.beauty.enabled && clip.beauty.maskAssetId) {
+            try {
+              const srcVideo = videoRefs.current.get(clip.id) || null;
+              const srcTime = srcVideo ? srcVideo.currentTime : currentTimeRef.current;
+              const srcPaused = srcVideo ? srcVideo.paused : true;
+              const srcRate = srcVideo ? srcVideo.playbackRate : 1;
+              const maskCanvas = getBeautyMaskFrame(clip.beauty.maskAssetId, srcTime, srcPaused, srcRate, vw, vh);
+              if (maskCanvas) {
+                // uploadSource 可能不是 canvas（纯 <video>/ImageBitmap）：先落到离屏 canvas 再就地美颜，避免直接改写源元素
+                if (!(uploadSource instanceof HTMLCanvasElement)) {
+                  const tc = document.createElement('canvas');
+                  tc.width = vw; tc.height = vh;
+                  const tctx = tc.getContext('2d');
+                  if (tctx) {
+                    tctx.drawImage(uploadSource, 0, 0, vw, vh);
+                    uploadSource = tc;
+                  }
+                }
+                if (uploadSource instanceof HTMLCanvasElement) {
+                  applyBeauty(uploadSource, maskCanvas, clip.beauty);
+                }
+              }
+            } catch {
+              /* 美颜失败则回退原帧 */
             }
           }
 

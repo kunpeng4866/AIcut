@@ -14,6 +14,7 @@ import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
 import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
+import { applyBeauty, drawBeautyMaskFrame } from '../utils/beautyRender';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -159,7 +160,7 @@ const theme = {
 // 再用 rAF 把视频当前帧 drawImage 到可见 canvas 并 applyKeying，透明区露出下层 DOM。
 // 与 WebGPUPreview 的 applyKeying 调用点对称：均在「蒙版合成之后」对最终帧做抠像。
 const KeyedCanvas = ({
-  clip, asset, outStyle, videoRefs, onLoadedMetadata, onTogglePlay, matteAsset, assets,
+  clip, asset, outStyle, videoRefs, onLoadedMetadata, onTogglePlay, matteAsset, beautyMaskAsset, assets,
 }: {
   clip: ClipConfig;
   asset: AssetConfig;
@@ -168,6 +169,7 @@ const KeyedCanvas = ({
   onLoadedMetadata: () => void;
   onTogglePlay: () => void;
   matteAsset?: AssetConfig;
+  beautyMaskAsset?: AssetConfig;
   assets: AssetConfig[];
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -175,6 +177,9 @@ const KeyedCanvas = ({
   // 智能抠像（smart）：隐藏 matte 视频 + 离屏 canvas
   const matteVideoRef = useRef<HTMLVideoElement | null>(null);
   const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 美颜（beauty）：隐藏 skin_mask 视频缓存（按 path 索引）+ 离屏 canvas（与 matte 对称）
+  const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // 背景合成（P3）：隐藏背景图片/视频元素，垫在 keyed 之下
   const bgVideoRef = useRef<HTMLVideoElement | null>(null);
   const bgImageRef = useRef<HTMLImageElement | null>(null);
@@ -287,6 +292,15 @@ const KeyedCanvas = ({
               if (ctx) ctx.drawImage(drawn, 0, 0);
             }
           }
+          // 美颜（beauty）：在抠像绘制之后，取 skin_mask 帧并对绘制后的可见画布 applyBeauty（作用域限于皮肤区域）
+          // 注意读取 clip.beauty.maskAssetId（非 keying.matteAssetId）。
+          if (beautyMaskAsset && clip.beauty?.enabled && clip.beauty.maskAssetId) {
+            const maskCanvas = drawBeautyMaskFrame(pathToUrl(beautyMaskAsset.path), beautyVideoCacheRef, beautyCanvasRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
+            if (maskCanvas) {
+              const bctx = canvas.getContext('2d');
+              if (bctx) applyBeauty(canvas, maskCanvas, clip.beauty);
+            }
+          }
         } catch {
           /* 抠像失败则本帧跳过，保留上一帧 */
         }
@@ -299,11 +313,89 @@ const KeyedCanvas = ({
       const mv = matteVideoRef.current;
       if (mv) { try { mv.pause(); mv.removeAttribute('src'); mv.load(); } catch (_) {} matteVideoRef.current = null; }
       matteCanvasRef.current = null;
+      beautyVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (_) {} });
+      beautyVideoCacheRef.current.clear();
+      beautyCanvasRef.current = null;
       const bv = bgVideoRef.current;
       if (bv) { try { bv.pause(); bv.removeAttribute('src'); bv.load(); } catch (_) {} bgVideoRef.current = null; }
       bgImageRef.current = null;
     };
-  }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isMatte, matteAsset]);
+  }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isMatte, matteAsset, beautyMaskAsset]);
+
+  return (
+    <>
+      <video
+        key={`${clip.id}__src`}
+        ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
+        src={asset ? pathToUrl(asset.path) : ''}
+        style={{ display: 'none' }}
+        onLoadedMetadata={onLoadedMetadata}
+        muted
+        playsInline
+      />
+      <canvas
+        ref={canvasRef}
+        style={{ ...outStyle, pointerEvents: 'auto' }}
+        onClick={onTogglePlay}
+      />
+    </>
+  );
+};
+
+// 美颜画布（HTML5 回退路径，纯美颜无抠像）：与 KeyedCanvas 对称，但只做 skin_mask 美颜合成，
+// 不牵涉 chroma/matte/背景。隐藏源 <video>（注册到 videoRefs，复用播放/暂停驱动），rAF 把当前帧
+// drawImage 到可见 canvas 后 applyBeauty。源未启用抠像时走此路径（WebGPU 路径对每轨统一处理）。
+const BeautyCanvas = ({
+  clip, asset, outStyle, videoRefs, onLoadedMetadata, onTogglePlay, maskAsset, assets,
+}: {
+  clip: ClipConfig;
+  asset: AssetConfig;
+  outStyle: React.CSSProperties;
+  videoRefs: React.MutableRefObject<Map<string, HTMLVideoElement>>;
+  onLoadedMetadata: () => void;
+  onTogglePlay: () => void;
+  maskAsset?: AssetConfig;
+  assets: AssetConfig[];
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 美颜（beauty）：隐藏 skin_mask 视频缓存（按 path 索引）+ 离屏 canvas
+  const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const canvas = canvasRef.current;
+      const v = videoRefs.current.get(clip.id);
+      if (canvas && v && v.readyState >= 2) {
+        const vw = v.videoWidth || asset?.width || 1280;
+        const vh = v.videoHeight || asset?.height || 720;
+        if (canvas.width !== vw) canvas.width = vw;
+        if (canvas.height !== vh) canvas.height = vh;
+        try {
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(v, 0, 0, vw, vh);
+            // 取 skin_mask 帧（与源视频同步 currentTime）并 applyBeauty（读取 clip.beauty.maskAssetId）
+            if (maskAsset && clip.beauty?.enabled && clip.beauty.maskAssetId) {
+              const maskCanvas = drawBeautyMaskFrame(pathToUrl(maskAsset.path), beautyVideoCacheRef, beautyCanvasRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
+              if (maskCanvas) applyBeauty(canvas, maskCanvas, clip.beauty);
+            }
+          }
+        } catch {
+          /* 美颜失败则本帧跳过，保留上一帧 */
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      beautyVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (_) {} });
+      beautyVideoCacheRef.current.clear();
+      beautyCanvasRef.current = null;
+    };
+  }, [clip.id, clip.beauty, asset?.width, asset?.height, videoRefs, maskAsset]);
 
   return (
     <>
@@ -1275,6 +1367,12 @@ export default function PreviewCanvas() {
                 // 抠像（HTML5 回退）：chroma / smart 模式用 KeyedCanvas 像素合成，替代原 video 元素。
                 const isKeying = !!(clip.keying && clip.keying.enabled &&
                   (clip.keying.mode === 'chroma' || clip.keying.mode === 'smart' || clip.keying.mode === 'manual'));
+                // 美颜（HTML5 回退）：skin_mask 美颜合成。纯美颜（无抠像）用 BeautyCanvas；
+                // 与抠像并存时走 KeyedCanvas 并在其内部叠加美颜。注意读取 clip.beauty.maskAssetId。
+                const isBeauty = !!(clip.beauty && clip.beauty.enabled && clip.beauty.maskAssetId);
+                const beautyMaskAsset = isBeauty
+                  ? project.assets.find((a) => a.id === clip.beauty!.maskAssetId)
+                  : undefined;
                 if (isKeying) {
                   // 智能抠像（smart）需要按 matteAssetId 取出真实 matte 资产路径
                   const matteAsset = ((clip.keying?.mode === 'smart' || clip.keying?.mode === 'manual') && clip.keying.matteAssetId)
@@ -1290,6 +1388,7 @@ export default function PreviewCanvas() {
                       onLoadedMetadata={onLoadedMetadataFor(clip)}
                       onTogglePlay={handleTogglePlay}
                       matteAsset={matteAsset}
+                      beautyMaskAsset={beautyMaskAsset}
                       assets={project.assets}
                     />
                   );
@@ -1299,6 +1398,27 @@ export default function PreviewCanvas() {
                       {keyedEl}
                     </div>
                   ) : keyedEl;
+                }
+                // 纯美颜（无抠像）：用 BeautyCanvas 像素合成替代原 video 元素
+                if (isBeauty && beautyMaskAsset) {
+                  const beautyEl = (
+                    <BeautyCanvas
+                      key={clip.id}
+                      clip={clip}
+                      asset={asset}
+                      outStyle={outStyle}
+                      videoRefs={videoRefs}
+                      onLoadedMetadata={onLoadedMetadataFor(clip)}
+                      onTogglePlay={handleTogglePlay}
+                      maskAsset={beautyMaskAsset}
+                      assets={project.assets}
+                    />
+                  );
+                  return shadowFilter ? (
+                    <div key={clip.id} style={{ position: 'absolute', inset: 0, filter: shadowFilter, pointerEvents: 'none' }}>
+                      {beautyEl}
+                    </div>
+                  ) : beautyEl;
                 }
                 return shadowFilter ? (
                   <div key={clip.id} style={{ position: 'absolute', inset: 0, filter: shadowFilter, pointerEvents: 'none' }}>
