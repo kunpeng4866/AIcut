@@ -494,14 +494,34 @@ pub struct KeyingSpec {
 
 /// 将 KeyingConfig 转换为 FFmpeg chromakey 滤镜串（M1 仅支持 chroma 模式）。
 /// - 非 enabled 或非 chroma 模式 → 返回 None（不挂载滤镜）。
-/// - chromakey 接受 0xRRGGBB 颜色；spill 在 M1 仅前端预览生效，后端用 chromakey 近似。
+/// - chromakey 接受 0xRRGGBB 颜色。
+/// - 溢出抑制 spill：预览（keyingRender.ts）对保留像素按键色主通道去除绿/红/蓝溢光；
+///   此前后端未实现 → 预览/导出不一致。此处用 ffmpeg `despill` 补齐，type 与预览一致
+///   （按键色主通道选 green/red/blue），mix=spill（0..1 抑制强度）。spill<=0 时不挂滤镜，
+///   保持与历史行为一致。
 pub fn build_keying_spec(keying: &Option<KeyingConfig>, _w: u32, _h: u32) -> Option<KeyingSpec> {
     let k = match keying { Some(k) if k.enabled && k.mode == "chroma" => k, _ => return None };
     let hex = k.color.trim_start_matches('#');
     let color_arg = format!("0x{}", hex); // chromakey 接受 0xRRGGBB
     let sim = fmt(k.similarity);
     let blend = fmt(k.edge_softness);
-    let f = format!("chromakey=color={}:similarity={}:blend={}", color_arg, sim, blend);
+    let mut f = format!("chromakey=color={}:similarity={}:blend={}", color_arg, sim, blend);
+    if k.spill > 0.0 {
+        // 解析键色主通道（与预览 keyingRender.ts 一致：green 优先，其次 red，否则 blue）
+        let h = if hex.len() >= 6 { &hex[0..6] } else { "00ff00" };
+        let cr = u8::from_str_radix(&h[0..2], 16).unwrap_or(0);
+        let cg = u8::from_str_radix(&h[2..4], 16).unwrap_or(0);
+        let cb = u8::from_str_radix(&h[4..6], 16).unwrap_or(0);
+        let stype = if cg >= cr && cg >= cb {
+            "green"
+        } else if cr >= cg && cr >= cb {
+            "red"
+        } else {
+            "blue"
+        };
+        let mix = fmt(k.spill.min(1.0));
+        f.push_str(&format!(",despill=type={}:mix={}", stype, mix));
+    }
     Some(KeyingSpec { filter: Some(f) })
 }
 
@@ -1071,6 +1091,59 @@ mod tests {
         assert!((clamp(0.5, 0.0, 1.0) - 0.5).abs() < 0.001);
         assert!((clamp(-1.0, 0.0, 1.0) - 0.0).abs() < 0.001);
         assert!((clamp(2.0, 0.0, 1.0) - 1.0).abs() < 0.001);
+    }
+
+    // ── 抠像 spill 溢出抑制导出 ──
+
+    fn mk_keying(enabled: bool, mode: &str, color: &str, spill: f64) -> KeyingConfig {
+        KeyingConfig {
+            enabled,
+            mode: mode.to_string(),
+            color: color.to_string(),
+            similarity: 0.3,
+            edge_softness: 0.1,
+            spill,
+            model: None,
+            threshold: None,
+            matte_asset_id: None,
+            background: None,
+        }
+    }
+
+    #[test]
+    fn test_build_keying_spec_spill_green_despill() {
+        // 绿幕（主通道 green）+ spill>0 → 应追加 despill=type=green
+        let k = Some(mk_keying(true, "chroma", "#00ff00", 0.5));
+        let spec = build_keying_spec(&k, 1920, 1080).expect("应生成 chromakey");
+        let f = spec.filter.unwrap();
+        assert!(f.contains("chromakey="), "应含 chromakey: {}", f);
+        assert!(f.contains("despill=type=green:mix=0.5"), "应含 despill green: {}", f);
+    }
+
+    #[test]
+    fn test_build_keying_spec_spill_red_blue_type() {
+        let red = Some(mk_keying(true, "chroma", "#ff0000", 0.5));
+        let f_red = build_keying_spec(&red, 100, 100).unwrap().filter.unwrap();
+        assert!(f_red.contains("despill=type=red:mix=0.5"), "红幕应 red: {}", f_red);
+
+        let blue = Some(mk_keying(true, "chroma", "#0000ff", 0.5));
+        let f_blue = build_keying_spec(&blue, 100, 100).unwrap().filter.unwrap();
+        assert!(f_blue.contains("despill=type=blue:mix=0.5"), "蓝幕应 blue: {}", f_blue);
+    }
+
+    #[test]
+    fn test_build_keying_spec_no_spill_backward_compat() {
+        // spill<=0 → 不挂 despill，保持历史行为（无溢出抑制）
+        let k = Some(mk_keying(true, "chroma", "#00ff00", 0.0));
+        let f = build_keying_spec(&k, 1920, 1080).unwrap().filter.unwrap();
+        assert!(f.contains("chromakey="), "应含 chromakey: {}", f);
+        assert!(!f.contains("despill"), "spill=0 不应含 despill: {}", f);
+    }
+
+    #[test]
+    fn test_build_keying_spec_disabled_or_smart_no_filter() {
+        assert!(build_keying_spec(&Some(mk_keying(false, "chroma", "#00ff00", 0.5)), 100, 100).is_none());
+        assert!(build_keying_spec(&Some(mk_keying(true, "smart", "#00ff00", 0.5)), 100, 100).is_none());
     }
 }
 
