@@ -268,7 +268,11 @@ fn main() {
             let mut opts_val: serde_json::Value = serde_json::from_str(&opts)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
             if let serde_json::Value::Object(ref mut map) = opts_val {
-                map.insert("mode".to_string(), serde_json::Value::String(mode.clone()));
+                // 仅当 opts 未自带 mode 时（CLI 直跑路径）才用 CLI --mode 注入；
+                // GUI 路径前端已在 optsJson 内塞入真实 mode，用 or_insert 绝不覆盖，
+                // 修复「manual 被强制覆盖成 matte、guide 被忽略」的隐藏 bug。
+                map.entry("mode".to_string())
+                    .or_insert_with(|| serde_json::Value::String(mode.clone()));
             }
             let opts_merged = serde_json::to_string(&opts_val).unwrap_or_else(|_| opts.clone());
             match mode.as_str() {

@@ -2,7 +2,7 @@
 // 三种模式（chroma / smart / manual）共享统一的面板布局、滑块手感与禁用态；吸管取色既可用作键色也可用于背景纯色。
 // 写入方式：结构变更（启用/模式/颜色/模型/生成）走 updateClip（拖前 pushHistorySnapshot），
 //           参数拖动（阈值/柔化/相似度/溢出）走 updateClipLive。
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { createDefaultKeying, uid } from '../../utils/clipFactories';
@@ -154,8 +154,12 @@ function matteOutputPath(assetPath: string): string {
 // 约定（与 python/keying/core.py generate_manual_matte 对齐）：
 //   前景涂抹 = 不透明白色 (R=255,A=255)；背景涂抹 = 不透明黑色 (R=0,A=255)；未涂抹 = A=0 透明。
 type Brush = 'fg' | 'bg' | 'erase';
-function ManualPaintCanvas({ videoPath, canvasRef }: { videoPath: string; canvasRef: React.RefObject<HTMLCanvasElement> }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+function ManualPaintCanvas({ videoPath, canvasRef, videoRef, currentFrame, fps, frameCount, onFrameChange, savedGuide, onCapture, onClearFrame, guidesRef }: {
+  videoPath: string; canvasRef: React.RefObject<HTMLCanvasElement>; videoRef: React.RefObject<HTMLVideoElement>;
+  currentFrame: number; fps: number; frameCount: number; onFrameChange: (f: number) => void;
+  savedGuide: string | null; onCapture: (f: number, url: string) => void; onClearFrame: (f: number) => void;
+  guidesRef: React.MutableRefObject<Map<number, string>>;
+}) {
   const [brush, setBrush] = useState<Brush>('fg');
   const [brushSize, setBrushSize] = useState(22);
   const [aspect, setAspect] = useState(16 / 9);
@@ -171,6 +175,11 @@ function ManualPaintCanvas({ videoPath, canvasRef }: { videoPath: string; canvas
     c.width = Math.max(1, Math.round(nw * scale));
     c.height = Math.max(1, Math.round(nh * scale));
     c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+    if (savedGuide) {
+      const img = new Image();
+      img.onload = () => c.getContext('2d')?.drawImage(img, 0, 0);
+      img.src = savedGuide;
+    }
     setAspect(nw / nh);
   };
   const pos = (e: ReactPointerEvent) => {
@@ -194,25 +203,62 @@ function ManualPaintCanvas({ videoPath, canvasRef }: { videoPath: string; canvas
   const onMove = (e: ReactPointerEvent) => { if (!drawing.current) return; const p = pos(e); stroke(p.x, p.y); };
   const onUp = () => { drawing.current = false; last.current = null; };
   const undo = () => { const c = canvasRef.current; if (!c) return; const d = undoStack.current.pop(); if (!d) return; const img = new Image(); img.onload = () => { const ctx = c.getContext('2d')!; ctx.clearRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0); }; img.src = d; };
-  const clear = () => { const c = canvasRef.current; if (!c) return; c.getContext('2d')!.clearRect(0, 0, c.width, c.height); };
+
+  // 逐帧 refine：切换 currentFrame 时 seek 视频到对应时间，并把本帧已存的 guide 还原（无则清空）
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) v.currentTime = currentFrame / fps;
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (savedGuide) {
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0);
+      img.src = savedGuide;
+    }
+  }, [currentFrame, fps, savedGuide, videoRef, canvasRef]);
 
   const btn = (active: boolean) => ({ ...S.btn, ...(active ? S.btnActive : {}) });
+  const maxFrame = Math.max(0, frameCount - 1);
   return (
     <div>
       <div style={{ position: 'relative', width: '100%', aspectRatio: String(aspect), background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 8 }}>
-        <video ref={videoRef} src={videoPath} muted playsInline loop autoPlay
+        <video ref={videoRef} src={videoPath} muted playsInline
           onLoadedMetadata={setupCanvas}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 1, pointerEvents: 'none' }} />
         <canvas ref={canvasRef}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', cursor: 'crosshair', touchAction: 'none', zIndex: 2, pointerEvents: 'auto' }} />
       </div>
+
+      {/* 帧导航 */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6, alignItems: 'center' }}>
+        <button style={S.btn} disabled={currentFrame <= 0 || frameCount <= 1} onClick={() => onFrameChange(Math.max(0, currentFrame - 1))}>上一帧</button>
+        <input type="range" min={0} max={maxFrame} step={1} value={currentFrame}
+          onChange={(e) => onFrameChange(parseInt(e.target.value) || 0)}
+          style={{ flex: 1, accentColor: '#e94560' }} />
+        <button style={S.btn} disabled={currentFrame >= maxFrame || frameCount <= 1} onClick={() => onFrameChange(Math.min(maxFrame, currentFrame + 1))}>下一帧</button>
+      </div>
+      <div style={{ color: '#aaa', fontSize: 11, marginBottom: 6 }}>
+        帧 {currentFrame} / {maxFrame}{savedGuide ? '   ● 已涂' : ''}
+      </div>
+      {guidesRef.current.size > 0 && (
+        <div style={{ color: '#8895b3', fontSize: 10, marginBottom: 6, lineHeight: 1.4 }}>
+          已采集 {guidesRef.current.size} 帧：{Array.from(guidesRef.current.keys()).sort((a, b) => a - b).join(', ')}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
+        <button style={S.btn} onClick={() => onCapture(currentFrame, canvasRef.current?.toDataURL('image/png') || '')}>捕获当前帧</button>
+        <button style={S.btn} disabled={!savedGuide} onClick={() => onClearFrame(currentFrame)}>清空当前帧</button>
+      </div>
+
       <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
         <button style={btn(brush === 'fg')} onClick={() => setBrush('fg')}>前景</button>
         <button style={btn(brush === 'bg')} onClick={() => setBrush('bg')}>背景</button>
         <button style={btn(brush === 'erase')} onClick={() => setBrush('erase')}>橡皮</button>
         <button style={S.btn} onClick={undo}>撤销</button>
-        <button style={S.btn} onClick={clear}>清空</button>
       </div>
       <div style={{ ...S.row, marginBottom: 8 }}>
         <span style={S.label}>笔刷</span>
@@ -241,6 +287,28 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const paintCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // 逐帧 refine（前端）：按帧采集 guide 并打包成 guides 数组
+  const guidesRef = useRef<Map<number, string>>(new Map()); // frameIndex -> dataURL
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [frameCount, setFrameCount] = useState(0);
+  const [guidesVersion, setGuidesVersion] = useState(0); // 触发已采集帧提示刷新
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fps = srcAsset?.fps ?? 30;
+
+  // 拿到视频元数据后计算总帧数
+  useEffect(() => {
+    const dur = srcAsset?.duration ?? 0;
+    setFrameCount(Math.max(1, Math.round(dur * (srcAsset?.fps ?? 30))));
+  }, [srcAsset?.duration, srcAsset?.fps, srcAsset?.id]);
+
+  const handleCapture = (f: number, url: string) => { guidesRef.current.set(f, url); setGuidesVersion((v) => v + 1); };
+  const handleClearFrame = (f: number) => {
+    guidesRef.current.delete(f);
+    const c = paintCanvasRef.current;
+    if (c) c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+    setGuidesVersion((v) => v + 1);
+  };
 
   // 未启用：提供一键开启（用默认 chroma 配置）
   if (!keying) {
@@ -389,9 +457,9 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       const ma = store.project.assets.find((a) => a.id === keying.matteAssetId);
       if (ma && ma.path) smartMattePath = ma.path;
     }
-    const guide = paintCanvasRef.current?.toDataURL('image/png') || '';
-    if (!guide) {
-      alert('请先在画布上涂抹前景/背景');
+    const guides = Array.from(guidesRef.current.entries()).map(([frame, dataUrl]) => ({ frame, dataUrl }));
+    if (guides.length === 0) {
+      alert('请至少在当前帧涂抹并点击「捕获当前帧」');
       return;
     }
     const base = matteOutputPath(assetPath).replace(/_matte\.mp4$/, '');
@@ -402,7 +470,7 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       pushHistorySnapshot();
       const res = await (window as unknown as { aicut: { keying: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.keying.generate(
         assetPath,
-        JSON.stringify({ mode: 'manual', guide, smartMattePath, threshold, softness, fps: asset.fps ?? 30, output })
+        JSON.stringify({ mode: 'manual', guides, smartMattePath, threshold, softness, fps: asset.fps ?? 30, output })
       );
       if (!res?.success) throw new Error(res?.error || '手动抠像失败');
       const result = (res.data ?? {}) as { error?: string; mattePath: string; duration: number; width: number; height: number; fps: number };
@@ -509,7 +577,19 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
           </div>
 
           {srcAsset?.path && (
-            <ManualPaintCanvas videoPath={pathToUrl(srcAsset.path)} canvasRef={paintCanvasRef} />
+            <ManualPaintCanvas
+              videoPath={pathToUrl(srcAsset.path)}
+              canvasRef={paintCanvasRef}
+              videoRef={videoRef}
+              currentFrame={currentFrame}
+              fps={fps}
+              frameCount={frameCount}
+              onFrameChange={setCurrentFrame}
+              savedGuide={guidesRef.current.get(currentFrame) ?? null}
+              onCapture={handleCapture}
+              onClearFrame={handleClearFrame}
+              guidesRef={guidesRef}
+            />
           )}
 
           {keying.matteAssetId ? (

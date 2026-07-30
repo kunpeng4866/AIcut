@@ -332,7 +332,11 @@ ipcMain.handle('speech:separate', async (_e, input: string, optsJson: string) =>
 // ── 智能抠像 ──
 ipcMain.handle('keying:generate', async (_e, input: string, optsJson: string) => {
   try {
-    const stdout = await callEngine('keying', '--mode', 'matte', '--input', input ?? '', '--opts', optsJson ?? '');
+    // GUI 路径：前端已在 optsJson 内塞入真实 mode（matte/manual），
+    // 绝不可像旧版那样硬编码 'matte' 覆盖，否则 manual 会被当成智能抠像、guide 被忽略。
+    const opts = JSON.parse(optsJson ?? '{}');
+    const mode = opts?.mode ?? 'matte';
+    const stdout = await callEngine('keying', '--mode', mode, '--input', input ?? '', '--opts', optsJson ?? '');
     const data = JSON.parse(stdout);
     return { success: true, data };
   } catch (e: any) {
