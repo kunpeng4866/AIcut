@@ -84,10 +84,21 @@ fn is_chroma_keyframed(c: &Clip) -> bool {
         .any(|p| c.keyframes.contains_key(*p))
 }
 
-/// 把打了关键帧的 chroma 抠像参数按时间线切分为若干段；返回 (本地开始, 本地结束, 该段有效 KeyingConfig)。
+/// 是否 smart/manual 抠像且 threshold/edgeSoftness 中存在关键帧。
+fn is_matte_keyframed(c: &Clip) -> bool {
+    let Some(k) = &c.keying else { return false; };
+    if !k.enabled || !(k.mode == "smart" || k.mode == "manual") { return false; }
+    ["keying.threshold", "keying.edgeSoftness"]
+        .iter()
+        .any(|p| c.keyframes.contains_key(*p))
+}
+
+/// 把打了关键帧的抠像参数按时间线切分为若干段；返回 (本地开始, 本地结束, 该段有效 KeyingConfig)。
+/// 采样范围覆盖所有模式相关参数（chroma: similarity/edgeSoftness/spill；smart/manual: threshold/edgeSoftness），
+/// 无关模式的参数无轨道时回退原值，对其它模式无副作用。
 fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
     let mut times: Vec<f64> = Vec::new();
-    for key in ["keying.similarity", "keying.edgeSoftness", "keying.spill"] {
+    for key in ["keying.similarity", "keying.edgeSoftness", "keying.spill", "keying.threshold"] {
         if let Some(track) = c.keyframes.get(key) {
             for kf in &track.keyframes {
                 if kf.time > c.timeline_in && kf.time < c.timeline_out {
@@ -110,6 +121,7 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
         k.similarity = sample_keying(c, "keying.similarity", k.similarity, mid);
         k.edge_softness = sample_keying(c, "keying.edgeSoftness", k.edge_softness, mid);
         k.spill = sample_keying(c, "keying.spill", k.spill, mid);
+        k.threshold = Some(sample_keying(c, "keying.threshold", k.threshold.unwrap_or(0.5), mid));
         out.push((g0 - c.timeline_in, g1 - c.timeline_in, k));
     }
     out
@@ -154,9 +166,22 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     pre.push_str(&format!("[{}]", pre_label));
     nodes.push(pre);
 
-    // 2) 抠像：chroma 模式用 chromakey（作用于 YUV），必须在蒙版/alphamerge 之前施加；
-    // 若 similarity/edgeSoftness/spill 有关键帧，则按关键帧边界切分段，每段烘焙不同的 chromakey 值。
+    // 2) 抠像：chroma 用 chromakey（作用于 YUV）；smart/manual 用 matte alphamerge。
+    // 若相关参数（chroma: similarity/edgeSoftness/spill；smart/manual: threshold/edgeSoftness）
+    // 存在关键帧，则按关键帧边界切段、每段烘焙采样值（分段 + split 防止 ffmpeg 分辨率协商 -22）。
     let keyed_label = format!("{}k", label);
+
+    // 智能/手动抠像 matte 输入索引（smart / manual 模式 + matte_asset_id 命中时 Some；
+    // 两者都走 matte 视频 alphamerge，与模式无关）
+    let matte_idx = c.keying.as_ref().and_then(|k| {
+        if k.enabled && (k.mode == "smart" || k.mode == "manual") {
+            k.matte_asset_id.as_ref().and_then(|id| matte_map.get(id).copied())
+        } else { None }
+    });
+    // smart/manual 抠像且 threshold/edgeSoftness 关键帧已就绪（matte 必须存在），
+    // 命中时抠像在下方按段烘焙，需跳过后续静态 matte alphamerge 块。
+    let matte_keyframed = is_matte_keyframed(c) && matte_idx.is_some();
+
     if is_chroma_keyframed(c) {
         let segs = keying_segments(c);
         let n = segs.len();
@@ -174,11 +199,68 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
         for (i, (s0, s1, kcfg)) in segs.iter().enumerate() {
             let seg_label = format!("{}s{}", label, i);
             seg_labels.push(seg_label.clone());
+            // 帧精确边界：秒级 trim 在 concat 边界因浮点精度会错分边界帧（重复上一帧），
+            // 改用 start_frame/end_frame 确保各段帧区间干净衔接。
+            let sf = ((*s0) * (fps as f64)).round() as i64;
+            let mut ef = ((*s1) * (fps as f64)).round() as i64;
+            if ef <= sf { ef = sf + 1; }
             let kcfg = kcfg.clone();
             let kf = build_keying_spec(&Some(kcfg), w, h).unwrap().filter.unwrap();
             nodes.push(format!(
-                "[{pre}]trim=start={s}:end={e},setpts=PTS-STARTPTS,{kf}[{seg}]",
-                pre = split_outs[i], s = fmt(*s0), e = fmt(*s1), kf = kf, seg = seg_label
+                "[{pre}]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,{kf}[{seg}]",
+                pre = split_outs[i], sf = sf, ef = ef, kf = kf, seg = seg_label
+            ));
+        }
+        let inputs = seg_labels.iter().map(|s| format!("[{}]", s)).collect::<String>();
+        nodes.push(format!("{}concat=n={}:v=1:a=0[{}]", inputs, seg_labels.len(), keyed_label));
+    } else if matte_keyframed {
+        let segs = keying_segments(c); // 每段烘焙 threshold/edgeSoftness
+        let n = segs.len();
+        // 同 chroma：split=N 扇出独立副本，避免单标签被多条 trim 引用时的分辨率协商 -22
+        let split_outs: Vec<String> = (0..n).map(|i| format!("{}sp{}", label, i)).collect();
+        nodes.push(format!(
+            "[{pre}]split={n}{outs}",
+            pre = pre_label, n = n,
+            outs = split_outs.iter().map(|o| format!("[{}]", o)).collect::<String>()
+        ));
+        let mut seg_labels: Vec<String> = Vec::new();
+        for (i, (s0, s1, kcfg)) in segs.iter().enumerate() {
+            let seg_label = format!("{}s{}", label, i);
+            seg_labels.push(seg_label.clone());
+            let thr = kcfg.threshold.unwrap_or(0.5);
+            let soft = kcfg.edge_softness;
+            let half = soft / 2.0;
+            let denom = if soft < 1e-3 { 1.0 } else { soft };
+            let geq_expr = format!(
+                "clip((lum(X,Y)/255-({t}-{h}))/({d}),0,1)*255",
+                t = fmt(thr), h = fmt(half), d = fmt(denom)
+            );
+            let mt = format!("{}mt{}", label, i);
+            // 帧精确边界：用 start_frame/end_frame 替代秒级 trim，避免 ffmpeg 在 concat 边界
+            // 因浮点精度把边界帧错分（实测段1 首帧重复了段0 末帧）。s0/s1 为 clip 相对秒，
+            // 乘 fps 取整即得该段在源/matte 流中的帧区间。
+            let sf = ((*s0) * (fps as f64)).round() as i64;
+            let mut ef = ((*s1) * (fps as f64)).round() as i64;
+            if ef <= sf { ef = sf + 1; }
+            // 关键修复：matte 必须与本段源同步到同一时间窗口。源被 trim+setpts 重定时到
+            // [0,seg_dur]，若 matte 仍引用完整流，alphamerge 会按时间戳对齐到 matte 的
+            // [0,seg_dur] 而非正确的 [s0,s1]，导致逐帧变化的真实 matte（rmbg/modnet）在
+            // 段边界之后严重时间错位（实测段1 较静态参考 PSNR 仅 ~30dB）。此处对 matte 同样
+            // trim+setpts，使其与源段严格对齐。
+            nodes.push(format!(
+                "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,scale={sw}:{sh},geq=lum='{geq_expr}'[{mt}]",
+                mi = matte_idx.unwrap(), sf = sf, ef = ef, sw = sw, sh = sh
+            ));
+            // trim+setpts 后的源再 alphamerge 时，必须显式转成 yuva420p，否则 ffmpeg 会
+            // 丢失/损坏 alpha，导致背景色偏色（实测变成粉色）。
+            let seg_pre = format!("{}sa{}", label, i);
+            nodes.push(format!(
+                "[{pre}]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,format=yuva420p[{seg_pre}]",
+                pre = split_outs[i], sf = sf, ef = ef, seg_pre = seg_pre
+            ));
+            nodes.push(format!(
+                "[{seg_pre}][{mt}]alphamerge[{seg}]",
+                seg_pre = seg_pre, mt = mt, seg = seg_label
             ));
         }
         let inputs = seg_labels.iter().map(|s| format!("[{}]", s)).collect::<String>();
@@ -189,14 +271,6 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
         nodes.push(format!("[{pre}]null[{keyed}]", pre = pre_label, keyed = keyed_label));
     }
     let core = format!("[{}]", keyed_label);
-
-    // 智能/手动抠像 matte 输入索引（smart / manual 模式 + matte_asset_id 命中时 Some；
-    // 两者都走 matte 视频 alphamerge，与模式无关）
-    let matte_idx = c.keying.as_ref().and_then(|k| {
-        if k.enabled && (k.mode == "smart" || k.mode == "manual") {
-            k.matte_asset_id.as_ref().and_then(|id| matte_map.get(id).copied())
-        } else { None }
-    });
     // opacity + fps 作为尾部统一施加（在蒙版/matte 合成之后），保证各路输入帧率一致、透明度正确。
     let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
     let tail = if opacity < 1.0 {
@@ -247,7 +321,9 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     // 智能抠像：把 matte（灰度视频）映射为 alpha 并 alphamerge 到源。
     // matte luma = 抠像值（0=背景,255=前景）；经 threshold/softness 曲线映射为 0..255 再作 alpha。
     // 顺序：在 mask 合成之后、opacity/fps 之前（与 chroma 的 alpha 合成点一致）。
-    if let Some(mi) = matte_idx {
+    // 静态 matte alphamerge（未打关键帧的 smart/manual）；打关键帧时已在上方分段烘焙，跳过。
+    if !matte_keyframed {
+        if let Some(mi) = matte_idx {
         let k = c.keying.as_ref().unwrap();
         let thr = k.threshold.unwrap_or(0.5);
         let soft = k.edge_softness;
@@ -266,6 +342,7 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
         // alphamerge 取第二个输入（matte）的 luma 作为 alpha；源(可能 RGBA/YUV)叠加 alpha → 透明视频。
         nodes.push(format!("[{pre_tail}][{mt_label}]alphamerge[{va}]"));
         pre_tail = va;
+        }
     }
     // 背景合成（P3）：把 keyed（带 alpha）垫到背景之上，再接尾部 opacity/fps。
     // 背景可为纯色（内部 color 滤镜源）或图片/视频（额外 -i，已收集到 bg_map）。

@@ -260,9 +260,10 @@ const KeyedCanvas = ({
               const mctx = mc.getContext('2d');
               if (mctx) {
                 mctx.drawImage(mv, 0, 0, vw, vh);
-                // 边缘柔化关键帧（#342）：smart/manual 模式用 edgeSoftness 作蒙版柔化带宽
+                // smart/manual 关键帧（#342/+）：threshold 与 edgeSoftness 按播放头采样
+                const thr = sampleKeyframe(clip.keyframes?.['keying.threshold'], useUIStore.getState().currentTime, keying.threshold ?? 0.5);
                 const soft = sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], useUIStore.getState().currentTime, keying.edgeSoftness ?? 0.1);
-                const keyed = applyMatte(v, mc, keying.threshold ?? 0.5, soft);
+                const keyed = applyMatte(v, mc, thr, soft);
                 if (keyed) {
                   const drawn = applyBackground(keyed, vw, vh);
                   const ctx = canvas.getContext('2d');

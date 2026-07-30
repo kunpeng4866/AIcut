@@ -518,9 +518,10 @@ export function useWebGPUPreview({
               const srcRate = srcVideo ? srcVideo.playbackRate : 1;
               const matteCanvas = getMatteFrame(clip.keying.matteAssetId, srcTime, srcPaused, srcRate, vw, vh);
               if (matteCanvas) {
-                // 边缘柔化关键帧（#342）：smart/manual 模式同样用 edgeSoftness 作为蒙版柔化带宽
-                const soft = sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], currentTimeRef.current, clip.keying.edgeSoftness ?? 0.1);
-                const keyed = applyMatte(uploadSource, matteCanvas, clip.keying.threshold ?? 0.5, soft);
+              // smart/manual 关键帧（#342/+）：threshold 与 edgeSoftness 按播放头采样
+              const thr = sampleKeyframe(clip.keyframes?.['keying.threshold'], currentTimeRef.current, clip.keying.threshold ?? 0.5);
+              const soft = sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], currentTimeRef.current, clip.keying.edgeSoftness ?? 0.1);
+              const keyed = applyMatte(uploadSource, matteCanvas, thr, soft);
                 if (keyed) uploadSource = keyed;
               }
             } catch {
