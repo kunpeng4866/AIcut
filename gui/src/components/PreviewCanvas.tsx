@@ -6,14 +6,14 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
-import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig } from '../types';
+import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig, KeyingConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
 import { computeOutClipOpacity, getIncomingTransitionLayer, getOutClipTransition, getOutClipAudioEnv, getIncomingAudioTransitionLayer, audioCrossfadeEnv, getClipFadeGain, getFlashOverlay, type TransitionPreviewLayer, type MaskRect } from '../utils/transitionUtils';
 import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
-import { applyKeying, applyMatte, compositeBackground } from '../utils/keyingRender';
+import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -260,7 +260,9 @@ const KeyedCanvas = ({
               const mctx = mc.getContext('2d');
               if (mctx) {
                 mctx.drawImage(mv, 0, 0, vw, vh);
-                const keyed = applyMatte(v, mc, keying.threshold ?? 0.5, keying.edgeSoftness ?? 0.1);
+                // 边缘柔化关键帧（#342）：smart/manual 模式用 edgeSoftness 作蒙版柔化带宽
+                const soft = sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], useUIStore.getState().currentTime, keying.edgeSoftness ?? 0.1);
+                const keyed = applyMatte(v, mc, keying.threshold ?? 0.5, soft);
                 if (keyed) {
                   const drawn = applyBackground(keyed, vw, vh);
                   const ctx = canvas.getContext('2d');
@@ -269,8 +271,15 @@ const KeyedCanvas = ({
               }
             }
           } else {
-            // chroma 模式（原逻辑不变）
-            const keyed = applyKeying(v, vw, vh, keying);
+            // chroma 模式（原逻辑不变）：相似度/边缘柔化/溢出抑制按全局播放头时间采样关键帧（#342）
+            const t = useUIStore.getState().currentTime;
+            const effKeying: KeyingConfig = {
+              ...keying,
+              similarity: sampleKeyframe(clip.keyframes?.['keying.similarity'], t, keying.similarity),
+              edgeSoftness: sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], t, keying.edgeSoftness),
+              spill: sampleKeyframe(clip.keyframes?.['keying.spill'], t, keying.spill),
+            };
+            const keyed = applyKeying(v, vw, vh, effKeying);
             if (keyed) {
               const drawn = applyBackground(keyed, vw, vh);
               const ctx = canvas.getContext('2d');

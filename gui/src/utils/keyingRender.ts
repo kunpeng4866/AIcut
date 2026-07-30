@@ -69,6 +69,30 @@ export function applyKeying(
   return canvas;
 }
 
+// 从关键帧轨道采样某属性在全局时间 t 的值（线性插值，匹配 Rust KeyframeTrack::sample 的线性段）。
+// track: clip.keyframes[prop]（数组 [{time,value,easing}]）；无轨道/不足 1 帧时回退 base。
+// 用线性（‘线性’缓动≈恒等，是实际行为；Rust 仅 Linear 被中文标签命中，其余回退 Linear）。
+export function sampleKeyframe(track: any, t: number, base: number): number {
+  if (!Array.isArray(track) || track.length === 0) return base;
+  const kfs = track.slice().sort((a: any, b: any) => a.time - b.time);
+  if (kfs.length === 1) return typeof kfs[0].value === 'number' ? kfs[0].value : base;
+  if (t <= kfs[0].time) return typeof kfs[0].value === 'number' ? kfs[0].value : base;
+  const last = kfs[kfs.length - 1];
+  if (t >= last.time) return typeof last.value === 'number' ? last.value : base;
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const a = kfs[i];
+    const b = kfs[i + 1];
+    if (t >= a.time && t <= b.time) {
+      const span = b.time - a.time;
+      const f = span > 0 ? (t - a.time) / span : 0;
+      const va = typeof a.value === 'number' ? a.value : base;
+      const vb = typeof b.value === 'number' ? b.value : base;
+      return va + (vb - va) * f;
+    }
+  }
+  return base;
+}
+
 // smoothstep 曲线（GLSL 语义）：edge0==edge1 时退化为硬阶跃
 function smoothstep(edge0: number, edge1: number, x: number): number {
   if (edge1 <= edge0) return x >= edge0 ? 1 : 0;

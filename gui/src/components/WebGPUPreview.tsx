@@ -2,11 +2,11 @@
 // useWebGPUPreview — WebGPU 实时视频预览 hook（多轨道纹理叠加）
 // 负责：设备初始化、WGSL 渲染管线、rAF 渲染循环（多视频帧上传→多 pass Over 合成→渲染）、资源清理
 import { useEffect, useRef, useState } from 'react';
-import type { ClipConfig, AssetConfig, MaskConfig } from '../types';
+import type { ClipConfig, AssetConfig, MaskConfig, KeyingConfig } from '../types';
 import { useProjectStore } from '../store/projectStore';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
-import { applyKeying, applyMatte, compositeBackground } from '../utils/keyingRender';
+import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
 
 // 文件路径转 aicut-asset:// URL（与 PreviewCanvas 内 pathToUrl 保持一致；此处本地副本避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -491,7 +491,16 @@ export function useWebGPUPreview({
           // 不改动现有 WGSL shader 与后续 transform/opacity/滤镜管线。不满足条件时回退原帧。
           if (clip.keying && clip.keying.enabled && clip.keying.mode === 'chroma') {
             try {
-              const keyed = applyKeying(uploadSource, vw, vh, clip.keying);
+              const k = clip.keying;
+              const t = currentTimeRef.current;
+              // 抠像参数关键帧（#342）：按全局播放头时间线性采样，让相似度/边缘柔化/溢出抑制可随时间动画
+              const effKeying: KeyingConfig = {
+                ...k,
+                similarity: sampleKeyframe(clip.keyframes?.['keying.similarity'], t, k.similarity),
+                edgeSoftness: sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], t, k.edgeSoftness),
+                spill: sampleKeyframe(clip.keyframes?.['keying.spill'], t, k.spill),
+              };
+              const keyed = applyKeying(uploadSource, vw, vh, effKeying);
               if (keyed) uploadSource = keyed;
             } catch {
               /* 抠像失败则回退原帧 */
@@ -509,7 +518,9 @@ export function useWebGPUPreview({
               const srcRate = srcVideo ? srcVideo.playbackRate : 1;
               const matteCanvas = getMatteFrame(clip.keying.matteAssetId, srcTime, srcPaused, srcRate, vw, vh);
               if (matteCanvas) {
-                const keyed = applyMatte(uploadSource, matteCanvas, clip.keying.threshold ?? 0.5, clip.keying.edgeSoftness ?? 0.1);
+                // 边缘柔化关键帧（#342）：smart/manual 模式同样用 edgeSoftness 作为蒙版柔化带宽
+                const soft = sampleKeyframe(clip.keyframes?.['keying.edgeSoftness'], currentTimeRef.current, clip.keying.edgeSoftness ?? 0.1);
+                const keyed = applyMatte(uploadSource, matteCanvas, clip.keying.threshold ?? 0.5, soft);
                 if (keyed) uploadSource = keyed;
               }
             } catch {
