@@ -187,7 +187,7 @@ export default function ExportDialog({ project, onClose }: Props) {
               onChange={(e) => updateOption('resolution', e.target.value)}
               disabled={status === 'exporting'}
             >
-              <option value="2160p">4K 超清 (3840×2160)</option>
+              <option value="2160p">4K 分辨率 (3840×2160)</option>
               <option value="1080p">1080p (1920×1080)</option>
               <option value="720p">720p (1280×720)</option>
               <option value="480p">480p (854×480)</option>
