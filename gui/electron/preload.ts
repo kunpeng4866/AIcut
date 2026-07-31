@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('aicut', {
   // ── 引擎 ──
   render: (json: string) => ipcRenderer.invoke('engine:render', json),
   probe: (path: string) => ipcRenderer.invoke('engine:probe', path),
+  ensureProxy: (path: string, width: number, height: number) =>
+    ipcRenderer.invoke('asset:ensureProxy', { path, width, height }),
   getPresets: () => ipcRenderer.invoke('engine:presets'),
   getVersion: () => ipcRenderer.invoke('engine:version'),
   validate: (json: string) => ipcRenderer.invoke('engine:validate', json),

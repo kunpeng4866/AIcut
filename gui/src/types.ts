@@ -2,7 +2,7 @@
 import type { SubtitleGenResult } from './aiTypes';
 
 export interface CanvasConfig { width: number; height: number; fps?: number; sample_rate?: number }
-export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number }
+export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number; proxyPath?: string }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number }
 export interface RangeConfig { start: number; end: number }
 // 文字片段内容
@@ -277,6 +277,8 @@ export interface AicutAPI {
   // 引擎
   render(json: string): Promise<{ success: boolean; command?: string; error?: string }>;
   probe(path: string): Promise<{ success: boolean; info?: MediaInfo; error?: string }>;
+  // 4K 源素材生成 720p 代理（仅当宽或高 > 1080 时）；返回代理路径，无需代理返回 ''
+  ensureProxy(path: string, width: number, height: number): Promise<string>;
   getPresets(): Promise<string[]>;
   getVersion(): Promise<string>;
   validate(json: string): Promise<{ valid: boolean; errors?: string[] }>;

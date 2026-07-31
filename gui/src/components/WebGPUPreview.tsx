@@ -16,6 +16,10 @@ const pathToUrl = (path: string): string => {
   return `aicut-asset:///${normalized}`;
 };
 
+// 同 PreviewCanvas.vidSrc：4K 源素材优先走 720p 代理
+const vidSrc = (a: { path: string; proxyPath?: string }): string =>
+  a.proxyPath ? pathToUrl(a.proxyPath) : pathToUrl(a.path);
+
 // 从 transform CSS 字符串（如 "scale(1.12)"）解析缩放因子，供 zoom 转场折进 WebGPU 用户 scale
 function parseScale(s: string | null | undefined): number {
   if (!s) return 1;
@@ -182,7 +186,7 @@ export function useWebGPUPreview({
     let video = matteVideoCacheRef.current.get(matteAssetId);
     if (!video) {
       video = document.createElement('video');
-      video.src = pathToUrl(asset.path);
+      video.src = vidSrc(asset);
       video.muted = true;
       video.playsInline = true;
       video.preload = 'auto';
@@ -260,7 +264,7 @@ export function useWebGPUPreview({
     let video = bgVideoCacheRef.current.get(bg.assetId);
     if (!video) {
       video = document.createElement('video');
-      video.src = pathToUrl(asset.path);
+      video.src = vidSrc(asset);
       video.muted = true;
       video.playsInline = true;
       video.loop = true;

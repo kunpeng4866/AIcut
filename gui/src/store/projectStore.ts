@@ -78,6 +78,7 @@ interface ProjectState {
   redo: () => void;
   addAsset: (asset: AssetConfig) => void;
   removeAsset: (id: string) => void;
+  setAssetProxy: (id: string, proxyPath: string) => void;
   addTrack: (type: 'video' | 'audio' | 'text' | 'sticker' | 'subtitle') => string;  // 返回新轨 id
   insertTrackAt: (index: number, type: 'video' | 'audio' | 'text' | 'sticker' | 'subtitle') => string;
   removeTrack: (id: string) => void;
@@ -197,6 +198,11 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       }
     },
     addAsset: (asset) => mutate((p) => ({ ...p, assets: [...p.assets, asset] })),
+    // 4K 源素材生成 720p 代理后回填代理路径；预览据此走代理，保证 4K 源流畅
+    setAssetProxy: (id, proxyPath) => mutate((p) => ({
+      ...p,
+      assets: p.assets.map((a) => (a.id === id ? { ...a, proxyPath } : a)),
+    })),
     removeAsset: (id) => mutate((p) => ({
       ...p,
       assets: p.assets.filter((a) => a.id !== id),

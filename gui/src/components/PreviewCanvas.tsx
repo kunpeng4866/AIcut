@@ -23,6 +23,11 @@ const pathToUrl = (path: string): string => {
   return `aicut-asset:///${normalized}`;
 };
 
+// 视频素材预览源：4K 源素材优先走 720p 代理（proxyPath），保证 4K 源流畅；其余回退原路径。
+// proxyPath 仅存在于用户导入的 4K 视频素材上，贴纸/matte/背景等派生资产无此字段，安全回退。
+const vidSrc = (a: { path: string; proxyPath?: string }): string =>
+  a.proxyPath ? pathToUrl(a.proxyPath) : pathToUrl(a.path);
+
 // 格式化时间码 mm:ss.cs
 const formatTC = (sec: number): string => {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -334,7 +339,7 @@ const KeyedCanvas = ({
       <video
         key={`${clip.id}__src`}
         ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-        src={asset ? pathToUrl(asset.path) : ''}
+        src={asset ? vidSrc(asset) : ''}
         style={{ display: 'none' }}
         onLoadedMetadata={onLoadedMetadata}
         muted
@@ -409,7 +414,7 @@ const BeautyCanvas = ({
       <video
         key={`${clip.id}__src`}
         ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-        src={asset ? pathToUrl(asset.path) : ''}
+        src={asset ? vidSrc(asset) : ''}
         style={{ display: 'none' }}
         onLoadedMetadata={onLoadedMetadata}
         muted
@@ -723,7 +728,7 @@ export default function PreviewCanvas() {
         const scale = t.scale_x ?? 1;
         const wPct = Math.min(80, ((asset.width || 300) / stageW) * 100) * scale;
         result.push({
-          src: pathToUrl(asset.path),
+          src: vidSrc(asset),
           style: {
             position: 'absolute',
             left: `${x * 100}%`,
@@ -1108,7 +1113,7 @@ export default function PreviewCanvas() {
       if (cacheMap.current.has(clip.id)) continue;
       const cache = new ClipFrameCache();
       cacheMap.current.set(clip.id, cache);
-      const src = pathToUrl(asset.path);
+      const src = vidSrc(asset);
       cache.decode(src, clip.src_range.start, clip.src_range.end).catch(() => { cache.status = 'error'; });
     }
     // 转场入片段同样预解码（手动驱动类型），供 WebGPU 取帧 / 回退 seek
@@ -1121,7 +1126,7 @@ export default function PreviewCanvas() {
       if (cacheMap.current.has(clip.id)) continue;
       const cache = new ClipFrameCache();
       cacheMap.current.set(clip.id, cache);
-      const src = pathToUrl(asset.path);
+      const src = vidSrc(asset);
       cache.decode(src, clip.src_range.start, clip.src_range.end).catch(() => { cache.status = 'error'; });
     }
     // 缓存数量上限（简化 LRU：超出丢弃最旧），避免内存无限增长
@@ -1252,7 +1257,7 @@ export default function PreviewCanvas() {
                 <video
                   key={clip.id}
                   ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-                  src={pathToUrl(asset.path)}
+                  src={vidSrc(asset)}
                   style={theme.hiddenMedia}
                   onLoadedMetadata={onLoadedMetadataFor(clip)}
                 />
@@ -1271,7 +1276,7 @@ export default function PreviewCanvas() {
                     <video
                       key={clip.id}
                       ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-                      src={pathToUrl(asset.path)}
+                      src={vidSrc(asset)}
                       style={theme.hiddenMedia}
                       onLoadedMetadata={onLoadedMetadataFor(clip)}
                     />
@@ -1309,7 +1314,7 @@ export default function PreviewCanvas() {
                     <video
                       key={clip.id}
                       ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-                      src={pathToUrl(asset.path)}
+                      src={vidSrc(asset)}
                       style={tStyle}
                       onLoadedMetadata={onLoadedMetadataFor(clip)}
                       onClick={handleTogglePlay}
@@ -1365,7 +1370,7 @@ export default function PreviewCanvas() {
                   <video
                     key={clip.id}
                     ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
-                    src={pathToUrl(asset.path)}
+                    src={vidSrc(asset)}
                     style={{ ...outStyle, pointerEvents: 'auto' }}
                     onLoadedMetadata={onLoadedMetadataFor(clip)}
                     onClick={handleTogglePlay}
@@ -1481,7 +1486,7 @@ export default function PreviewCanvas() {
           <audio
             key={clip.id}
             ref={(el) => { if (el) audioRefs.current.set(clip.id, el); else audioRefs.current.delete(clip.id); }}
-            src={pathToUrl(asset.path)}
+            src={vidSrc(asset)}
             style={theme.hiddenMedia}
             onLoadedMetadata={onLoadedMetadataForAudio(clip)}
           />
@@ -1492,7 +1497,7 @@ export default function PreviewCanvas() {
           <audio
             key={clip.id}
             ref={(el) => { if (el) audioRefs.current.set(clip.id, el); else audioRefs.current.delete(clip.id); }}
-            src={pathToUrl(asset.path)}
+            src={vidSrc(asset)}
             style={theme.hiddenMedia}
             onLoadedMetadata={onLoadedMetadataForAudio(clip)}
           />

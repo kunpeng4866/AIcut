@@ -97,6 +97,7 @@ const theme = {
 export default function MediaPanel() {
   const assets = useProjectStore((s) => s.project.assets);
   const addAsset = useProjectStore((s) => s.addAsset);
+  const setAssetProxy = useProjectStore((s) => s.setAssetProxy);
   const removeAsset = useProjectStore((s) => s.removeAsset);
   const addClip = useProjectStore((s) => s.addClip);
   const addTrack = useProjectStore((s) => s.addTrack);
@@ -113,16 +114,24 @@ export default function MediaPanel() {
         try {
           const result = await window.aicut.probe(path);
           const info = result.info;
+          const type = info?.media_type || (pathExtIsAudio(path) ? 'audio' : 'video');
+          const isVideo = type === 'video';
+          const width = info?.width || 1920;
+          const height = info?.height || 1080;
+          const id = uid('asset');
           addAsset({
-            id: uid('asset'),
-            type: info?.media_type || (pathExtIsAudio(path) ? 'audio' : 'video'),
-            path,
+            id, type, path,
             duration: info?.duration || 5,
-            width: info?.width || 1920,
-            height: info?.height || 1080,
+            width, height,
             codec: info?.codec || 'h264',
             fps: info?.fps || 30,
           });
+          // 4K 源素材：异步生成 720p 代理，完成后回填代理路径，预览走代理保证流畅
+          if (isVideo && (width > 1920 || height > 1080)) {
+            window.aicut.ensureProxy(path, width, height)
+              .then((proxyPath) => { if (proxyPath) setAssetProxy(id, proxyPath); })
+              .catch(() => {});
+          }
         } catch {
           addAsset({ id: uid('asset'), type: pathExtIsAudio(path) ? 'audio' : 'video', path, duration: 5, width: 1920, height: 1080, codec: 'h264', fps: 30 });
         }

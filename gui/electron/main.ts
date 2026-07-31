@@ -509,6 +509,33 @@ ipcMain.handle('export:openFolder', async (_e, filePath: string) => {
   return true;
 });
 
+// ── 4K 源素材代理生成（预览用 720p 代理，保证 4K 源流畅） ──
+// 仅当宽或高 > 1080 才生成；返回代理路径，无需代理或生成失败返回 ''。
+ipcMain.handle('asset:ensureProxy', async (_e, params: { path: string; width: number; height: number }) => {
+  const { path, width, height } = params;
+  try {
+    if (!path || width <= 1920 && height <= 1080) return '';
+    const proxyDir = join(app.getPath('userData'), 'proxies');
+    await mkdir(proxyDir, { recursive: true });
+    const stem = basename(path).replace(/\.[^.]+$/, '');
+    const proxyPath = join(proxyDir, `${stem}_proxy.mp4`);
+    // 代理已存在且不旧于源，直接复用
+    try {
+      const ps = await stat(proxyPath);
+      const ss = await stat(path);
+      if (ps.mtime.getTime() >= ss.mtime.getTime()) return proxyPath;
+    } catch { /* 需重新生成 */ }
+    await new Promise<void>((resolve) => {
+      const p = spawn('ffmpeg', ['-y', '-i', path, '-vf', 'scale=-2:720', '-an', '-c:v', 'libx264', '-preset', 'veryfast', proxyPath]);
+      p.on('close', () => resolve());
+      p.on('error', () => resolve());
+    });
+    return proxyPath;
+  } catch {
+    return '';
+  }
+});
+
 // ── 草稿管理 ──
 ipcMain.handle('draft:save', async (_e, name: string, content: string) => {
   try {
