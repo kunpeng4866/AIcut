@@ -125,7 +125,25 @@ impl RenderCommand {
         cmd
     }
 
+    /// 把单个参数安全化为「用于 shell 命令字符串」的形式：
+    /// 若含空格或制表符，则用双引号包裹（与前端 `parseShellArgs` 的引号解析一致）。
+    /// Windows 文件名不允许包含 `"` 字符，故直接包裹即可，无需转义。
+    ///
+    /// 仅用于 `to_command_string`（日志/调试、以及被前端解析回 `Vec<String>` 的串）。
+    /// 安全的参数列表模式（`to_command_line` / `execute`）不经过 shell 解析，无需引号。
+    fn shell_quote_arg(s: &str) -> String {
+        if s.contains(' ') || s.contains('\t') {
+            format!("\"{}\"", s)
+        } else {
+            s.to_string()
+        }
+    }
+
     /// 组合为可读的命令行字符串（仅用于日志/调试输出）。
+    ///
+    /// 含空格/制表符的参数（典型如用户素材路径 `2026-07-27 11-07-05.mp4`）
+    /// 会被双引号包裹，确保前端 `parseShellArgs` 能将其正确还原为单个参数，
+    /// 否则空格会把路径劈成多段导致 ffmpeg 找不到输入文件。
     ///
     /// # 安全警告
     ///
@@ -135,7 +153,11 @@ impl RenderCommand {
     /// 始终使用 [`RenderCommand::execute`] 或 [`std::process::Command`]
     /// 并传入 `to_command_line()` 返回的 `Vec<String>` 作为参数列表。
     pub fn to_command_string(&self) -> String {
-        self.to_command_line().join(" ")
+        self.to_command_line()
+            .iter()
+            .map(|a| Self::shell_quote_arg(a))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// 安全执行 FFmpeg 渲染命令，返回进程输出。
@@ -442,6 +464,23 @@ mod tests {
         let s = cmd.to_command_string();
         assert!(s.starts_with("ffmpeg"));
         assert!(s.contains("output.mp4"));
+    }
+
+    #[test]
+    fn test_to_command_string_quotes_spaced_path() {
+        // 含空格的输入路径必须被双引号包裹，否则前端 parseShellArgs 会把它
+        // 劈成多段，ffmpeg 找不到输入文件（真实案例：2026-07-27 11-07-05.mp4）。
+        let mut cmd = RenderCommand::default();
+        cmd.inputs.push(InputSpec {
+            path: "C:/Users/me/My Video.mp4".to_string(),
+            stream_loop: None,
+        });
+        let s = cmd.to_command_string();
+        assert!(
+            s.contains("-i \"C:/Users/me/My Video.mp4\""),
+            "含空格输入路径必须被引号包裹，实际: {}",
+            s
+        );
     }
 
     #[test]
