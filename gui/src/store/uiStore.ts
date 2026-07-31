@@ -2,7 +2,10 @@
 import { create } from 'zustand';
 
 type LeftPanel = 'media' | 'effects' | 'text' | 'audio' | 'stickers' | 'speech';
-type RightPanel = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins' | 'mask' | 'keying' | 'beauty';
+// 右侧属性面板的一级 tab key：按素材类型分组（画面/音频/变速/动画/调整/关键帧；文本/字幕；基础/变速/关键帧）
+// 'transform'/'filters'/'effects'/'plugins'/'mask'/'keying'/'beauty' 为历史 key，保留以兼容旧持久化状态（不会作为 tab 渲染，会自动回退到分组首个 tab）
+export type RightPanel = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins' | 'mask' | 'keying' | 'beauty'
+  | 'visual' | 'anim' | 'adjust' | 'kf';
 
 interface UIState {
   selectedTrackId: string | null;
@@ -70,7 +73,7 @@ export const useUIStore = create<UIState>((set) => ({
   clipSnap: true,
 
   activeLeftPanel: 'media',
-  activeRightPanel: 'transform',
+  activeRightPanel: 'visual',
 
   previewWidth: 1920,
   previewHeight: 1080,

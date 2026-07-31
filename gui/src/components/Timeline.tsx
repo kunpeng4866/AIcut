@@ -1093,7 +1093,7 @@ export default function Timeline() {
                           clip={clip}
                           track={track}
                           zoom={timelineZoom}
-                          onOpenPanel={() => { selectClip(track.id, clip.id); setActiveRightPanel('transition'); }}
+                          onOpenPanel={() => { selectClip(track.id, clip.id); setActiveRightPanel('anim'); }}
                         />
                       )}
                     </React.Fragment>

@@ -1,15 +1,17 @@
-// 属性面板 — 右侧面板，含变换/滤镜/特效/音频/关键帧 5 个标签页
+// 属性面板 — 右侧面板，按素材类型（文本/字幕/音频/视频图片）分组展示一级 tab，
+// 同类型下再分子 tab（如视频「画面」含 基础/抠像/蒙版/美颜美体）。
+// 复用既有渲染函数（TransformTab/KeyingTab/MaskTab/BeautyTab/AudioTab/SpeedTab/TransitionTab/
+// ItemsTab/TextTab/SubtitleTab/KeyframesTab），不改变底层数据模型与后端契约。
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
+import type { RightPanel } from '../store/uiStore';
 import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, WipeMaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 import MaskTab from './panels/MaskTab';
 import KeyingTab from './panels/KeyingTab';
 import BeautyTab from './panels/BeautyTab';
 import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
-
-type TabKey = 'transform' | 'filters' | 'effects' | 'audio' | 'keyframes' | 'text' | 'subtitle' | 'speed' | 'transition' | 'plugins' | 'mask' | 'keying' | 'beauty';
 
 // 插件 manifest 类型（仅前端 UI 使用，不依赖 engine 包）
 interface ParameterDef {
@@ -23,21 +25,53 @@ interface PluginManifest {
   filter_spec?: string; shader?: string; thumbnail?: string;
 }
 
-const TABS: { key: TabKey; label: string }[] = [
-  { key: 'transform', label: '变换' },
-  { key: 'filters', label: '滤镜' },
-  { key: 'effects', label: '特效' },
-  { key: 'audio', label: '音频' },
-  { key: 'speed', label: '变速' },
-  { key: 'transition', label: '转场' },
-  { key: 'text', label: '文字' },
-  { key: 'subtitle', label: '字幕' },
-  { key: 'keyframes', label: '关键帧' },
-  { key: 'plugins', label: '插件' },
-  { key: 'mask', label: '蒙版' },
-  { key: 'keying', label: '抠像' },
-  { key: 'beauty', label: '美颜' },
-];
+// ── 按素材类型分组的属性面板结构 ──
+// 一级 tab 依选中素材类型不同而不同；视频/图片的「画面」含二级 tab（基础/抠像/蒙版/美颜美体）。
+// key 与 uiStore.RightPanel 对应；历史 key（transform/filters/...）不再作为 tab 渲染，会自动回退分组首个 tab。
+type Category = 'text' | 'subtitle' | 'audio' | 'video';
+interface SubDef { key: string; label: string; }
+interface TabDef { key: RightPanel; label: string; subs?: SubDef[]; }
+
+const PANEL_GROUPS: Record<Category, TabDef[]> = {
+  // 视频 / 图片：画面(基础/抠像/蒙版/美颜美体) / 音频 / 变速 / 动画(转场) / 调整(滤镜+特效) / 关键帧
+  video: [
+    { key: 'visual', label: '画面', subs: [
+      { key: 'base', label: '基础' },
+      { key: 'keying', label: '抠像' },
+      { key: 'mask', label: '蒙版' },
+      { key: 'beauty', label: '美颜美体' },
+    ]},
+    { key: 'audio', label: '音频' },
+    { key: 'speed', label: '变速' },
+    { key: 'anim', label: '动画' },
+    { key: 'adjust', label: '调整' },
+    { key: 'kf', label: '关键帧' },
+  ],
+  // 文本：文本 / 关键帧
+  text: [
+    { key: 'text', label: '文本' },
+    { key: 'kf', label: '关键帧' },
+  ],
+  // 字幕：字幕 / 关键帧
+  subtitle: [
+    { key: 'subtitle', label: '字幕' },
+    { key: 'kf', label: '关键帧' },
+  ],
+  // 音频素材：基础 / 变速 / 关键帧（声相/降噪/变声等占位项暂不暴露，避免误导）
+  audio: [
+    { key: 'audio', label: '基础' },
+    { key: 'speed', label: '变速' },
+    { key: 'kf', label: '关键帧' },
+  ],
+};
+
+// 依据 clip 字段与所在轨道类型判定素材分类
+function clipCategory(clip: ClipConfig, trackType?: string): Category {
+  if (clip.text) return 'text';
+  if (clip.subtitle) return 'subtitle';
+  if (trackType === 'audio') return 'audio';
+  return 'video';
+}
 
 // 滤镜/特效预设已改为从 plugins/ 目录的真实插件加载（见下方 ItemsTab），
 // 不再使用硬编码预设——那些 kind 在引擎注册表/插件清单中均无实现，添加后预览与导出都不生效。
@@ -81,6 +115,11 @@ const S = {
   label: { color: '#aaa', fontSize: 11, width: 60, flexShrink: 0 },
   item: { background: '#0f3460', borderRadius: 4, padding: 8, marginBottom: 6 },
   divider: { height: 1, background: '#0f3460', margin: '8px 0' },
+  subtabs: { display: 'flex', gap: 4, padding: '6px 8px', borderBottom: '1px solid #0f3460', background: '#101a30' },
+  subtab: (active: boolean) => ({
+    flex: 1, padding: '4px 2px', fontSize: 11, color: active ? '#fff' : '#9fb0c8',
+    background: active ? '#0f3460' : 'transparent', border: 'none', borderRadius: 4, cursor: 'pointer',
+  }),
 };
 
 // 可复用参数滑块；editable=true 时右侧显示可编辑数值输入框
@@ -880,36 +919,58 @@ export default function PropertiesPanel() {
   const setActiveTab = useUIStore((s) => s.setActiveRightPanel);
   const sel = useSelectedClip();
   const project = useProjectStore((s) => s.project);
-  // 仅视频/图片（非音频）clip 显示「蒙版 / 抠像」tab；音频 clip 无蒙版/抠像
   const selTrack = sel ? project.tracks.find((t) => t.id === sel.trackId) : undefined;
-  const visibleTabs = sel && selTrack?.type === 'audio'
-    ? TABS.filter((t) => t.key !== 'mask' && t.key !== 'keying' && t.key !== 'beauty')
-    : TABS;
-  // 若当前 tab 因切到音频轨被隐藏，回退到 transform
-  const tab = sel && selTrack?.type === 'audio' && (activeTab === 'mask' || activeTab === 'keying' || activeTab === 'beauty') ? 'transform' : activeTab;
+  // 按素材类型取分组 tab；当前激活的一级 tab 不在分组内则回退到首个
+  const category: Category = sel ? clipCategory(sel.clip, selTrack?.type) : 'video';
+  const groups = PANEL_GROUPS[category];
+  const tab = groups.find((g) => g.key === activeTab) ?? groups[0];
+  const subs = tab.subs;
+  const [sub, setSub] = useState(subs ? subs[0].key : '');
+  const effSub = subs ? (subs.find((s) => s.key === sub) ? sub : subs[0].key) : '';
+
+  // 渲染当前一级 tab（及其二级 tab）对应的内容
+  const renderContent = () => {
+    const { clip, trackId } = sel!;
+    if (tab.key === 'visual') {
+      if (effSub === 'keying') return <KeyingTab clip={clip} trackId={trackId} />;
+      if (effSub === 'mask') return <MaskTab clip={clip} trackId={trackId} />;
+      if (effSub === 'beauty') return <BeautyTab clip={clip} trackId={trackId} />;
+      return <TransformTab clip={clip} trackId={trackId} />; // base
+    }
+    if (tab.key === 'audio') return <AudioTab clip={clip} trackId={trackId} />;
+    if (tab.key === 'speed') return <SpeedTab clip={clip} trackId={trackId} />;
+    if (tab.key === 'anim') return <TransitionTab clip={clip} trackId={trackId} />;
+    if (tab.key === 'adjust') return (
+      <div>
+        <div style={{ color: '#aaa', fontSize: 11, margin: '2px 0 6px' }}>滤镜</div>
+        <ItemsTab clip={clip} trackId={trackId} kind="filters" />
+        <div style={S.divider} />
+        <div style={{ color: '#aaa', fontSize: 11, margin: '2px 0 6px' }}>特效</div>
+        <ItemsTab clip={clip} trackId={trackId} kind="effects" />
+      </div>
+    );
+    if (tab.key === 'kf') return <KeyframesTab clip={clip} trackId={trackId} />;
+    if (tab.key === 'text') return <TextTab clip={clip} trackId={trackId} />;
+    if (tab.key === 'subtitle') return <SubtitleTab clip={clip} trackId={trackId} />;
+    return <TransformTab clip={clip} trackId={trackId} />;
+  };
+
   return (
     <div style={S.panel}>
       <div style={S.tabs}>
-        {visibleTabs.map((t) => (
-          <button key={t.key} style={S.tab(tab === t.key)} onClick={() => setActiveTab(t.key)}>{t.label}</button>
+        {groups.map((g) => (
+          <button key={g.key} style={S.tab(activeTab === g.key)} onClick={() => setActiveTab(g.key)}>{g.label}</button>
         ))}
       </div>
+      {subs && (
+        <div style={S.subtabs}>
+          {subs.map((s) => (
+            <button key={s.key} style={S.subtab(effSub === s.key)} onClick={() => setSub(s.key)}>{s.label}</button>
+          ))}
+        </div>
+      )}
       <div style={S.content}>
-        {!sel ? <ProjectInfo /> : (
-          tab === 'transform' ? <TransformTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'filters' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="filters" /> :
-          tab === 'effects' ? <ItemsTab clip={sel.clip} trackId={sel.trackId} kind="effects" /> :
-          tab === 'audio' ? <AudioTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'speed' ? <SpeedTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'transition' ? <TransitionTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'text' ? <TextTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'subtitle' ? <SubtitleTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'plugins' ? <PluginsTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'mask' ? <MaskTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'keying' ? <KeyingTab clip={sel.clip} trackId={sel.trackId} /> :
-          tab === 'beauty' ? <BeautyTab clip={sel.clip} trackId={sel.trackId} /> :
-          <KeyframesTab clip={sel.clip} trackId={sel.trackId} />
-        )}
+        {!sel ? <ProjectInfo /> : renderContent()}
       </div>
     </div>
   );
