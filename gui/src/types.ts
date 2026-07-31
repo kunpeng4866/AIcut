@@ -173,7 +173,7 @@ export interface MediaInfo { path: string; media_type: string; duration: number;
 export interface RenderResult { command: string }
 
 // ── 导出选项 ──
-export type ExportResolution = 'original' | '1080p' | '720p' | '480p';
+export type ExportResolution = 'original' | '2160p' | '1080p' | '720p' | '480p';
 export type ExportFormat = 'mp4-h264' | 'mp4-h265' | 'mov';
 export type ExportQuality = 'high' | 'medium' | 'low';
 
