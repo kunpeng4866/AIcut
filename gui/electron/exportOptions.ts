@@ -41,6 +41,12 @@ export function applyExportOptions(args: string[], options: ExportOptionsParam):
   if (options.resolution !== 'original') {
     const heights: Record<string, number> = { '2160p': 2160, '1080p': 1080, '720p': 720, '480p': 480 };
     const h = heights[options.resolution];
+    if (h === undefined) {
+      // 防御：未知分辨率（多见于主进程构建与渲染层下拉项不匹配，例如旧 dist-electron
+      // 仍用不含 2160p 的 heights 表）不要注入 scale=-2:undefined，否则 ffmpeg 直接报
+      // "Invalid argument" 导致导出失败。退回保持原画布尺寸导出，并给出明确告警。
+      console.warn(`[export] 未知分辨率 "${options.resolution}"，跳过缩放，保持原画布尺寸导出`);
+    } else {
     const scaleFilter = `scale=-2:${h}`;
     // 清除引擎带出的 -s WxH：它会在编码端再次约束尺寸，与上面的 scale 滤镜冲突
     // （ffmpeg 会自动插入 scale 把滤镜图输出尺寸拉回 -s 指定的尺寸，导致选 4K/720p
@@ -97,6 +103,7 @@ export function applyExportOptions(args: string[], options: ExportOptionsParam):
       } else {
         result.splice(result.length - 1, 0, '-vf', scaleFilter);
       }
+    }
     }
   }
 
