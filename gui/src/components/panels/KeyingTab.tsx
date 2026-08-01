@@ -426,7 +426,7 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
         duration: result.duration, width: result.width, height: result.height, fps: result.fps,
       });
       store.updateClip(trackId, clip.id, {
-        keying: { ...keying, mode: 'smart', model, threshold, matteAssetId: assetId },
+        keying: { ...keying, mode: 'smart', model, threshold, edgeSoftness: 1.0, matteAssetId: assetId },
       });
     } catch (e: unknown) {
       console.error('智能抠像失败', e);
@@ -450,7 +450,7 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     const assetPath = asset.path;
     const model = keying.model ?? 'modnet';
     const threshold = keying.threshold ?? 0.5;
-    const softness = keying.edgeSoftness ?? 0.1;
+    const softness = keying.edgeSoftness ?? 1.0;
     // 已有蒙版则在其上修正
     let smartMattePath = '';
     if (keying.matteAssetId) {

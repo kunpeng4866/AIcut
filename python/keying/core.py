@@ -27,6 +27,30 @@ import urllib.request
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
+# P6-CUDA：onnxruntime-gpu 1.28 (CUDA 13.0) 依赖 nvidia-* pip 包提供的 CUDA/cuDNN
+# DLL（cublasLt64_13.dll / cudnn64_9.dll 等），但 ORT 不会自动把它们加入 PATH，
+# 缺失时 CUDA EP 报 "cublasLt64_13.dll which is missing" 而静默回退 CPU。这里在导入
+# onnxruntime 前把对应 bin 目录注入 PATH（仅当目录存在时，onnxruntime-directml
+# 环境无此目录，语句无害）。
+def _prepend_cuda_dll_path() -> None:
+    # 用 glob 匹配 nvidia/*/bin 与 nvidia/*/bin/x86_64，兼容 cu13→cu14 等未来升级，
+    # 避免硬编码 cu13 在 nvidia pip 包升版本后路径断裂、CUDA EP 静默回退 CPU。
+    import glob as _glob
+
+    sp = os.path.join(sys.prefix, "Lib", "site-packages")
+    nvidia_root = os.path.join(sp, "nvidia")
+    add: list = []
+    if os.path.isdir(nvidia_root):
+        for pat in (os.path.join(nvidia_root, "*", "bin"),
+                    os.path.join(nvidia_root, "*", "bin", "x86_64")):
+            for d in _glob.glob(pat):
+                if os.path.isdir(d):
+                    add.append(d)
+    if add:
+        os.environ["PATH"] = os.pathsep.join(add + [os.environ.get("PATH", "")])
+
+_prepend_cuda_dll_path()
+
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "aicut", "models")
 GITHUB_RELEASE_URL = "https://github.com/ZHKKKe/MODNet/releases/download/ONNX/modnet.onnx"
 # 占位/镜像是同一权重；此处仅为可读标识。
@@ -182,7 +206,7 @@ class _Predictor:
     两者均输出 HxW float32 matte ∈ [0,1]（0=背景, 255=前景 约定见文件头）。
     """
 
-    def __init__(self, model_path: str | None, log, model_kind: str = "modnet"):
+    def __init__(self, model_path: str | None, log, model_kind: str = "modnet", infer_size: int = 0):
         self.log = log
         self.model_kind = model_kind if model_kind in ("modnet", "rmbg2") else "modnet"
         self.use_real = False
@@ -192,7 +216,11 @@ class _Predictor:
         self.std = [0.229, 0.224, 0.225]
         # 推理输入尺寸：rmbg2 固定 1024 方图（BiRefNet 设计为 1024，512 下 deformable
         # conv/ASPP 对齐会崩；1024 经多线程 CPU 推理 45 帧≈2min，实用；modnet 动态）。
-        self.infer_size = 1024 if self.model_kind == "rmbg2" else 512
+        # modnet 默认提到 768（更长边），保留更多发丝/边缘细节；infer_size 可被 opts 覆盖。
+        if infer_size and infer_size >= 64:
+            self.infer_size = infer_size
+        else:
+            self.infer_size = 1024 if self.model_kind == "rmbg2" else 768
         if model_path:
             try:
                 import onnxruntime as ort  # type: ignore
@@ -204,20 +232,35 @@ class _Predictor:
                 if self.model_kind != "rmbg2":
                     so.intra_op_num_threads = 1
                     so.inter_op_num_threads = 1
-                # P6：rmbg2 优先 DirectML（DML）走 Windows 自带 GPU 加速（本机
-                # RTX 5060 Ti 实测 ~0.58s/帧 vs CPU 5.9s/帧 ≈ 10×）；拿不到 DML
-                # 再回退 CPU。CUDA EP 在本机 Blackwell(sm_120) + onnxruntime 1.28
-                # 组合下会静默回退 CPU，故不启用；DML 不依赖 CUDA toolkit。
-                if self.model_kind == "rmbg2" and "DmlExecutionProvider" in ort.get_available_providers():
-                    providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
+                # P6：推理 provider 兜底链 CUDA → DML → CPU，逐个 EP 独立尝试，
+                # 任一 EP 初始化失败不影响其他 EP。升级 NVIDIA 驱动(≥580, 含
+                # CUDA 13.x) + onnxruntime-gpu 1.28.0 后，CUDA EP 在本机
+                # Blackwell(sm_120) 可用，优先走 CUDA（最快）；拿不到 CUDA 时
+                # 回退 DirectML（DML，Windows 自带 GPU 加速，本机 RTX 5060 Ti
+                # 实测 ~0.58s/帧 vs CPU 5.9s/帧 ≈ 10×）；最后回退 CPU。
+                # 注：onnxruntime-gpu 不含 DmlExecutionProvider，故 DML 分支仅在
+                # 装了 onnxruntime-directml 时生效；CUDA 失败时由本兜底链接住。
+                _avail = ort.get_available_providers()
+                self.session = None
+                ep_tag = None
+                for ep in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"):
+                    if ep not in _avail:
+                        continue
+                    try:
+                        _sess = ort.InferenceSession(model_path, so, providers=[ep])
+                        if ep in _sess.get_providers():
+                            self.session = _sess
+                            ep_tag = ep
+                            break
+                    except Exception as _e:  # noqa: BLE001
+                        log("  EP[{}] 初始化失败({})，尝试下一个".format(ep, _e))
+                        continue
+                if self.session is not None:
+                    self.input_name = self.session.get_inputs()[0].name
+                    self.use_real = True
+                    log("{} ONNX 加载成功，使用真实模型推理（EP: {}）".format(self.model_kind, ep_tag))
                 else:
-                    providers = ["CPUExecutionProvider"]
-                self.session = ort.InferenceSession(model_path, so, providers=providers)
-                used = self.session.get_providers()
-                self.input_name = self.session.get_inputs()[0].name
-                self.use_real = True
-                ep_tag = "DML" if "DmlExecutionProvider" in used else "CPU"
-                log("{} ONNX 加载成功，使用真实模型推理（EP: {}）".format(self.model_kind, ep_tag))
+                    raise RuntimeError("所有可用 EP 均初始化失败")
             except Exception as e:  # noqa: BLE001
                 self.log("ONNX 推理不可用({})，回退占位 matte".format(e))
                 self.use_real = False
@@ -271,6 +314,68 @@ class _Predictor:
             return m.astype(np.float32)
 
 
+# ───────────────────────── 软 matte 精修 ─────────────────────────
+# 目标：把 MODNet / RMBG-2.0 输出的「已有软 alpha」进一步做成剪映级别的
+#       软边 / 发丝 / 半透明过渡——而不是被下游窄带阈值压成硬切。
+#
+# 1) 导向滤波(guided filter)：以「原帧亮度」为引导、matte 为待滤波信号，
+#    在保持物体边界（贴合原图高频结构、不发虚）的同时，把半透明过渡区的
+#    alpha 做成空间平滑的渐变（而非噪声/阶梯）。这是软边 + 色彩正确发丝
+#    的关键——过渡像素的 alpha 介于 0~1，合成时自然透出背景，形成半透明 fringe。
+# 2) 时序高斯平滑：MODNet/RMBG-2.0 为逐帧独立推理，半透明区易逐帧抖动（闪烁）。
+#    用居中高斯窗跨帧平均，消除闪烁、保证视频时序一致（剪映智能抠像亦有此步）。
+
+def _guided_filter(I, p, r, eps):
+    """单通道导向滤波：I 引导(0..1)，p 待滤波(0..1)，返回 q(0..1)。
+
+    用 scipy.ndimage.uniform_filter 实现 O(N) box filter（等价均值滤波），
+    避免手写积分图。r 为半径（窗口 2r+1）；eps 为正则（防止平坦区除零/过冲）。
+    """
+    from scipy.ndimage import uniform_filter  # type: ignore
+
+    win = 2 * r + 1
+    mean_I = uniform_filter(I, size=win)
+    mean_p = uniform_filter(p, size=win)
+    mean_Ip = uniform_filter(I * p, size=win)
+    mean_II = uniform_filter(I * I, size=win)
+    var_I = mean_II - mean_I * mean_I
+    cov_Ip = mean_Ip - mean_I * mean_p
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+    mean_a = uniform_filter(a, size=win)
+    mean_b = uniform_filter(b, size=win)
+    q = mean_a * I + mean_b
+    return q
+
+
+def _refine_alpha(rgb, matte, min_side):
+    """对软 matte 做导向滤波精修，返回精修后 matte(0..1)。
+
+    r 随分辨率自适应（约 1.2% 短边，限 [6, 40]）；eps 取 1e-3（弱正则，保留细节）。
+    """
+    np = _np_for_refine
+    I = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(np.float32) / 255.0
+    r = int(max(6, min(40, round(min_side * 0.012))))
+    q = _guided_filter(I, matte.astype(np.float32), r, 1e-3)
+    return np.clip(q, 0.0, 1.0)
+
+
+_np_for_refine = None  # 在 generate_matte 内赋值，避免在模块顶层强制 import numpy
+
+
+def _gauss_weights(window, center):
+    import math
+    sigma = max(1e-3, window / 3.0)  # 窗宽约覆盖 ±3σ
+    w = []
+    s = 0.0
+    for k in range(window):
+        d = k - center
+        val = math.exp(-(d * d) / (2.0 * sigma * sigma))
+        w.append(val)
+        s += val
+    return [x / s for x in w]
+
+
 # ───────────────────────── 主入口 ─────────────────────────
 
 def generate_matte(input_path: str, opts: dict) -> dict:
@@ -309,7 +414,11 @@ def generate_matte(input_path: str, opts: dict) -> dict:
         model_path = _ensure_rmbg2_model(log)
     else:
         model_path = _ensure_model(log)
-    predictor = _Predictor(model_path, log, model_kind)
+    # 软 matte 精修开关（默认开）：导向滤波保留软边/发丝；时序平滑消闪烁。
+    refine = bool(opts.get("refine", True))
+    temporal = bool(opts.get("temporal", True))
+    infer_size = int(opts.get("infer_size", 0) or 0)
+    predictor = _Predictor(model_path, log, model_kind, infer_size)
 
     ff = _ffmpeg_exe()
     reader = subprocess.Popen(
@@ -317,33 +426,78 @@ def generate_matte(input_path: str, opts: dict) -> dict:
          "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
         stdout=subprocess.PIPE,
     )
+    # 无损编码(-crf 0)：matte 是 alpha 遮罩，8-bit 有损 x264(crf≈23) 会量化出 banding、
+    # 抹平软过渡梯度。改无损后保留完整软 alpha 梯度（下游导出/预览才能呈现半透明边缘）。
     writer = subprocess.Popen(
         [ff, "-v", "error", "-y",
          "-f", "rawvideo", "-pix_fmt", "gray",
          "-s", "{}x{}".format(w, h), "-r", "{:.4f}".format(fps), "-i", "pipe:0",
-         "-an", "-c:v", "libx264", "-pix_fmt", "gray", output_path],
+         "-an", "-c:v", "libx264", "-crf", "0", "-pix_fmt", "gray", output_path],
         stdin=subprocess.PIPE,
     )
 
     np = predictor.np
+    global _np_for_refine
+    _np_for_refine = np
     frame_bytes = w * h * 3
-    frame_count = 0
+    min_side = min(w, h)
+
+    # 时序平滑：居中高斯窗跨帧平均（窗口 5、延迟 2），消除逐帧抖动；
+    # 流式处理用定长 ring buffer，结尾补齐尾帧，避免方向性拖影。
+    from collections import deque  # noqa: E402
+    W = 5 if temporal else 1
+    delay = W // 2
+    ring = deque(maxlen=W)
+
+    def _emit_at(cpos: int, L: int):
+        # 在长度为 L 的 ring 上，以 cpos 为中心的高斯加权（居中时序平滑）。
+        if L <= 0:
+            return None
+        cpos = max(0, min(L - 1, cpos))
+        wse = _gauss_weights(L, cpos)
+        acc = None
+        for k in range(L):
+            f = ring[k]
+            acc = f * wse[k] if acc is None else acc + f * wse[k]
+        return np.clip(acc, 0.0, 1.0)
+
+    read_n = 0
+    written = 0
     try:
         while True:
             raw = reader.stdout.read(frame_bytes)
             if len(raw) < frame_bytes:
                 break
             rgb = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
-            matte = predictor.predict_frame(rgb)  # HxW float32 [0,1]
-            gray = (np.clip(matte, 0.0, 1.0) * 255.0).astype(np.uint8)
-            writer.stdin.write(gray.tobytes())
-            frame_count += 1
+            matte = predictor.predict_frame(rgb)  # HxW float32 [0,1]，已是软 alpha
+            if refine:
+                matte = _refine_alpha(rgb, matte, min_side)
+            ring.append(matte)
+            read_n += 1
+            L = len(ring)
+            if L >= 1 and read_n > delay:
+                # 输出「延迟 delay 帧之前」的那一帧（居中窗中心）
+                out = _emit_at(L - 1 - delay, L)
+                if out is not None:
+                    gray = (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
+                    writer.stdin.write(gray.tobytes())
+                    written += 1
     finally:
+        # 补齐尾帧：输出尚未 emit 的最后 delay 帧（ring 末尾 delay 个位置居中窗）。
+        L = len(ring)
+        for extra in range(delay):
+            out = _emit_at(L - delay + extra, L)
+            if out is not None:
+                gray = (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
+                writer.stdin.write(gray.tobytes())
+                written += 1
         reader.stdout.close()
         reader.wait()
         if writer.stdin:
             writer.stdin.close()
         writer.wait()
+
+    frame_count = written
 
     duration = frame_count / fps if fps > 0 else probe["duration"]
     elapsed = time.time() - t0

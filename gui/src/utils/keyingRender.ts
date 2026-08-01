@@ -130,19 +130,18 @@ export function applyMatte(
   const matteImg = mctx.getImageData(0, 0, vw, vh);
   const m = matteImg.data;
 
-  const lo = threshold - softness * 0.5;
-  const hi = threshold + softness * 0.5;
+  // 保留软 matte（与导出 graph.rs 一致）：alpha = clip((v - thr) * gain + 0.5, 0, 1)。
+  // gain 随 edgeSoftness 趋近 1（完全保留模型天然软 alpha），edgeSoftness→0 时 gain 增大→更硬。
+  // 线性映射（非 smoothstep），与 Rust geq 的 clip 严格一致，保证预览=导出。
+  const s = Math.max(0, Math.min(1, softness));
+  const gain = 1.0 + (1.0 - s) * 2.0;
 
   for (let i = 0; i < d.length; i += 4) {
     // matte 为灰度，取 R 通道即 luma（matte/255）
     const mv = m[i] / 255;
-    let a: number;
-    if (softness <= 0) {
-      a = mv >= threshold ? 255 : 0; // 硬阈值
-    } else {
-      a = smoothstep(lo, hi, mv) * 255;
-    }
-    d[i + 3] = a;
+    let a = (mv - threshold) * gain + 0.5;
+    if (a < 0) a = 0; else if (a > 1) a = 1;
+    d[i + 3] = a * 255;
   }
 
   ctx.putImageData(img, 0, 0);

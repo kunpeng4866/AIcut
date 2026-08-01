@@ -341,11 +341,14 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
             seg_labels.push(seg_label.clone());
             let thr = kcfg.threshold.unwrap_or(0.5);
             let soft = kcfg.edge_softness;
-            let half = soft / 2.0;
-            let denom = if soft < 1e-3 { 1.0 } else { soft };
+            // 保留软 matte：下游不再用窄带阈值把 MODNet/RMBG-2.0 的软 alpha 压成硬切。
+            // alpha = clip((v - thr) * gain + 0.5, 0, 1)；gain 随 edgeSoftness 趋近 1（完全
+            // 保留模型天然软梯度），edgeSoftness→0 时 gain 增大→边缘更硬（用户可调锐化）。
+            let s = soft.clamp(0.0, 1.0);
+            let gain = 1.0 + (1.0 - s) * 2.0;
             let geq_expr = format!(
-                "clip((lum(X,Y)/255-({t}-{h}))/({d}),0,1)*255",
-                t = fmt(thr), h = fmt(half), d = fmt(denom)
+                "clip((lum(X,Y)/255-({t}))*{g}+0.5,0,1)*255",
+                t = fmt(thr), g = fmt(gain)
             );
             let mt = format!("{}mt{}", label, i);
             // 帧精确边界：用 start_frame/end_frame 替代秒级 trim，避免 ffmpeg 在 concat 边界
@@ -439,12 +442,13 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
         let k = c.keying.as_ref().unwrap();
         let thr = k.threshold.unwrap_or(0.5);
         let soft = k.edge_softness;
-        let half = soft / 2.0;
-        // 软化带宽 denom：softness≈0 时退化为硬阈值（denom=1，clip((v-thr)/1) 即 v>=thr?1:0）
-        let denom = if soft < 1e-3 { 1.0 } else { soft };
+        // 保留软 matte（与关键帧路径一致）：直接用模型天然软 alpha，仅按 threshold 平移
+        // 水平、按 edgeSoftness 微调锐度，不再用窄带把软边压成硬切。
+        let s = soft.clamp(0.0, 1.0);
+        let gain = 1.0 + (1.0 - s) * 2.0;
         let geq_expr = format!(
-            "clip((lum(X,Y)/255-({t}-{h}))/({d}),0,1)*255",
-            t = fmt(thr), h = fmt(half), d = fmt(denom)
+            "clip((lum(X,Y)/255-({t}))*{g}+0.5,0,1)*255",
+            t = fmt(thr), g = fmt(gain)
         );
         let mt_label = format!("{}mt", label);
         // matte 输入先缩放到与源一致尺寸（灰度 mp4 与源同分辨率；显式 scale 防尺寸偏差），
