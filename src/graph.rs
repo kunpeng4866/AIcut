@@ -206,17 +206,13 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     pre.push_str(&format!("[{}]", pre_label));
     nodes.push(pre);
 
-    // 1.5) 美颜·皮肤管理：仅皮肤区域（mask_asset_id 命中的灰度 mask）混合磨皮/美白/清晰/肤色。
+    // 1.5) 美颜·皮肤管理：多区域 mask（face/neck/arm 并集，回退 legacy mask_asset_id）。
     // 与 matte 类似，mask 作为额外输入；先把源 split 成 orig + src_for_beauty，
-    // 对 src_for_beauty 施加美颜链，再用 maskedmerge(orig, beauty, mask) 按 mask luma 混合
-    // （out = orig*(1-mask) + beauty*mask）。mask 必须缩放到与源一致尺寸（sw×sh），否则
-    // maskedmerge 三路分辨率不一致会报 Invalid argument。
-    let beauty_idx = c.beauty.as_ref().and_then(|b| {
-        if b.enabled {
-            b.mask_asset_id.as_ref().and_then(|id| beauty_map.get(id).copied())
-        } else { None }
-    });
-    if let Some(mi) = beauty_idx {
+    // 对 src 施加美颜链，再按 mask luma 混合（out = orig*(1-mask) + beauty*mask）。
+    // mask 必须缩放到与源一致尺寸（sw×sh），否则三路分辨率不一致会报 Invalid argument。
+    // 多区域：face/neck/arm 各为一个灰度 mask 输入，两两 blend=lighten 取并集（max luma）。
+    let beauty_masks = collect_beauty_region_masks(c, &beauty_map);
+    if !beauty_masks.is_empty() {
         if is_beauty_keyframed(c) {
             let segs = beauty_segments(c);
             let n = segs.len();
@@ -236,7 +232,6 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
                 let borig = format!("{}borig{}", label, i);
                 let bsrc = format!("{}bsrc{}", label, i);
                 let bbeauty = format!("{}bbeauty{}", label, i);
-                let bmask = format!("{}bmask{}", label, i);
                 let bra = format!("{}bra{}", label, i);
                 // 每段：源扇出 2 路（orig 作 overlay 底，src 作美颜输入）；mask 同步 trim+setpts 到同窗口
                 nodes.push(format!(
@@ -248,10 +243,8 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
                 } else {
                     nodes.push(format!("[{bsrc}][{bbeauty}]"));
                 }
-                nodes.push(format!(
-                    "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,format=gray,scale={sw}:{sh}[{bmask}]",
-                    mi = mi, sf = sf, ef = ef, sw = sw, sh = sh, bmask = bmask
-                ));
+                let (mask_nodes, bmask) = build_beauty_mask_nodes(label, &beauty_masks, sw, sh, fps, Some((sf, ef)), i);
+                nodes.extend(mask_nodes);
                 nodes.push(format!("[{bbeauty}][{bmask}]alphamerge[{bra}]"));
                 nodes.push(format!("[{borig}][{bra}]overlay=format=auto[{seg_out}]"));
             }
@@ -263,7 +256,6 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
             let borig = format!("{}borig", label);
             let bsrc = format!("{}bsrc", label);
             let bbeauty = format!("{}bbeauty", label);
-            let bmask = format!("{}bmask", label);
             let beauty_rgba = format!("{}bra", label);
             let bout = format!("{}bout", label);
             // 用 alphamerge 把灰度 mask 的 luma 注入美颜结果的 alpha，
@@ -271,7 +263,8 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
             // 注：maskedmerge 在本机 ffmpeg 构建下不按 luma 限制（背景仍被改动），故不用它。
             nodes.push(format!("[{pre}]split=2[{borig}][{bsrc}]", pre = pre_label));
             nodes.push(format!("[{bsrc}]{chain}[{bbeauty}]"));
-            nodes.push(format!("[{mi}:v]format=gray,scale={sw}:{sh}[{bmask}]"));
+            let (mask_nodes, bmask) = build_beauty_mask_nodes(label, &beauty_masks, sw, sh, fps, None, 0);
+            nodes.extend(mask_nodes);
             nodes.push(format!("[{bbeauty}][{bmask}]alphamerge[{beauty_rgba}]"));
             nodes.push(format!("[{borig}][{beauty_rgba}]overlay=format=auto[{bout}]"));
             pre_label = bout;
@@ -499,6 +492,70 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     nodes
 }
 
+/// 收集 clip 的美颜区域 mask 输入索引（按 face/neck/arm 优先，无则回退 legacy mask_asset_id）。
+/// 返回 [(input_index, region_label), ...]；空 = 无 mask（不施加美颜，保持历史行为）。
+fn collect_beauty_region_masks(c: &Clip, beauty_map: &HashMap<String, usize>) -> Vec<(usize, String)> {
+    let b = match &c.beauty { Some(b) if b.enabled => b, _ => return Vec::new() };
+    let mut out: Vec<(usize, String)> = Vec::new();
+    // 多区域优先
+    if let Some(id) = &b.face_mask_asset_id {
+        if let Some(&mi) = beauty_map.get(id) { out.push((mi, "face".to_string())); }
+    }
+    if let Some(id) = &b.neck_mask_asset_id {
+        if let Some(&mi) = beauty_map.get(id) { out.push((mi, "neck".to_string())); }
+    }
+    if let Some(id) = &b.arm_mask_asset_id {
+        if let Some(&mi) = beauty_map.get(id) { out.push((mi, "arm".to_string())); }
+    }
+    // 无多区域 mask 时回退 legacy 单区域
+    if out.is_empty() {
+        if let Some(id) = &b.mask_asset_id {
+            if let Some(&mi) = beauty_map.get(id) { out.push((mi, "legacy".to_string())); }
+        }
+    }
+    out
+}
+
+/// 构建多区域 mask 并集节点，返回 (节点列表, 并集 mask 标签)。
+/// - seg=Some((sf, ef))：对每个区域 mask 做 trim+setpts 对齐到该 segment 时间窗；
+/// - seg=None：整段（静态美颜）。
+/// 多个区域 mask 用 blend=all_mode=lighten 两两取并集（max luma），得到单一 alpha 源。
+fn build_beauty_mask_nodes(
+    label: &str,
+    masks: &[(usize, String)],
+    sw: u32,
+    sh: u32,
+    _fps: u32,
+    seg: Option<(i64, i64)>,
+    suffix: usize,
+) -> (Vec<String>, String) {
+    let mut nodes: Vec<String> = Vec::new();
+    let mut scaled: Vec<String> = Vec::new();
+    for (i, (mi, reg)) in masks.iter().enumerate() {
+        let sl = format!("{}bm{}s{}_{}", label, suffix, i, reg);
+        match seg {
+            Some((sf, ef)) => {
+                nodes.push(format!(
+                    "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,format=gray,scale={sw}:{sh}[{sl}]",
+                    mi = mi, sf = sf, ef = ef, sw = sw, sh = sh, sl = sl
+                ));
+            }
+            None => {
+                nodes.push(format!("[{mi}:v]format=gray,scale={sw}:{sh}[{sl}]", mi = mi, sw = sw, sh = sh, sl = sl));
+            }
+        }
+        scaled.push(sl);
+    }
+    let mut cur = scaled[0].clone();
+    for sl in &scaled[1..] {
+        // 标签需全局唯一：用节点数保证不冲突
+        let uniq = format!("{}bmu{}_{}", label, suffix, nodes.len());
+        nodes.push(format!("[{cur}][{sl}]blend=all_mode=lighten[{uniq}]", cur = cur, sl = sl, uniq = uniq));
+        cur = uniq;
+    }
+    (nodes, cur)
+}
+
 fn offset_x(c: &Clip, w: u32) -> i64 {
     let x = keyframed(c, "transform.x", c.transform.x);
     ((x - 0.5) * w as f64).round() as i64
@@ -564,14 +621,25 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     }
     // 美颜·皮肤管理：皮肤区域 mask 素材（灰度 mp4）作为额外输入加入导出（独立 -i），
     // 记录其全局输入索引供 build_video_chain 引用 [idx:v]，与 matte 同一条 maskedmerge 路径。
+    // P1：除 legacy mask_asset_id 外，也注册 face/neck/arm 多区域 mask 资产。
     let mut beauty_map: HashMap<String, usize> = HashMap::new();
     for (_, c) in &video_clips {
         if let Some(b) = &c.beauty {
             if b.enabled {
-                if let Some(id) = &b.mask_asset_id {
+                let candidate_ids: Vec<&String> = [
+                    b.mask_asset_id.as_ref(),
+                    b.face_mask_asset_id.as_ref(),
+                    b.neck_mask_asset_id.as_ref(),
+                    b.arm_mask_asset_id.as_ref(),
+                ]
+                .iter()
+                .flatten()
+                .map(|id| *id)
+                .collect();
+                for id in candidate_ids {
                     if !beauty_map.contains_key(id) {
                         if let Some(a) = project.asset_by_id(id) {
-                            beauty_map.insert(id.clone(), cmd.inputs.len());
+                            beauty_map.insert(id.to_string(), cmd.inputs.len());
                             cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None });
                         }
                     }

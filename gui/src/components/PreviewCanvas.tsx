@@ -14,7 +14,7 @@ import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
 import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
-import { applyBeauty, drawBeautyMaskFrame } from '../utils/beautyRender';
+import { applyBeauty, drawBeautyMaskFrame, applyBeautyMulti, getBeautyMaskCanvases, resolveBeautyMaskRefs, type MultiMaskBeauty } from '../utils/beautyRender';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -185,6 +185,8 @@ const KeyedCanvas = ({
   // 美颜（beauty）：隐藏 skin_mask 视频缓存（按 path 索引）+ 离屏 canvas（与 matte 对称）
   const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 美颜多区域：每个区域 mask 资产 id → 独立离屏 canvas（避免脸/脖/臂 互相覆盖）
+  const beautyMultiCanvasCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   // 背景合成（P3）：隐藏背景图片/视频元素，垫在 keyed 之下
   const bgVideoRef = useRef<HTMLVideoElement | null>(null);
   const bgImageRef = useRef<HTMLImageElement | null>(null);
@@ -297,20 +299,24 @@ const KeyedCanvas = ({
               if (ctx) ctx.drawImage(drawn, 0, 0);
             }
           }
-          // 美颜（beauty）：在抠像绘制之后，取 skin_mask 帧并对绘制后的可见画布 applyBeauty（作用域限于皮肤区域）
-          // 注意读取 clip.beauty.maskAssetId（非 keying.matteAssetId）。
-          if (beautyMaskAsset && clip.beauty?.enabled && clip.beauty.maskAssetId) {
-            const maskCanvas = drawBeautyMaskFrame(pathToUrl(beautyMaskAsset.path), beautyVideoCacheRef, beautyCanvasRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
-            if (maskCanvas) {
-              const t = useUIStore.getState().currentTime;
-              const effBeauty = {
-                ...clip.beauty,
-                smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, clip.beauty.smoothing),
-                whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, clip.beauty.whitening),
-                clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, clip.beauty.clarity),
-              };
-              const bctx = canvas.getContext('2d');
-              if (bctx) applyBeauty(canvas, maskCanvas, effBeauty);
+          // 美颜（beauty）：在抠像绘制之后，取合并后的多区域 skin_mask 帧并对绘制后的可见画布 applyBeauty（作用域限于皮肤区域）。
+          // 多区域（脸/脖/臂）合并为 union 权重，与后端导出一致。注意读取 clip.beauty 的区域 id（非 keying.matteAssetId）。
+          if (clip.beauty?.enabled) {
+            const mb = clip.beauty as MultiMaskBeauty;
+            if (mb.faceMaskAssetId || mb.neckMaskAssetId || mb.armMaskAssetId || mb.maskAssetId) {
+              const maskRefs = resolveBeautyMaskRefs(mb, assets);
+              const maskCanvases = getBeautyMaskCanvases(maskRefs, beautyVideoCacheRef, beautyMultiCanvasCacheRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
+              if (maskCanvases.length) {
+                const t = useUIStore.getState().currentTime;
+                const effBeauty = {
+                  ...clip.beauty,
+                  smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, clip.beauty.smoothing),
+                  whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, clip.beauty.whitening),
+                  clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, clip.beauty.clarity),
+                };
+                const bctx = canvas.getContext('2d');
+                if (bctx) applyBeautyMulti(canvas, maskCanvases, effBeauty);
+              }
             }
           }
         } catch {
@@ -332,7 +338,7 @@ const KeyedCanvas = ({
       if (bv) { try { bv.pause(); bv.removeAttribute('src'); bv.load(); } catch (_) {} bgVideoRef.current = null; }
       bgImageRef.current = null;
     };
-  }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isMatte, matteAsset, beautyMaskAsset]);
+  }, [clip.id, keying, asset?.width, asset?.height, videoRefs, isMatte, matteAsset, assets, clip.beauty, beautyMaskAsset]);
 
   return (
     <>
@@ -373,6 +379,8 @@ const BeautyCanvas = ({
   // 美颜（beauty）：隐藏 skin_mask 视频缓存（按 path 索引）+ 离屏 canvas
   const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 美颜多区域：每个区域 mask 资产 id → 独立离屏 canvas（避免脸/脖/臂 互相覆盖）
+  const beautyMultiCanvasCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
 
   useEffect(() => {
     let raf = 0;
@@ -388,10 +396,14 @@ const BeautyCanvas = ({
           const ctx = canvas.getContext('2d');
           if (ctx) {
             ctx.drawImage(v, 0, 0, vw, vh);
-            // 取 skin_mask 帧（与源视频同步 currentTime）并 applyBeauty（读取 clip.beauty.maskAssetId）
-            if (maskAsset && clip.beauty?.enabled && clip.beauty.maskAssetId) {
-              const maskCanvas = drawBeautyMaskFrame(pathToUrl(maskAsset.path), beautyVideoCacheRef, beautyCanvasRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
-              if (maskCanvas) applyBeauty(canvas, maskCanvas, clip.beauty);
+            // 取合并后的多区域 skin_mask 帧（与源视频同步 currentTime）并 applyBeauty（读取 clip.beauty 区域 id）
+            if (clip.beauty?.enabled) {
+              const mb = clip.beauty as MultiMaskBeauty;
+              if (mb.faceMaskAssetId || mb.neckMaskAssetId || mb.armMaskAssetId || mb.maskAssetId) {
+                const maskRefs = resolveBeautyMaskRefs(mb, assets);
+                const maskCanvases = getBeautyMaskCanvases(maskRefs, beautyVideoCacheRef, beautyMultiCanvasCacheRef, v.currentTime, v.paused, v.playbackRate, vw, vh);
+                if (maskCanvases.length) applyBeautyMulti(canvas, maskCanvases, clip.beauty);
+              }
             }
           }
         } catch {
@@ -407,7 +419,7 @@ const BeautyCanvas = ({
       beautyVideoCacheRef.current.clear();
       beautyCanvasRef.current = null;
     };
-  }, [clip.id, clip.beauty, asset?.width, asset?.height, videoRefs, maskAsset]);
+  }, [clip.id, clip.beauty, asset?.width, asset?.height, videoRefs, maskAsset, assets]);
 
   return (
     <>
@@ -1380,10 +1392,14 @@ export default function PreviewCanvas() {
                 const isKeying = !!(clip.keying && clip.keying.enabled &&
                   (clip.keying.mode === 'chroma' || clip.keying.mode === 'smart' || clip.keying.mode === 'manual'));
                 // 美颜（HTML5 回退）：skin_mask 美颜合成。纯美颜（无抠像）用 BeautyCanvas；
-                // 与抠像并存时走 KeyedCanvas 并在其内部叠加美颜。注意读取 clip.beauty.maskAssetId。
-                const isBeauty = !!(clip.beauty && clip.beauty.enabled && clip.beauty.maskAssetId);
+                // 与抠像并存时走 KeyedCanvas 并在其内部叠加美颜。支持多区域（脸/脖/臂）union，回退单 maskAssetId。
+                const mb0 = clip.beauty as MultiMaskBeauty | undefined;
+                const isBeauty = !!(
+                  clip.beauty && clip.beauty.enabled &&
+                  (mb0?.faceMaskAssetId || mb0?.neckMaskAssetId || mb0?.armMaskAssetId || clip.beauty.maskAssetId)
+                );
                 const beautyMaskAsset = isBeauty
-                  ? project.assets.find((a) => a.id === clip.beauty!.maskAssetId)
+                  ? project.assets.find((a) => a.id === (mb0?.faceMaskAssetId || mb0?.neckMaskAssetId || mb0?.armMaskAssetId || clip.beauty!.maskAssetId))
                   : undefined;
                 if (isKeying) {
                   // 智能抠像（smart）需要按 matteAssetId 取出真实 matte 资产路径

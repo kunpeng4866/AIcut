@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { uid } from '../../utils/clipFactories';
 import type { ClipConfig, BeautyConfig, SkinTone } from '../../types';
+import { type MultiMaskBeauty } from '../../utils/beautyRender';
 
 // 复用面板配色（深色 #16213e / #0f3460 边框 / #e94560 强调）
 const S = {
@@ -174,20 +175,40 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
         JSON.stringify({ smoothing: beauty.smoothing, whitening: beauty.whitening, clarity: beauty.clarity, skinTone: beauty.skinTone, fps, output })
       );
       if (!res?.success) throw new Error(res?.error || '生成皮肤遮罩失败');
-      const result = (res.data ?? {}) as { maskPath: string; width: number; height: number; fps: number; frames: number; skinCoverage?: number };
-      const assetId = uid('asset');
-      store.addAsset({
-        id: assetId, type: 'video', path: result.maskPath,
-        duration: (result.frames ?? 0) / (result.fps ?? fps),
-        width: result.width, height: result.height, fps: result.fps,
-      });
+      // 后端返回多区域（脸/脖/臂）mask 路径及总皮肤覆盖率
+      const result = (res.data ?? {}) as {
+        faceMaskPath?: string; neckMaskPath?: string; armMaskPath?: string;
+        skinCoverage?: number; width?: number; height?: number; fps?: number; frames?: number;
+      };
+      // 注册三个区域 mask 资产（脸/脖/臂），各自独立资产 id
+      const mkAsset = (p?: string): string | undefined => {
+        if (!p) return undefined;
+        const id = uid('asset');
+        store.addAsset({
+          id, type: 'video', path: p,
+          duration: (result.frames ?? 0) / (result.fps ?? fps),
+          width: result.width, height: result.height, fps: result.fps,
+        });
+        return id;
+      };
+      const faceId = mkAsset(result.faceMaskPath);
+      const neckId = mkAsset(result.neckMaskPath);
+      const armId = mkAsset(result.armMaskPath);
       // 若三项参数均为 0（旧工程或仅开启未调），套用非零基线，确保生成遮罩后有可见效果
       const baseline = (beauty.smoothing === 0 && beauty.whitening === 0 && beauty.clarity === 0)
         ? { smoothing: 50, whitening: 25, clarity: 15 }
         : {};
-      store.updateClip(trackId, clip.id, {
-        beauty: { ...beauty, ...baseline, enabled: true, maskAssetId: assetId },
-      });
+      // 写入三区域资产 id（合并 union 由预览侧 applyBeautyMulti 处理）；兼容保留旧单 maskAssetId（指向脸区域）
+      const next: MultiMaskBeauty = {
+        ...(beauty as MultiMaskBeauty),
+        ...baseline,
+        enabled: true,
+        faceMaskAssetId: faceId,
+        neckMaskAssetId: neckId,
+        armMaskAssetId: armId,
+        maskAssetId: faceId ?? beauty.maskAssetId,
+      };
+      store.updateClip(trackId, clip.id, { beauty: next });
       setCoverage(typeof result.skinCoverage === 'number' ? result.skinCoverage : null);
     } catch (e: unknown) {
       console.error('生成皮肤遮罩失败', e);
@@ -199,9 +220,14 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
     }
   };
 
-  const maskAsset = beauty.maskAssetId
-    ? project.assets.find((a) => a.id === beauty.maskAssetId)
-    : undefined;
+  const mb = beauty as MultiMaskBeauty;
+  const hasMask = !!(mb.faceMaskAssetId || mb.neckMaskAssetId || mb.armMaskAssetId || beauty.maskAssetId);
+
+  // 已生成区域统计（脸/脖/臂）
+  const regionLabels: string[] = [];
+  if (mb.faceMaskAssetId) regionLabels.push('脸');
+  if (mb.neckMaskAssetId) regionLabels.push('脖');
+  if (mb.armMaskAssetId) regionLabels.push('臂');
 
   return (
     <div>
@@ -240,23 +266,22 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
       <div style={S.divider} />
 
       <SectionTitle>皮肤遮罩</SectionTitle>
-      {beauty.maskAssetId ? (
+      {hasMask ? (
         <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>
-          已生成遮罩，可重新生成
-          {maskAsset && <div style={{ color: '#8895b3', fontSize: 10, marginTop: 4, wordBreak: 'break-all' }}>资产：{maskAsset.path}</div>}
+          已生成{regionLabels.length > 0 ? `多区域遮罩（${regionLabels.join('/')}）` : '遮罩'}，可重新生成
           {coverage !== null && (
             <div style={{ color: coverage > 0.01 ? '#8895b3' : '#e9a23b', fontSize: 10, marginTop: 4 }}>
-              皮肤覆盖约 {(coverage * 100).toFixed(1)}%
+              总皮肤覆盖约 {(coverage * 100).toFixed(1)}%
               {coverage <= 0.01 ? '（偏低，可能未识别到皮肤，可重新生成或检查画面）' : ''}
             </div>
           )}
         </div>
       ) : (
-        <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成皮肤遮罩，点击下方按钮开始推理</div>
+        <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成皮肤遮罩，点击下方按钮开始多区域推理（脸/脖/臂）</div>
       )}
 
       <GenerateButton processing={processing} disabled={disabled} onClick={runGenerate}>
-        {processing ? '皮肤遮罩生成中…' : (beauty.maskAssetId ? '重新生成皮肤遮罩' : '生成皮肤遮罩')}
+        {processing ? '多区域遮罩生成中…' : (hasMask ? '重新生成多区域遮罩' : '生成多区域遮罩')}
       </GenerateButton>
 
       {error && (

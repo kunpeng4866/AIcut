@@ -5,7 +5,7 @@
 
 use crate::clock::{Clock, SteppedClock};
 use crate::compositor::{CompositeLayer, Compositor};
-use crate::decoder::{DecoderPool, PrefetchRequest};
+use crate::decoder::{DecodedFrame, DecoderPool, PrefetchRequest};
 use crate::ffmpeg;
 use crate::pipeline::strategy::*;
 use crate::project::{CanvasConfig, Clip, Project};
@@ -723,9 +723,8 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         let mut layers: Vec<CompositeLayer> = Vec::with_capacity(video_clips.len() + extra_next.len());
         for (cr, req) in video_clips.iter().zip(prefetch_reqs.iter()) {
             let clip = cr.clip;
-            let frame = self.decoder_pool
-                .decode(&req.asset_path, req.source_time, req.width, req.height)
-                .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", clip.asset_id, e)))?;
+            let now = self.current_time();
+            let frame = resolve_clip_frame(&self.project, &mut self.decoder_pool, clip, req, now)?;
             let mut tf = clip.transform.clone();
             let mut vframe = frame.to_video_frame(t, &clip.asset_id);
             // 出片段转场效果（zoom/blur/flash/wipe/feather/circle 在此施加）
@@ -736,9 +735,8 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
         }
         // 额外层：转场后 clip（叠加在顶层，淡入/滑入/wipe 揭示）
         for ((next, tp), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
-            let frame = self.decoder_pool
-                .decode(&req.asset_path, req.source_time, req.width, req.height)
-                .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", next.asset_id, e)))?;
+            let now = self.current_time();
+            let frame = resolve_clip_frame(&self.project, &mut self.decoder_pool, next, req, now)?;
             let mut tf = next.transform.clone();
             let mut vframe = frame.to_video_frame(t, &next.asset_id);
             // 入片段转场效果
@@ -1178,6 +1176,79 @@ fn box_blur_channel(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+// ════════════════════ 美颜解码（模块级自由函数） ════════════════════
+
+/// 解码单个 clip 的一帧；若 clip 启用美颜，则通过 ffmpeg 施加与 graph.rs 同义的
+/// build_beauty_spec + alphamerge+overlay（修复复杂导出路径「静默丢美颜」）。
+/// 美颜施加失败时回退到原始解码帧（不静默丢弃，至少保证导出不崩）。
+///
+/// 设计为自由函数（而非 `&mut self` 方法）：调用点位于 `render_video_frame` 内，该处
+/// `video_clips` 仍持有对 `self.timeline` 的不可变借用；若用 `&mut self` 方法会与之冲突。
+/// 这里只借用 `project`（不可变）与 `decoder_pool`（可变）两个不相交字段，避免整体借用。
+fn resolve_clip_frame<'a>(
+    project: &crate::project::Project,
+    decoder_pool: &mut DecoderPool,
+    clip: &'a Clip,
+    req: &PrefetchRequest,
+    now: f64,
+) -> Result<DecodedFrame, AppError> {
+    if let Some(bc) = &clip.beauty {
+        if bc.enabled {
+            if crate::filters::build_beauty_spec(&clip.beauty, req.width, req.height).is_some() {
+                let mask_path = bc.mask_asset_id.as_ref()
+                    .and_then(|id| project.asset_by_id(id).map(|a| a.path.clone()));
+                let mask_t = (now - clip.timeline_in).max(0.0);
+                match decode_beauty_frame(project, clip, req.source_time, req.width, req.height, mask_path.as_deref(), mask_t) {
+                    Ok(f) => return Ok(f),
+                    Err(e) => {
+                        eprintln!("[export] 美颜施加失败，回退原始帧: {}", e);
+                    }
+                }
+            } else {
+                eprintln!("[export] 美颜已启用但参数全 0，未施加（clip={}）", clip.id);
+            }
+        }
+    }
+    decoder_pool.decode(&req.asset_path, req.source_time, req.width, req.height)
+        .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", clip.asset_id, e)))
+}
+
+/// 用 ffmpeg 对主素材单帧施加美颜（含可选区域 mask 混合），返回 RGBA 解码帧。
+/// 与 graph.rs::build_beauty_spec + alphamerge+overlay 完全同义；区域 mask 缺失时整帧美颜。
+fn decode_beauty_frame<'a>(
+    project: &crate::project::Project,
+    clip: &'a Clip,
+    src_t: f64,
+    w: u32,
+    h: u32,
+    mask_path: Option<&str>,
+    mask_t: f64,
+) -> Result<DecodedFrame, AppError> {
+    let chain = crate::filters::build_beauty_spec(&clip.beauty, w, h)
+        .ok_or_else(|| AppError::Render("美颜滤镜为空".into()))?;
+    let asset_path = project.asset_by_id(&clip.asset_id)
+        .map(|a| a.path.clone())
+        .unwrap_or_default();
+    let cmd = crate::ffmpeg::build_beauty_frame_cmd(&asset_path, src_t, w, h, &chain, mask_path, mask_t);
+    let output = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| AppError::Render(format!("美颜解码启动失败: {}", e)))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Render(format!("美颜 ffmpeg 失败: {}", stderr.chars().take(500).collect::<String>())));
+    }
+    let expected = (w as usize) * (h as usize) * 4;
+    let data = if output.stdout.len() >= expected {
+        output.stdout[..expected].to_vec()
+    } else {
+        return Err(AppError::Render(format!("美颜输出不足: {} < {}", output.stdout.len(), expected)));
+    };
+    Ok(DecodedFrame { width: w, height: h, data, source_time: src_t })
 }
 
 #[cfg(test)]

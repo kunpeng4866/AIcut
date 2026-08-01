@@ -40,6 +40,14 @@ def main(argv) -> int:
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
+        # mode 扩展：parse 模式开启多区域（face/neck/arm）解析；model 由调用方经 opts["model"]
+        # 指定，未指定时回退到环境变量 AICUT_BEAUTY_MODEL（训练管线产出，可能不存在 → 回退阈值法）。
+        mode = opts.get("mode", "mask")
+        if mode == "parse":
+            opts = dict(opts)
+            opts["multiRegion"] = True
+            if not opts.get("model"):
+                opts["model"] = os.environ.get("AICUT_BEAUTY_MODEL")
         # 本链路只有「生成皮肤 mask」一个动作，固定调用 generate_skin_mask。
         result = generate_skin_mask(input_path, opts)
     except Exception as e:  # noqa: BLE001

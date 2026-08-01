@@ -1123,6 +1123,11 @@ mod tests {
             clarity,
             skin_tone: skin.to_string(),
             mask_asset_id: if mask.is_empty() { None } else { Some(mask.to_string()) },
+            face_mask_asset_id: None,
+            neck_mask_asset_id: None,
+            arm_mask_asset_id: None,
+            landmark_asset_id: None,
+            parse_model: None,
         })
     }
 

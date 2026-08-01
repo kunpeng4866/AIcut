@@ -315,12 +315,90 @@ def generate_skin_mask(input_path: str, opts: dict) -> dict:
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
 
+    # ── P1 解析模型加载 ──
+    # 优先使用调用方显式指定的 ONNX model_path；命中则走多区域（face/neck/arm）解析路径。
+    # 加载失败（缺失/损坏）→ 回退到旧阈值法（连通域+时序中值滤波），不回归、不静默丢效果。
+    model_path = opts.get("model") or None
+    service = None
+    if model_path:
+        try:
+            from inference_service import BeautyInferenceService
+            service = BeautyInferenceService(model_path)
+            log("已加载美颜解析模型: {}".format(model_path))
+        except Exception as e:  # noqa: BLE001
+            log("美颜解析模型加载失败，回退阈值法: {}".format(e))
+            service = None
+
     ff = _ffmpeg_exe()
+    # 解码管道始终打开（两种路径共用）
     reader = subprocess.Popen(
         [ff, "-v", "error", "-i", input_path,
          "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
         stdout=subprocess.PIPE,
     )
+
+    frame_bytes = w * h * 3
+    written = 0
+    total_skin = 0
+
+    # ── 分支 A：多区域解析（face/neck/arm 独立灰度 mask）──
+    if service is not None:
+        base, _ext = os.path.splitext(output_path)
+        face_out = opts.get("faceMaskOutput") or (base + "_face_mask.mp4")
+        neck_out = opts.get("neckMaskOutput") or (base + "_neck_mask.mp4")
+        arm_out = opts.get("armMaskOutput") or (base + "_arm_mask.mp4")
+        writers = {}
+        for key, outp in (("face", face_out), ("neck", neck_out), ("arm", arm_out)):
+            writers[key] = subprocess.Popen(
+                [ff, "-y", "-v", "error",
+                 "-f", "rawvideo", "-pix_fmt", "gray",
+                 "-s", "{}x{}".format(w, h), "-r", "{:.4f}".format(fps), "-i", "pipe:0",
+                 "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", outp],
+                stdin=subprocess.PIPE,
+            )
+        try:
+            while written < N:
+                raw = reader.stdout.read(frame_bytes)
+                if len(raw) < frame_bytes:
+                    break
+                rgb = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
+                masks = service.infer(rgb)  # face/neck/arm: float32 HxW ∈[0,1]
+                union = np.zeros((h, w), dtype=np.float32)
+                for key in ("face", "neck", "arm"):
+                    m = masks[key]
+                    union = np.maximum(union, m)
+                    gray = (np.clip(m, 0.0, 1.0) * 255.0).astype(np.uint8)
+                    writers[key].stdin.write(gray.tobytes())
+                total_skin += int((union > 0.5).sum())
+                written += 1
+        finally:
+            reader.stdout.close()
+            reader.wait()
+            for wr in writers.values():
+                if wr.stdin:
+                    wr.stdin.close()
+                wr.wait()
+        for key, wr in writers.items():
+            if wr.returncode != 0:
+                raise RuntimeError("ffmpeg 编码 {} mask 失败（退出码 {}）".format(key, wr.returncode))
+
+        elapsed = time.time() - t0
+        log("完成多区域 mask(ONNX face/neck/arm)：{}x{} {} 帧，用时 {:.2f}s".format(w, h, written, elapsed))
+        skin_coverage = (total_skin / (w * h * max(1, written))) if written > 0 else 0.0
+        return {
+            "faceMaskPath": os.path.abspath(face_out),
+            "neckMaskPath": os.path.abspath(neck_out),
+            "armMaskPath": os.path.abspath(arm_out),
+            "width": w,
+            "height": h,
+            "fps": fps,
+            "frames": written,
+            "skinCoverage": skin_coverage,
+            "model": "beauty_parse_onnx",
+            "mode": "parse",
+        }
+
+    # ── 分支 B：旧阈值法（连通域 + 时序中值滤波，单区域 skin mask）──
     writer = subprocess.Popen(
         [ff, "-y", "-v", "error",
          "-f", "rawvideo", "-pix_fmt", "gray",
@@ -328,10 +406,6 @@ def generate_skin_mask(input_path: str, opts: dict) -> dict:
          "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path],
         stdin=subprocess.PIPE,
     )
-
-    frame_bytes = w * h * 3
-    written = 0
-    total_skin = 0
     hist = deque(maxlen=temporal_window)  # 帧间滑动窗口（存二值皮肤区），用于时序中值滤波
     try:
         while written < N:

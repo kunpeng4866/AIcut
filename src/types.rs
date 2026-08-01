@@ -137,6 +137,22 @@ pub struct BeautyConfig {
     pub skin_tone: String,
     #[serde(default)]
     pub mask_asset_id: Option<String>,
+    // ── P1 多区域 mask（自研解析模型产出，与前端统一契约）──
+    /// face 区域皮肤 mask 资产 id（灰度 mp4）；与 mask_asset_id 互斥，优先于 legacy。
+    #[serde(rename = "faceMaskAssetId", default)]
+    pub face_mask_asset_id: Option<String>,
+    /// neck 区域皮肤 mask 资产 id
+    #[serde(rename = "neckMaskAssetId", default)]
+    pub neck_mask_asset_id: Option<String>,
+    /// arm 区域皮肤 mask 资产 id
+    #[serde(rename = "armMaskAssetId", default)]
+    pub arm_mask_asset_id: Option<String>,
+    /// 人脸关键点/landmark 资产 id（预留，供后续五官级美颜使用）
+    #[serde(rename = "landmarkAssetId", default)]
+    pub landmark_asset_id: Option<String>,
+    /// 自研皮肤解析模型标识（如 "beauty_parse_v1"）；None 时回退阈值法
+    #[serde(rename = "parseModel", default)]
+    pub parse_model: Option<String>,
 }
 
 /// 滤镜实例（来自 Clip.filters）

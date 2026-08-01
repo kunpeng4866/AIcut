@@ -2,6 +2,33 @@
 // 约定与 keying 的 matte 一致：mask 为灰度，luma = 权重（255 = 完全应用，0 = 不应用）。
 // 仅做图像处理的预览近似（导出路径使用 ffmpeg 双边滤波等更强算法）。
 
+import type { BeautyConfig } from '../types';
+
+// 美颜参数（preview/导出共用的最小字段）
+export interface BeautyParams {
+  smoothing: number;
+  whitening: number;
+  clarity: number;
+  skinTone: string;
+}
+
+// 多区域 mask 字段（与后端 BeautyConfig 扩展一致；前端仅消费，不修改类型定义）。
+// 当 clip.beauty 带 faceMaskAssetId/neckMaskAssetId/armMaskAssetId 时，预览用合并后的皮肤区域（union）作为美颜权重，
+// 使预览与后端导出一致（后端对各区域分别 alphamerge+overlay 施加美颜）。
+export type MultiMaskBeauty = BeautyConfig & {
+  faceMaskAssetId?: string;
+  neckMaskAssetId?: string;
+  armMaskAssetId?: string;
+  landmarkAssetId?: string;
+  parseModel?: string;
+};
+
+// 单个区域 mask 的引用（资产 id + 真实文件系统路径）
+export interface BeautyMaskRef {
+  id: string;
+  path: string;
+}
+
 // 简易可分离 box blur（水平 + 垂直各一遍，边缘 clamp 重复）。radius<=0 时原样返回。
 function boxBlur(src: Float32Array, w: number, h: number, radius: number): Float32Array {
   if (radius <= 0) return src;
@@ -66,6 +93,26 @@ function buildMaskWeights(mask: HTMLCanvasElement, sw: number, sh: number): Floa
   return w;
 }
 
+// 合并多张区域 mask 的权重：对每个像素取各区域 luma 权重的最大值（union，即任一区域标记为皮肤即生效）。
+// 权重范围 0..1。masks 为空或全为 null 时返回 null。各 mask 尺寸不一致时按最近邻缩放到源尺寸。
+function buildMergedMaskWeights(masks: (HTMLCanvasElement | null)[], sw: number, sh: number): Float32Array | null {
+  if (!masks || masks.length === 0) return null;
+  const N = sw * sh;
+  let merged: Float32Array | null = null;
+  let any = false;
+  for (const m of masks) {
+    if (!m) continue;
+    const w = buildMaskWeights(m, sw, sh);
+    if (!w) continue; // buildMaskWeights 返回的是新数组，可安全就地修改
+    any = true;
+    if (!merged) {
+      merged = w;
+    } else {
+      for (let p = 0; p < N; p++) if (w[p] > merged[p]) merged[p] = w[p];
+    }
+  }
+  return any ? merged : null;
+}
 // 取当前时刻的 skin_mask 帧（灰度）绘制到离屏 canvas 并返回。
 // 与 getMatteFrame 完全对称：隐藏 <video> 按 maskAssetPath 创建、与源视频同步 currentTime、
 // 仅在漂移 > 0.05s 时纠正 seek。videoCache/canvasRef 由调用方持有（避免重复创建）。
@@ -116,29 +163,18 @@ export function drawBeautyMaskFrame(
 
 // 对一帧 source 应用美颜（就地修改 source 的像素，仅在 mask 权重 > 0 的皮肤区域生效）。
 // mask 为 null 或所有参数均为 0 且 skinTone==='none' 时直接返回（no-op）。
-export function applyBeauty(
-  source: HTMLCanvasElement,
-  mask: HTMLCanvasElement | null,
-  beauty: { smoothing: number; whitening: number; clarity: number; skinTone: string },
-): void {
+// 对一帧 source 应用美颜核心逻辑（就地修改 source 的像素），权重由 w 提供（仅 w>0 的皮肤区域生效）。
+// 调用方负责构建权重数组（单 mask 或多 mask 合并）。
+function applyBeautyCore(source: HTMLCanvasElement, beauty: BeautyParams, w: Float32Array): void {
   const sw = source.width;
   const sh = source.height;
   if (!sw || !sh) return;
-
-  const tone = beauty.skinTone;
-  const hasTone = !!tone && tone !== 'none' && tone !== 'natural';
-  const noEffect =
-    !beauty.smoothing && !beauty.whitening && !beauty.clarity && !hasTone;
-  if (!mask || noEffect) return;
 
   const sctx = source.getContext('2d');
   if (!sctx) return;
   const img = sctx.getImageData(0, 0, sw, sh);
   const d = img.data;
   const N = sw * sh;
-
-  const w = buildMaskWeights(mask, sw, sh);
-  if (!w) return;
 
   // 拆通道到 Float32，便于浮点混合（避免每像素对象分配）
   const R = new Float32Array(N);
@@ -169,12 +205,14 @@ export function applyBeauty(
   const cB = beauty.clarity ? boxBlur(B, sw, sh, 1) : null;
 
   // 肤色：轻微通道 tint（强度系数 0.15）
+  const tone = beauty.skinTone;
+  const hasTone = !!tone && tone !== 'none' && tone !== 'natural';
   const tint = 0.15;
   const tintAmt = 255 * tint;
 
   for (let p = 0, i = 0; p < N; p++, i += 4) {
     const wp = w[p];
-    if (wp <= 0) continue; // 背景区域：保持原像素
+    if (wp <= 0) continue; // 背景/非皮肤区域：保持原像素
     let r = R[p];
     let g = G[p];
     let bl = B[p];
@@ -214,4 +252,91 @@ export function applyBeauty(
   }
 
   sctx.putImageData(img, 0, 0);
+}
+
+// 对一帧 source 应用美颜（就地修改 source 的像素，仅在单张 mask 的权重 > 0 的皮肤区域生效）。
+// 保持原调用方式向后兼容（调用方仍可用单 maskCanvas）。
+export function applyBeauty(
+  source: HTMLCanvasElement,
+  mask: HTMLCanvasElement | null,
+  beauty: BeautyParams,
+): void {
+  const sw = source.width;
+  const sh = source.height;
+  if (!sw || !sh) return;
+  const noEffect =
+    !beauty.smoothing && !beauty.whitening && !beauty.clarity &&
+    !(!!beauty.skinTone && beauty.skinTone !== 'none' && beauty.skinTone !== 'natural');
+  if (!mask || noEffect) return;
+  const w = buildMaskWeights(mask, sw, sh);
+  if (!w) return;
+  applyBeautyCore(source, beauty, w);
+}
+
+// 对一帧 source 应用美颜（多区域 mask 合并版）。
+// masks 为各区域（脸/脖/臂）的灰度 mask canvas 数组；合并权重取各区域 luma 的 max（union），
+// 使预览仅作用于皮肤区域（脸+脖+臂），与后端导出一致。masks 为空/全 null 或未启用效果时直接返回（no-op）。
+export function applyBeautyMulti(
+  source: HTMLCanvasElement,
+  masks: (HTMLCanvasElement | null)[],
+  beauty: BeautyParams,
+): void {
+  const sw = source.width;
+  const sh = source.height;
+  if (!sw || !sh) return;
+  const noEffect =
+    !beauty.smoothing && !beauty.whitening && !beauty.clarity &&
+    !(!!beauty.skinTone && beauty.skinTone !== 'none' && beauty.skinTone !== 'natural');
+  if (noEffect) return;
+  if (!masks || masks.length === 0) return;
+  const w = buildMergedMaskWeights(masks, sw, sh);
+  if (!w) return;
+  applyBeautyCore(source, beauty, w);
+}
+
+// 从 clip.beauty（多区域或单 mask）解析需要作用的 mask 资产引用列表（优先脸/脖/臂 union，回退单 maskAssetId）。
+// assets 为工程资产列表（只需 id 与 path 字段）。返回按 face→neck→arm 顺序的引用数组（已去重、剔除无路径项）。
+export function resolveBeautyMaskRefs(
+  beauty: MultiMaskBeauty | undefined,
+  assets: ReadonlyArray<{ id: string; path: string }>,
+): BeautyMaskRef[] {
+  const refs: BeautyMaskRef[] = [];
+  if (!beauty) return refs;
+  const push = (id?: string) => {
+    if (!id) return;
+    const a = assets.find((x) => x.id === id);
+    if (a && a.path) refs.push({ id: a.id, path: a.path });
+  };
+  push(beauty.faceMaskAssetId);
+  push(beauty.neckMaskAssetId);
+  push(beauty.armMaskAssetId);
+  // 回退：仅有旧的单 maskAssetId（兼容历史工程）
+  if (refs.length === 0) push(beauty.maskAssetId);
+  return refs;
+}
+
+// 取一组 mask 资产在当前时刻的帧 canvas（每个资产 id 独立离屏 canvas，避免互相覆盖）。
+// 未就绪（视频未加载）的资产返回 null，被跳过。videoCache 按 url 缓存隐藏 <video>，canvasCache 按资产 id 缓存离屏 canvas。
+export function getBeautyMaskCanvases(
+  refs: BeautyMaskRef[],
+  videoCache: { current: Map<string, HTMLVideoElement> },
+  canvasCache: { current: Map<string, HTMLCanvasElement> },
+  srcTime: number,
+  srcPaused: boolean,
+  srcRate: number,
+  targetW: number,
+  targetH: number,
+): HTMLCanvasElement[] {
+  const out: HTMLCanvasElement[] = [];
+  if (!refs || refs.length === 0) return out;
+  for (const r of refs) {
+    let c = canvasCache.current.get(r.id);
+    if (!c) {
+      c = document.createElement('canvas');
+      canvasCache.current.set(r.id, c);
+    }
+    const frame = drawBeautyMaskFrame(r.path, videoCache, { current: c }, srcTime, srcPaused, srcRate, targetW, targetH);
+    if (frame) out.push(frame);
+  }
+  return out;
 }

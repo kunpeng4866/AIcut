@@ -7,7 +7,7 @@ import { useProjectStore } from '../store/projectStore';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
 import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
-import { applyBeauty, drawBeautyMaskFrame } from '../utils/beautyRender';
+import { applyBeauty, drawBeautyMaskFrame, applyBeautyMulti, getBeautyMaskCanvases, resolveBeautyMaskRefs, type MultiMaskBeauty } from '../utils/beautyRender';
 
 // 文件路径转 aicut-asset:// URL（与 PreviewCanvas 内 pathToUrl 保持一致；此处本地副本避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -166,6 +166,8 @@ export function useWebGPUPreview({
   // 美颜（beauty）skin_mask 视频缓存：maskAssetId → 隐藏 <video>；离屏 canvas 复用。
   const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 美颜多区域：每个区域 mask 资产 id → 独立离屏 canvas（避免脸/脖/臂 互相覆盖）。
+  const beautyMultiCanvasCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   // 当前工程（含 assets），供按 matteAssetId 查真实路径。直接写 ref 避免触发重渲染。
   const projectRef = useRef(useProjectStore.getState().project);
   projectRef.current = useProjectStore((s) => s.project);
@@ -575,16 +577,18 @@ export function useWebGPUPreview({
           }
 
           // 美颜（beauty）实时预览合成：在抠像/背景之后，把灰度 skin_mask 的 luma 作为权重，
-          // 对皮肤区域做磨皮/美白/清晰/肤色。与智能抠像对称：先取当前时刻 mask 帧并与源视频同步 currentTime，
-          // 再 applyBeauty（就地修改 uploadSource）。注意读取 clip.beauty.maskAssetId（非 keying.matteAssetId）。
-          if (clip.beauty && clip.beauty.enabled && clip.beauty.maskAssetId) {
+          // 对皮肤区域做磨皮/美白/清晰/肤色。多区域（脸/脖/臂）合并为 union 权重，与后端导出一致。
+          // 注意读取 clip.beauty 的 faceMaskAssetId/neckMaskAssetId/armMaskAssetId（回退 maskAssetId），非 keying.matteAssetId。
+          const mb = clip.beauty as MultiMaskBeauty | undefined;
+          if (mb && mb.enabled && (mb.faceMaskAssetId || mb.neckMaskAssetId || mb.armMaskAssetId || mb.maskAssetId)) {
             try {
               const srcVideo = videoRefs.current.get(clip.id) || null;
               const srcTime = srcVideo ? srcVideo.currentTime : currentTimeRef.current;
               const srcPaused = srcVideo ? srcVideo.paused : true;
               const srcRate = srcVideo ? srcVideo.playbackRate : 1;
-              const maskCanvas = getBeautyMaskFrame(clip.beauty.maskAssetId, srcTime, srcPaused, srcRate, vw, vh);
-              if (maskCanvas) {
+              const maskRefs = resolveBeautyMaskRefs(mb, projectRef.current?.assets ?? []);
+              const maskCanvases = getBeautyMaskCanvases(maskRefs, beautyVideoCacheRef, beautyMultiCanvasCacheRef, srcTime, srcPaused, srcRate, vw, vh);
+              if (maskCanvases.length) {
                 // uploadSource 可能不是 canvas（纯 <video>/ImageBitmap）：先落到离屏 canvas 再就地美颜，避免直接改写源元素
                 if (!(uploadSource instanceof HTMLCanvasElement)) {
                   const tc = document.createElement('canvas');
@@ -598,12 +602,12 @@ export function useWebGPUPreview({
                 if (uploadSource instanceof HTMLCanvasElement) {
                   const t = currentTimeRef.current;
                   const effBeauty = {
-                    ...clip.beauty,
-                    smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, clip.beauty.smoothing),
-                    whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, clip.beauty.whitening),
-                    clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, clip.beauty.clarity),
+                    ...mb,
+                    smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, mb.smoothing),
+                    whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, mb.whitening),
+                    clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, mb.clarity),
                   };
-                  applyBeauty(uploadSource, maskCanvas, effBeauty);
+                  applyBeautyMulti(uploadSource, maskCanvases, effBeauty);
                 }
               }
             } catch {

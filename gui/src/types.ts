@@ -149,7 +149,13 @@ export interface BeautyConfig {
   // 肤色预设（单选，不参与 0~100 映射）
   skinTone: SkinTone;
   // 预计算资产（点「生成蒙版」后由后端回写）
-  maskAssetId?: string;   // 自研皮肤分割产出的灰度 skin_mask.mp4 资产 id
+  maskAssetId?: string;   // 自研皮肤分割产出的灰度 skin_mask.mp4 资产 id（legacy，单区域）
+  // ── P1 多区域 mask（自研解析模型产出）──
+  faceMaskAssetId?: string; // face 区域皮肤 mask 资产 id（优先于 maskAssetId）
+  neckMaskAssetId?: string; // neck 区域皮肤 mask 资产 id
+  armMaskAssetId?: string;  // arm 区域皮肤 mask 资产 id
+  landmarkAssetId?: string; // 人脸关键点/landmark 资产 id（预留）
+  parseModel?: string;      // 自研皮肤解析模型标识；未提供则回退阈值法
 }
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'

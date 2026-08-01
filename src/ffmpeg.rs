@@ -371,6 +371,67 @@ pub fn build_extract_frame_accurate(input: &str, t: f64, width: u32, height: u32
     ]
 }
 
+/// 构建「施加美颜的单帧抽帧命令」：从主素材抽一帧，应用美颜滤镜链，并与皮肤 mask
+/// 做区域混合，输出 RGBA rawvideo 单帧。与 graph.rs::build_beauty_spec + alphamerge+overlay
+/// 完全同义，用于复杂导出路径（src/pipeline/export.rs）对带 beauty 的 clip 施加美颜，
+/// 避免「复杂工程静默丢美颜」。
+///
+/// - `main_input` / `main_t`：主素材路径与源时间
+/// - `width` / `height`：输出帧尺寸（与主素材解码目标尺寸一致）
+/// - `beauty_chain`：build_beauty_spec 返回的滤镜串（逗号连接，如 `bilateral=...:eq=...`）
+/// - `mask_input` / `mask_t`：皮肤 mask 灰度 mp4 路径与时间；None 则对整帧施加美颜
+pub fn build_beauty_frame_cmd(
+    main_input: &str,
+    main_t: f64,
+    width: u32,
+    height: u32,
+    beauty_chain: &str,
+    mask_input: Option<&str>,
+    mask_t: f64,
+) -> Vec<String> {
+    let w = width;
+    let h = height;
+    let mut args: Vec<String> = vec!["ffmpeg".to_string(), "-y".to_string()];
+    // 主素材：快速 seek（-ss 在 -i 前）
+    args.push("-ss".to_string());
+    args.push(format!("{:.3}", main_t));
+    args.push("-i".to_string());
+    args.push(main_input.to_string());
+    if let Some(m) = mask_input {
+        args.push("-i".to_string());
+        args.push(m.to_string());
+    }
+    // 滤镜图：源 split 成 orig + src；src 施加美颜链得到 beauty；
+    // 有 mask 时 beauty 与 mask 做 alphamerge（mask luma→alpha）再 overlay 回 orig；
+    // 无 mask 时 beauty 整帧 overlay 到 orig（即整帧美颜）。
+    let mut fc = format!(
+        "[0:v]scale={w}:{h},setpts=PTS-STARTPTS,split=2[orig][src];[src]{beauty}[beauty]",
+        w = w, h = h, beauty = beauty_chain
+    );
+    if mask_input.is_some() {
+        fc.push_str(&format!(
+            ";[1:v]trim=start={mt}:duration=0.04,setpts=PTS-STARTPTS,format=gray,scale={w}:{h}[msk];[beauty][msk]alphamerge[rgba];[orig][rgba]overlay=format=auto[out]",
+            mt = format!("{:.3}", mask_t), w = w, h = h
+        ));
+    } else {
+        fc.push_str(";[orig][beauty]overlay=format=auto[out]");
+    }
+    args.push("-filter_complex".to_string());
+    args.push(fc);
+    args.push("-map".to_string());
+    args.push("[out]".to_string());
+    args.push("-frames:v".to_string());
+    args.push("1".to_string());
+    args.push("-f".to_string());
+    args.push("rawvideo".to_string());
+    args.push("-pix_fmt".to_string());
+    args.push("rgba".to_string());
+    args.push("-s".to_string());
+    args.push(format!("{}x{}", w, h));
+    args.push("pipe:1".to_string());
+    args
+}
+
 /// 构建音频抽取命令：从素材中提取一段音频（f32le PCM）
 ///
 /// 参数：
