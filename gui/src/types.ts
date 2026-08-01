@@ -156,6 +156,11 @@ export interface BeautyConfig {
   armMaskAssetId?: string;  // arm 区域皮肤 mask 资产 id
   landmarkAssetId?: string; // 人脸关键点/landmark 资产 id（预留）
   parseModel?: string;      // 自研皮肤解析模型标识；未提供则回退阈值法
+  // ── P2 五官级形变（瘦脸/大眼）──
+  thinFace?: number;        // 瘦脸强度 [0,1]；>0 且 warp map 资产存在时施加 remap 形变
+  bigEye?: number;          // 大眼强度 [0,1]；>0 且 warp map 资产存在时施加 remap 形变
+  warpXAssetId?: string;    // 形变图 X 通道（gray16le rawvideo，绝对像素坐标）资产 id；warp 模式产出
+  warpYAssetId?: string;    // 形变图 Y 通道（gray16le rawvideo，绝对像素坐标）资产 id；warp 模式产出
 }
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'

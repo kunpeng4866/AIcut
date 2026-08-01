@@ -167,10 +167,10 @@ fn beauty_segments(c: &Clip) -> Vec<(f64, f64, BeautyConfig)> {
     out
 }
 
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>, warp_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let idx = *asset_to_idx.get(&c.asset_id)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, idx, w, h, &label, fps, matte_map, bg_map, beauty_map);
+    let chain = build_video_chain(c, idx, w, h, &label, fps, matte_map, bg_map, beauty_map, warp_map);
     nodes.extend(chain);
     Some(label)
 }
@@ -182,7 +182,7 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
 /// `matte_map`：智能抠像(smart)用 matte 素材 → 全局输入索引（由 build_render_command 收集）。
 /// 若 clip 启用 smart 抠像且 matte_asset_id 命中，则把该 matte 输入作为额外 alpha 源，
 /// 经 threshold 曲线映射为 alpha 后与源视频 alphamerge（替代 chromakey 的 YUV→alpha 手段）。
-fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>) -> Vec<String> {
+fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>, warp_map: &HashMap<String, usize>) -> Vec<String> {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
@@ -205,6 +205,33 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     if !clip_filters.is_empty() { pre.push_str(&format!(",{}", clip_filters)); }
     pre.push_str(&format!("[{}]", pre_label));
     nodes.push(pre);
+
+    // 1.2) 瘦脸/大眼形变（WARP）：在美颜/抠像之前对源做几何 remap。
+    // 仅当 clip 启用美颜且 thinFace/bigEye>0 且 X/Y 形变图资产都存在时施加，向后兼容
+    // （默认不施加，旧工程无 warp 资产 → 走历史行为）。形变图（gray16le rawvideo，uint16 绝对像素
+    // 坐标，尺寸 = (sw,sh) 已与源一致）作为额外输入，原样 format=gray16le（**不做 scale**，
+    // 否则插值破坏绝对坐标、破坏 thinFace=bigEye=0 的恒等不变性），与 [pre] 帧同步 remap。
+    // 本机引擎 ffmpeg（N-125258）不支持 remap=format=float / grayf32le，仅 gray16le 可用，
+    // 16-bit 值被 remap 直接当作源坐标。注：源按 speed 重定时，形变图未同步 setpts，
+    // 故 speed≠1 时存在轻微错位（M1 范围 talking-head 多 speed=1，可接受）。
+    if let Some((wx, wy)) = collect_warp_maps(c, &warp_map) {
+        let warped = format!("{}warp", label);
+        let wxn = format!("{}wx", label);
+        let wyn = format!("{}wy", label);
+        nodes.push(format!(
+            "[{mi}:v]format=gray16le[{wxn}]",
+            mi = wx, wxn = wxn
+        ));
+        nodes.push(format!(
+            "[{mi}:v]format=gray16le[{wyn}]",
+            mi = wy, wyn = wyn
+        ));
+        nodes.push(format!(
+            "[{pre}][{wxn}][{wyn}]remap[{warped}]",
+            pre = pre_label, wxn = wxn, wyn = wyn, warped = warped
+        ));
+        pre_label = warped;
+    }
 
     // 1.5) 美颜·皮肤管理：多区域 mask（face/neck/arm 并集，回退 legacy mask_asset_id）。
     // 与 matte 类似，mask 作为额外输入；先把源 split 成 orig + src_for_beauty，
@@ -492,6 +519,21 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     nodes
 }
 
+/// 收集 clip 的瘦脸/大眼形变图输入索引 (x_idx, y_idx)。
+/// 仅当 clip 启用美颜且 thinFace/bigEye>0 且 X/Y 两张形变图资产都存在时返回 Some，
+/// 否则 None（不施加形变，向后兼容）。形变图由 warp 模式产出（gray16le rawvideo，uint16 绝对像素坐标）。
+fn collect_warp_maps(c: &Clip, warp_map: &HashMap<String, usize>) -> Option<(usize, usize)> {
+    let b = match &c.beauty { Some(b) if b.enabled => b, _ => return None };
+    let tf = b.thin_face.unwrap_or(0.0);
+    let be = b.big_eye.unwrap_or(0.0);
+    if tf <= 0.0 && be <= 0.0 { return None; }
+    let xid = b.warp_x_asset_id.as_ref()?;
+    let yid = b.warp_y_asset_id.as_ref()?;
+    let xi = *warp_map.get(xid)?;
+    let yi = *warp_map.get(yid)?;
+    Some((xi, yi))
+}
+
 /// 收集 clip 的美颜区域 mask 输入索引（按 face/neck/arm 优先，无则回退 legacy mask_asset_id）。
 /// 返回 [(input_index, region_label), ...]；空 = 无 mask（不施加美颜，保持历史行为）。
 fn collect_beauty_region_masks(c: &Clip, beauty_map: &HashMap<String, usize>) -> Vec<(usize, String)> {
@@ -593,12 +635,12 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     let mut inputs: Vec<InputSpec> = Vec::new();
     for (_, c) in &video_clips {
         if let Some(a) = project.asset_by_id(&c.asset_id) {
-            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(InputSpec { path: a.path.clone(), stream_loop: None }); }
+            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(InputSpec { path: a.path.clone(), stream_loop: None, raw_video: None }); }
         }
     }
     for c in &audio_clips {
         if let Some(a) = project.asset_by_id(&c.asset_id) {
-            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(InputSpec { path: a.path.clone(), stream_loop: None }); }
+            if !asset_to_idx.contains_key(&a.id) { asset_to_idx.insert(a.id.clone(), inputs.len()); inputs.push(InputSpec { path: a.path.clone(), stream_loop: None, raw_video: None }); }
         }
     }
     cmd.inputs = inputs;
@@ -612,7 +654,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     if !matte_map.contains_key(id) {
                         if let Some(a) = project.asset_by_id(id) {
                             matte_map.insert(id.clone(), cmd.inputs.len());
-                            cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None });
+                            cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None, raw_video: None });
                         }
                     }
                 }
@@ -640,7 +682,43 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     if !beauty_map.contains_key(id) {
                         if let Some(a) = project.asset_by_id(id) {
                             beauty_map.insert(id.to_string(), cmd.inputs.len());
-                            cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None });
+                            cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None, raw_video: None });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 瘦脸/大眼形变图（P2）：X/Y 形变图（gray16le rawvideo，uint16 绝对像素坐标）作为额外输入加入
+    // 导出，记录全局输入索引供 build_video_chain 引用 [idx:v]，与 matte/beauty 同一条 remap 路径。
+    // 形变图以 rawvideo + gray16le 读取，分辨率 = clip 渲染源尺寸 (sw, sh)（与 build_video_chain
+    // 中源缩放目标一致），remap 输出亦为此尺寸，保证滤镜链维度一致 + 恒等不变性。
+    let mut warp_map: HashMap<String, usize> = HashMap::new();
+    for (_, c) in &video_clips {
+        if let Some(b) = &c.beauty {
+            if b.enabled {
+                // 该 clip 的渲染源尺寸（与 build_video_chain 的 sw/sh 同义，取静态 scale）。
+                let sx = c.transform.scale_x.max(0.01);
+                let sy = c.transform.scale_y.max(0.01);
+                let sw = (project.canvas.width as f64 * sx).round() as u32;
+                let sh = (project.canvas.height as f64 * sy).round() as u32;
+                let candidate_ids: Vec<&String> = [
+                    b.warp_x_asset_id.as_ref(),
+                    b.warp_y_asset_id.as_ref(),
+                ]
+                .iter()
+                .flatten()
+                .map(|id| *id)
+                .collect();
+                for id in candidate_ids {
+                    if !warp_map.contains_key(id) {
+                        if let Some(a) = project.asset_by_id(id) {
+                            warp_map.insert(id.to_string(), cmd.inputs.len());
+                            cmd.inputs.push(InputSpec {
+                                path: a.path.clone(),
+                                stream_loop: None,
+                                raw_video: Some((sw, sh)),
+                            });
                         }
                     }
                 }
@@ -660,7 +738,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                                 bg_map.insert(id.clone(), cmd.inputs.len());
                                 // 背景图片/视频：stream_loop=-1 无限循环，配合 overlay=shortest=1
                                 // 在前景结束时终止，从而撑满整个前景时长（修复背景比源短时截断）。
-                                cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: Some(-1) });
+                                cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: Some(-1), raw_video: None });
                                 }
                             }
                         }
@@ -689,14 +767,14 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c = clips[0];
                 let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => { vci += 1; continue; } };
                 let src = format!("vs{}", vci);
-                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps, &matte_map, &bg_map, &beauty_map);
+                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps, &matte_map, &bg_map, &beauty_map, &warp_map);
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
-                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, &beauty_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, &beauty_map, &warp_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                 vci += 1;
                 // 累积时间线原点 = 本轨首个片段的主时间线起点。xfade 的 offset 是相对
                 // 累积视频流时间轴的，而转场窗锚点在出片段（prev）的主时间线
@@ -711,7 +789,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
                     let trans_params = clip_transition_params(prev).or_else(|| clip_transition_params(curr));
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
-                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, &beauty_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, &beauty_map, &warp_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
                     if has_transition {
                         let (xstyle, xdur_raw) = trans_opt.unwrap();

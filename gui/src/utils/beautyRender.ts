@@ -294,6 +294,56 @@ export function applyBeautyMulti(
   applyBeautyCore(source, beauty, w);
 }
 
+// 对一帧 source 施加 warp 形变（瘦脸/大眼），就地修改 source 像素。
+// warpX / warpY 为 gray16le 解码后的绝对像素坐标（row-major，长度 = mapW*mapH，
+// 与后端 warp.generate_warp_maps 约定一致：xmap[y][x] = 输出像素 (x,y) 应采样的源帧 x 坐标）。
+// 恒等（thinFace=bigEye=0）时 xmap==xs、ymap==ys，逐像素等于原图（本实现在该条件下精确还原）。
+// 预览分辨率（srcW×srcH）与源分辨率（mapW×mapH）通常一致；为稳健，把预览坐标映射到形变图索引
+// 取绝对源坐标，再映射回预览尺寸采样：out[y][x] = src[ sy ][ sx ]。
+export function applyWarp(
+  source: HTMLCanvasElement,
+  warpX: Float32Array,
+  warpY: Float32Array,
+  mapW: number,
+  mapH: number,
+): void {
+  const srcW = source.width;
+  const srcH = source.height;
+  if (!srcW || !srcH || mapW <= 1 || mapH <= 1) return;
+  if (warpX.length < mapW * mapH || warpY.length < mapW * mapH) return;
+  const sctx = source.getContext('2d');
+  if (!sctx) return;
+  const img = sctx.getImageData(0, 0, srcW, srcH);
+  const d = img.data;
+  // 备份整幅原图：目标像素 (x,y) 要从源坐标 (sx,sy) 采样，必须读原像素而非已写结果。
+  const src = new Uint8ClampedArray(d);
+  // 预览坐标 ↔ 形变图索引 / 源坐标 的比例（分辨率一致时均为 1，恒等逐像素还原）
+  const toMapX = srcW > 1 ? (mapW - 1) / (srcW - 1) : 0;
+  const toMapY = srcH > 1 ? (mapH - 1) / (srcH - 1) : 0;
+  const toCanvasX = mapW > 1 ? (srcW - 1) / (mapW - 1) : 0;
+  const toCanvasY = mapH > 1 ? (srcH - 1) / (mapH - 1) : 0;
+  for (let y = 0; y < srcH; y++) {
+    const my = Math.min(mapH - 1, Math.max(0, Math.round(y * toMapY)));
+    for (let x = 0; x < srcW; x++) {
+      const mx = Math.min(mapW - 1, Math.max(0, Math.round(x * toMapX)));
+      const mi = my * mapW + mx;
+      const sxa = warpX[mi]; // 绝对源 x 坐标（0..mapW-1）
+      const sya = warpY[mi]; // 绝对源 y 坐标（0..mapH-1）
+      let sx = Math.round(sxa * toCanvasX);
+      let sy = Math.round(sya * toCanvasY);
+      sx = Math.min(srcW - 1, Math.max(0, sx));
+      sy = Math.min(srcH - 1, Math.max(0, sy));
+      const si = (sy * srcW + sx) * 4;
+      const di = (y * srcW + x) * 4;
+      d[di] = src[si];
+      d[di + 1] = src[si + 1];
+      d[di + 2] = src[si + 2];
+      d[di + 3] = src[si + 3];
+    }
+  }
+  sctx.putImageData(img, 0, 0);
+}
+
 // 从 clip.beauty（多区域或单 mask）解析需要作用的 mask 资产引用列表（优先脸/脖/臂 union，回退单 maskAssetId）。
 // assets 为工程资产列表（只需 id 与 path 字段）。返回按 face→neck→arm 顺序的引用数组（已去重、剔除无路径项）。
 export function resolveBeautyMaskRefs(

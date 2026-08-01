@@ -32,9 +32,13 @@ pub fn resolve_encoder(preset: &str, codec_type: &str) -> &'static str {
 /// - `path`：媒体文件路径。
 /// - `stream_loop`：输入级 `-stream_loop N`（N=-1 表示无限循环），用于让背景图片/视频
 ///   撑满前景时长；普通素材为 None（不循环）。
+/// - `raw_video`：原始视频（gray16le rawvideo）输入，如瘦脸/大眼形变图（X/Y warp map）。
+///   Some((w, h)) 时在 `-i` 前注入 `-f rawvideo -pix_fmt gray16le -s {w}x{h}`，
+///   以 uint16 绝对像素坐标形式读取（本机 ffmpeg 不支持 format=float/grayf32le）；None 表示普通媒体输入。
 pub struct InputSpec {
     pub path: String,
     pub stream_loop: Option<i64>,
+    pub raw_video: Option<(u32, u32)>,
 }
 
 pub struct RenderCommand {
@@ -74,6 +78,15 @@ impl RenderCommand {
             if let Some(l) = inp.stream_loop {
                 args.push("-stream_loop".to_string());
                 args.push(l.to_string());
+            }
+            // 原始视频（gray16le 形变图）输入：在 `-i` 前注入格式/尺寸选项。
+            if let Some((rw, rh)) = inp.raw_video {
+                args.push("-f".to_string());
+                args.push("rawvideo".to_string());
+                args.push("-pix_fmt".to_string());
+                args.push("gray16le".to_string());
+                args.push("-s".to_string());
+                args.push(format!("{}x{}", rw, rh));
             }
             args.push("-i".to_string());
             args.push(inp.path.clone());
@@ -432,6 +445,79 @@ pub fn build_beauty_frame_cmd(
     args
 }
 
+/// 构建「单帧 remap 形变命令」：从主素材抽一帧，按瘦脸/大眼形变图（gray16le rawvideo，
+/// uint16 绝对像素坐标）做网格形变，输出 RGBA rawvideo 单帧。
+///
+/// 与 graph.rs 的 WARP 滤镜块同义，用于复杂导出路径（src/pipeline/export.rs）对带
+/// 瘦脸/大眼形变的 clip 施加几何形变，避免「复杂工程静默丢形变」。
+///
+/// 坐标约定（对照 warp.py 的 generate_warp_maps）：
+///   - remap 的 xmap/ymap 是 **uint16 绝对像素坐标**（gray16le，xmap[y][x]=x+Dx，ymap=y+Dy）；
+///     本机引擎 ffmpeg（N-125258）不支持 remap=format=float / grayf32le，仅 gray16le 可用，
+///     且 16-bit 值被 remap 直接当作源坐标（已验证 identity 图还原原图，diff=0）。
+///   - out[y][x] = src[ ymap[y][x] ][ xmap[y][x] ]；坐标钳制到 [0,W-1]/[0,H-1]。
+///   - 当 thin_face==0 且 big_eye==0 时，形变为恒等（xmap==xs, ymap==ys），remap
+///     保持逐像素不变（恒等不变性硬校验）；
+///   - 形变图与主素材必须同分辨率（均 scale/读取为 WxH），且**不可对形变图做 scale**（缩放
+///     会插值破坏绝对坐标，破坏恒等不变性），故以 rawvideo + gray16le 原样读取。
+///
+/// - `main_input` / `main_t`：主素材路径与源时间
+/// - `xmap_input` / `ymap_input`：X/Y 形变图（gray16le rawvideo，尺寸 = width×height）路径
+/// - `width` / `height`：输出帧尺寸（与主素材解码目标尺寸一致，也是形变图分辨率）
+pub fn build_remap_frame_cmd(
+    main_input: &str,
+    main_t: f64,
+    xmap_input: &str,
+    ymap_input: &str,
+    width: u32,
+    height: u32,
+) -> Vec<String> {
+    let w = width;
+    let h = height;
+    let mut args: Vec<String> = vec!["ffmpeg".to_string(), "-y".to_string()];
+    // 主素材：快速 seek
+    args.push("-ss".to_string());
+    args.push(format!("{:.3}", main_t));
+    args.push("-i".to_string());
+    args.push(main_input.to_string());
+    // 形变图（X/Y 通道，gray16le rawvideo，uint16 绝对像素坐标）。以 rawvideo + gray16le 读取，
+    // 不缩放，保证绝对坐标不变（恒等不变性）。尺寸与主素材解码目标尺寸一致 (WxH)。
+    for m in &[xmap_input, ymap_input] {
+        args.push("-f".to_string());
+        args.push("rawvideo".to_string());
+        args.push("-pix_fmt".to_string());
+        args.push("gray16le".to_string());
+        args.push("-s".to_string());
+        args.push(format!("{}x{}", w, h));
+        args.push("-i".to_string());
+        args.push(m.to_string());
+    }
+    // 滤镜图：源缩放至目标尺寸 → [src]；两路形变图原样转 gray16le（已是 WxH 绝对坐标，
+    // 不缩放）→ [xm]/[ym]；remap 以 [src] 为源、[xm]/[ym] 为坐标图（16-bit 值即坐标），输出 [out]。
+    // 三者同分辨率，remap 输出亦为 WxH，与源一致。
+    let fc = format!(
+        "[0:v]scale={w}:{h},setpts=PTS-STARTPTS[src];\
+         [1:v]format=gray16le[xm];\
+         [2:v]format=gray16le[ym];\
+         [src][xm][ym]remap[out]",
+        w = w, h = h
+    );
+    args.push("-filter_complex".to_string());
+    args.push(fc);
+    args.push("-map".to_string());
+    args.push("[out]".to_string());
+    args.push("-frames:v".to_string());
+    args.push("1".to_string());
+    args.push("-f".to_string());
+    args.push("rawvideo".to_string());
+    args.push("-pix_fmt".to_string());
+    args.push("rgba".to_string());
+    args.push("-s".to_string());
+    args.push(format!("{}x{}", w, h));
+    args.push("pipe:1".to_string());
+    args
+}
+
 /// 构建音频抽取命令：从素材中提取一段音频（f32le PCM）
 ///
 /// 参数：
@@ -535,6 +621,7 @@ mod tests {
         cmd.inputs.push(InputSpec {
             path: "C:/Users/me/My Video.mp4".to_string(),
             stream_loop: None,
+            raw_video: None,
         });
         let s = cmd.to_command_string();
         assert!(

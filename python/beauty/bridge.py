@@ -19,7 +19,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from core import generate_skin_mask
+from core import generate_skin_mask, generate_landmarks, generate_warp_maps
 
 
 def main(argv) -> int:
@@ -48,7 +48,22 @@ def main(argv) -> int:
             opts["multiRegion"] = True
             if not opts.get("model"):
                 opts["model"] = os.environ.get("AICUT_BEAUTY_MODEL")
-        # 本链路只有「生成皮肤 mask」一个动作，固定调用 generate_skin_mask。
+        elif mode == "landmark":
+            # P2：106 点关键点检测。模型经 opts["landmarkModel"] 指定，未指定回退
+            # 环境变量 AICUT_BEAUTY_LANDMARK_MODEL（训练管线产出，可能不存在 → 抛异常）。
+            result = generate_landmarks(input_path, opts)
+            sys.stdout = real_stdout
+            sys.stdout.write(json.dumps(result, ensure_ascii=False))
+            sys.stdout.flush()
+            return 0
+        elif mode == "warp":
+            # P2：瘦脸/大眼形变图。thinFace/bigEye ∈ [0,1]，warpXOutput/warpYOutput 可选。
+            result = generate_warp_maps(input_path, opts)
+            sys.stdout = real_stdout
+            sys.stdout.write(json.dumps(result, ensure_ascii=False))
+            sys.stdout.flush()
+            return 0
+        # 本链路默认动作：生成皮肤 mask。
         result = generate_skin_mask(input_path, opts)
     except Exception as e:  # noqa: BLE001
         sys.stdout = real_stdout

@@ -456,3 +456,131 @@ def generate_skin_mask(input_path: str, opts: dict) -> dict:
         "model": "beauty_mask",
         "mode": "mask",
     }
+
+
+# ───────────────────────── 人脸关键点（landmark）────────────────────────
+
+def _default_landmark_model() -> str:
+    """默认 106 点关键点 ONNX 路径（与训练管线产出约定一致）。"""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "landmark.onnx")
+
+
+def generate_landmarks(input_path: str, opts: dict) -> dict:
+    """逐帧推理 106 点人脸关键点，输出 (N,106,2) 原帧像素坐标。
+
+    返回 {"landmarkPath": <json 路径>, "frames": N}；landmarkPath 指向一个 JSON 文件，
+    内容为 [[[x,y],...], ...]（N 帧 × 106 点 × 2）。坐标与源帧同分辨率。
+    """
+    t0 = time.time()
+
+    def log(msg: str):
+        sys.stderr.write("[landmark] " + msg + "\n")
+        sys.stderr.flush()
+
+    if not os.path.isfile(input_path):
+        raise FileNotFoundError("输入视频不存在: " + input_path)
+
+    probe = _ffprobe(input_path)
+    w = int(opts.get("width") or probe["width"])
+    h = int(opts.get("height") or probe["height"])
+    fps = float(opts.get("fps") or probe["fps"])
+    if fps <= 0 or not math.isfinite(fps):
+        fps = 30.0
+    if w <= 0 or h <= 0:
+        raise RuntimeError("无效视频尺寸 {}x{}".format(w, h))
+
+    duration = float(opts.get("duration") or probe["duration"])
+    if duration <= 0 or not math.isfinite(duration):
+        raise RuntimeError("无法确定视频时长（请通过 opts.duration 提供）")
+    N = max(1, int(round(duration * fps)))
+
+    model_path = opts.get("model") or _default_landmark_model()
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError("人脸关键点模型不存在: {}".format(model_path))
+
+    from landmark_service import LandmarkInferenceService
+    service = LandmarkInferenceService(model_path)
+    log("已加载人脸关键点模型: {}".format(model_path))
+
+    ff = _ffmpeg_exe()
+    reader = subprocess.Popen(
+        [ff, "-v", "error", "-i", input_path,
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        stdout=subprocess.PIPE,
+    )
+    frame_bytes = w * h * 3
+    written = 0
+    landmarks: list = []
+    try:
+        while written < N:
+            raw = reader.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                break
+            rgb = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
+            lm = service.infer(rgb)  # (106,2) float32 原帧像素坐标
+            landmarks.append(lm.astype(np.float32).tolist())
+            written += 1
+    finally:
+        reader.stdout.close()
+        reader.wait()
+
+    output_path = opts.get("landmarkOutput") or ""
+    if not output_path:
+        stem, ext = os.path.splitext(input_path)
+        output_path = stem + "_landmarks.npy"
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(out_dir, exist_ok=True)
+    # 存为 .npy（(N,106,2) float32），供 warp 模式复用，避免巨大 JSON。
+    np.save(output_path, np.asarray(landmarks, dtype=np.float32))
+
+    elapsed = time.time() - t0
+    log("完成人脸关键点推理：{}x{} {} 帧，用时 {:.2f}s".format(w, h, written, elapsed))
+    return {
+        "landmarkPath": os.path.abspath(output_path),
+        "width": w,
+        "height": h,
+        "frames": written,
+        "model": "landmark_onnx",
+        "mode": "landmark",
+    }
+
+
+# ───────────────────────── 形变网格（瘦脸/大眼）────────────────────────
+
+def generate_warp_maps(input_path: str, opts: dict) -> dict:
+    """由关键点生成瘦脸/大眼形变位移图（gray16le rawvideo，uint16 绝对像素坐标）。
+
+    opts:
+        - thinFace / bigEye: 0..1 强度（默认 0）。
+        - landmarkPath: 可选，已生成的关键点 JSON 路径；缺省则内部调用 generate_landmarks。
+        - width / height / fps / duration / model: 同 generate_landmarks。
+    返回 {"warpXPath", "warpYPath", "width", "height"}。
+    """
+    t0 = time.time()
+
+    def log(msg: str):
+        sys.stderr.write("[warp] " + msg + "\n")
+        sys.stderr.flush()
+
+    if not os.path.isfile(input_path):
+        raise FileNotFoundError("输入视频不存在: " + input_path)
+
+    probe = _ffprobe(input_path)
+    w = int(opts.get("width") or probe["width"])
+    h = int(opts.get("height") or probe["height"])
+    if w <= 0 or h <= 0:
+        raise RuntimeError("无效视频尺寸 {}x{}".format(w, h))
+    fps = float(opts.get("fps") or probe["fps"])
+    if fps <= 0 or not math.isfinite(fps):
+        fps = 30.0
+    duration = float(opts.get("duration") or probe["duration"])
+    if duration <= 0 or not math.isfinite(duration):
+        raise RuntimeError("无法确定视频时长（请通过 opts.duration 提供）")
+
+    thin_face = float(np.clip(float(opts.get("thinFace", 0.0) or 0.0), 0.0, 1.0))
+    big_eye = float(np.clip(float(opts.get("bigEye", 0.0) or 0.0), 0.0, 1.0))
+
+    # 委托给 warp.generate_warp_video：内部检测关键点（或复用 landmarksPath 的 .npy）
+    # → 代表帧 generate_warp_maps → 写出 gray16le rawvideo（.gray，remap 直接以 16-bit 值作坐标读取）。
+    from warp import generate_warp_video
+    return generate_warp_video(input_path, opts)

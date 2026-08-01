@@ -86,6 +86,8 @@ contextBridge.exposeInMainWorld('aicut', {
   beauty: {
     generate: (input: string, optsJson: string) =>
       ipcRenderer.invoke('beauty:generateMask', input, optsJson),
+    generateWarp: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('beauty:generateWarp', input, optsJson),
   },
 
   // ── 草稿 ──

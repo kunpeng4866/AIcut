@@ -2,7 +2,7 @@
 // 写入方式：结构变更（启用/生成）走 updateClip（拖前 pushHistorySnapshot），
 //           参数拖动（磨皮/美白/清晰/肤色）走 updateClipLive。
 // 完全镜像 KeyingTab 的 IPC→addAsset→updateClip 契约与视觉风格。
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { uid } from '../../utils/clipFactories';
 import type { ClipConfig, BeautyConfig, SkinTone } from '../../types';
@@ -37,14 +37,14 @@ function Hint({ children }: { children: React.ReactNode }) {
 }
 
 // 可复用参数滑块（拖动时走 live，拖前压一次历史快照）；disabled 时整体置灰并禁交互
-function ParamSlider({ label, value, min, max, step, unit, editable, disabled, onChange, onEditStart }: {
+function ParamSlider({ label, value, min, max, step, unit, editable, disabled, onChange, onEditStart, onEditEnd }: {
   label: string; value: number; min: number; max: number; step: number;
-  unit?: string; editable?: boolean; disabled?: boolean; onChange: (v: number) => void; onEditStart?: () => void;
+  unit?: string; editable?: boolean; disabled?: boolean; onChange: (v: number) => void; onEditStart?: () => void; onEditEnd?: () => void;
 }) {
   const fmt = (v: number) => unit === '%' ? `${Math.round(v * 100)}%` : unit === '°' ? `${Math.round(v)}°` : v.toFixed(2);
   let editing = false;
   const begin = () => { if (!editing && !disabled) { editing = true; onEditStart?.(); } };
-  const end = () => { editing = false; };
+  const end = () => { if (editing) { editing = false; onEditEnd?.(); } };
   const textColor = disabled ? '#666' : '#eee';
   return (
     <div style={{ marginBottom: 8, opacity: disabled ? 0.5 : 1 }}>
@@ -96,6 +96,16 @@ function beautyMaskOutputPath(assetPath: string): string {
   return `${dir}${stem}_skin_mask.mp4`;
 }
 
+// 由源素材真实路径推导 warp 形变图输出 base：<目录>/<stem>_warp（后端写出 <base>_warp_x.gray / <base>_warp_y.gray）
+function warpOutputBase(assetPath: string): string {
+  const idx = Math.max(assetPath.lastIndexOf('/'), assetPath.lastIndexOf('\\'));
+  const dir = idx >= 0 ? assetPath.slice(0, idx + 1) : '';
+  const file = idx >= 0 ? assetPath.slice(idx + 1) : assetPath;
+  const dot = file.lastIndexOf('.');
+  const stem = dot > 0 ? file.slice(0, dot) : file;
+  return `${dir}${stem}_warp`;
+}
+
 // 肤色预设（单选，不参与 0~100 映射）
 const SKIN_TONES: { value: SkinTone; label: string }[] = [
   { value: 'none', label: '无' },
@@ -121,6 +131,11 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [coverage, setCoverage] = useState<number | null>(null);
+  // 生成形变网格（warp）：处理中 + 错误提示（与皮肤遮罩独立，互不阻塞）
+  const [processingWarp, setProcessingWarp] = useState(false);
+  const [errorWarp, setErrorWarp] = useState<string | null>(null);
+  // warp 重新生成防抖计时器（滑块释放后带新值重新调 generateWarp）
+  const warpDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const disabled = !beauty?.enabled; // 整体禁用态：关闭美颜时所有参数置灰
 
@@ -220,8 +235,89 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
     }
   };
 
+  // 实时读取本 clip 最新的 beauty 配置（滑块 debounce 重新生成时，闭包里的 beauty 可能滞后，故从 store 取最新）。
+  const currentBeauty = (): BeautyConfig | undefined => {
+    const st = useProjectStore.getState();
+    for (const tr of st.project.tracks ?? []) {
+      const c = (tr.clips ?? []).find((x) => x.id === clip.id);
+      if (c && c.beauty) return c.beauty;
+    }
+    return undefined;
+  };
+
+  // 生成形变网格（warp）：调 generateWarp → 注册两张 gray16le 形变图资产 → 回写 warpXAssetId/warpYAssetId。
+  // 完全镜像 runGenerate 的 IPC→addAsset→updateClip 契约与风格。
+  const runGenerateWarp = async () => {
+    if (processingWarp) return;
+    const store = useProjectStore.getState();
+    const asset = store.project.assets.find((a) => a.id === clip.assetId);
+    if (!asset || !asset.path) {
+      alert('找不到源素材路径，无法生成形变网格');
+      return;
+    }
+    const assetPath = asset.path;            // 真实文件系统路径（非 aicut-asset://）
+    const fps = asset.fps ?? 30;
+    const outputBase = warpOutputBase(assetPath); // <dir><stem>_warp
+    const cur = currentBeauty() ?? beauty;
+    const thinFace = cur.thinFace ?? 0;
+    const bigEye = cur.bigEye ?? 0;
+    setErrorWarp(null);
+    setProcessingWarp(true);
+    try {
+      // 结构变更：先压一次历史快照
+      pushHistorySnapshot();
+      // 与 beauty:generateMask 一致的 IPC 契约：handler 返回 { success, data, error }。
+      const res = await (window as unknown as { aicut: { beauty: { generateWarp(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.beauty.generateWarp(
+        assetPath,
+        JSON.stringify({ mode: 'warp', thinFace, bigEye, fps, outputBase })
+      );
+      if (!res?.success) throw new Error(res?.error || '生成形变网格失败');
+      const result = (res.data ?? {}) as {
+        warpXPath?: string; warpYPath?: string; width?: number; height?: number; fps?: number; frames?: number;
+      };
+      if (!result.warpXPath || !result.warpYPath) throw new Error('后端未返回 warpXPath/warpYPath');
+      // 注册两张形变图资产（X/Y 通道），各自独立资产 id（type 用 video 仅作容器，内容非播放视频）
+      const mkAsset = (p?: string): string | undefined => {
+        if (!p) return undefined;
+        const id = uid('asset');
+        store.addAsset({
+          id, type: 'video', path: p,
+          duration: (result.frames ?? 0) / (result.fps ?? fps),
+          width: result.width, height: result.height, fps: result.fps,
+        });
+        return id;
+      };
+      const warpXAssetId = mkAsset(result.warpXPath);
+      const warpYAssetId = mkAsset(result.warpYPath);
+      // 回写 warp 资产 id（合并 union，保留其他 beauty 字段）；先压历史快照（已在前面压过）。
+      const next: MultiMaskBeauty = {
+        ...(cur as MultiMaskBeauty),
+        warpXAssetId,
+        warpYAssetId,
+      };
+      store.updateClip(trackId, clip.id, { beauty: next });
+    } catch (e: unknown) {
+      console.error('生成形变网格失败', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      setErrorWarp(msg);
+      alert('生成形变网格失败：' + msg);
+    } finally {
+      setProcessingWarp(false);
+    }
+  };
+
+  // 滑块释放（pointerup）且已生成过 warp 资产时，带新值 debounce(~300ms) 重新生成形变网格，即时更新预览。
+  const scheduleWarpRegen = () => {
+    const cur = currentBeauty() ?? beauty;
+    if (!(cur.warpXAssetId || cur.warpYAssetId)) return; // 尚未生成过网格则不自动重算
+    if ((cur.thinFace ?? 0) <= 0 && (cur.bigEye ?? 0) <= 0) return; // 形变强度全为 0 无意义
+    if (warpDebounceRef.current) clearTimeout(warpDebounceRef.current);
+    warpDebounceRef.current = setTimeout(() => { void runGenerateWarp(); }, 300);
+  };
+
   const mb = beauty as MultiMaskBeauty;
   const hasMask = !!(mb.faceMaskAssetId || mb.neckMaskAssetId || mb.armMaskAssetId || beauty.maskAssetId);
+  const hasWarp = !!(mb.warpXAssetId || mb.warpYAssetId);
 
   // 已生成区域统计（脸/脖/臂）
   const regionLabels: string[] = [];
@@ -247,6 +343,15 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
         onChange={(v) => setField({ whitening: v }, true)} onEditStart={pushHistorySnapshot} />
       <ParamSlider label="清晰" value={beauty.clarity} min={0} max={100} step={1} editable disabled={disabled}
         onChange={(v) => setField({ clarity: v }, true)} onEditStart={pushHistorySnapshot} />
+
+      <div style={S.divider} />
+
+      <SectionTitle>五官形变（瘦脸/大眼）</SectionTitle>
+      <ParamSlider label="瘦脸" value={beauty.thinFace ?? 0} min={0} max={1} step={0.01} editable disabled={disabled}
+        onChange={(v) => setField({ thinFace: v }, true)} onEditStart={pushHistorySnapshot} onEditEnd={scheduleWarpRegen} />
+      <ParamSlider label="大眼" value={beauty.bigEye ?? 0} min={0} max={1} step={0.01} editable disabled={disabled}
+        onChange={(v) => setField({ bigEye: v }, true)} onEditStart={pushHistorySnapshot} onEditEnd={scheduleWarpRegen} />
+      <Hint>滑块预览即时生效需先「生成形变网格」；释放滑块会在已生成网格时自动按新值重算</Hint>
 
       <div style={S.divider} />
 
@@ -286,6 +391,25 @@ export default function BeautyTab({ clip, trackId }: { clip: ClipConfig; trackId
 
       {error && (
         <div style={{ color: '#e9a23b', fontSize: 11, marginTop: 8, wordBreak: 'break-all' }}>错误：{error}</div>
+      )}
+
+      <div style={S.divider} />
+
+      <SectionTitle>形变网格（warp）</SectionTitle>
+      {hasWarp ? (
+        <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>
+          已生成形变网格（瘦脸/大眼），可重新生成或使用滑块实时微调
+        </div>
+      ) : (
+        <div style={{ color: '#aaa', fontSize: 11, marginBottom: 8 }}>尚未生成形变网格，调好瘦脸/大眼强度后点击下方按钮生成（warp 形变图）</div>
+      )}
+
+      <GenerateButton processing={processingWarp} disabled={disabled} onClick={runGenerateWarp}>
+        {processingWarp ? '形变网格生成中…' : (hasWarp ? '重新生成形变网格' : '生成形变网格')}
+      </GenerateButton>
+
+      {errorWarp && (
+        <div style={{ color: '#e9a23b', fontSize: 11, marginTop: 8, wordBreak: 'break-all' }}>错误：{errorWarp}</div>
       )}
     </div>
   );

@@ -153,6 +153,19 @@ pub struct BeautyConfig {
     /// 自研皮肤解析模型标识（如 "beauty_parse_v1"）；None 时回退阈值法
     #[serde(rename = "parseModel", default)]
     pub parse_model: Option<String>,
+    // ── P2 五官级形变（瘦脸/大眼）──
+    /// 瘦脸强度 ∈ [0,1]；>0 且 warp map 资产存在时施加 remap 形变。
+    #[serde(rename = "thinFace", default)]
+    pub thin_face: Option<f64>,
+    /// 大眼强度 ∈ [0,1]；>0 且 warp map 资产存在时施加 remap 形变。
+    #[serde(rename = "bigEye", default)]
+    pub big_eye: Option<f64>,
+    /// 瘦脸/大眼形变图 X 通道（gray16le rawvideo，uint16 绝对像素坐标）资产 id；由 warp 模式产出。
+    #[serde(rename = "warpXAssetId", default)]
+    pub warp_x_asset_id: Option<String>,
+    /// 瘦脸/大眼形变图 Y 通道（gray16le rawvideo，uint16 绝对像素坐标）资产 id；由 warp 模式产出。
+    #[serde(rename = "warpYAssetId", default)]
+    pub warp_y_asset_id: Option<String>,
 }
 
 /// 滤镜实例（来自 Clip.filters）

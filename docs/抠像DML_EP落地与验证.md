@@ -1,6 +1,12 @@
 # 抠像 rmbg2 推理后端：DirectML（DML）落地与验证
 
-> 决策日期：2026-07-30
+> ⚠️ **本决策已变更（2026-08-01）**：本文是 2026-07-30「CUDA EP 在 Blackwell sm_120 上静默回退 CPU」时期的结论。
+> 此后升级 NVIDIA 驱动至 610.62（含 CUDA 13.3 运行时）+ onnxruntime-gpu 1.28.0 + nvidia-* pip 包后，
+> **CUDA EP 已在本机 Blackwell(sm_120) 实测可用**，抠像推理 provider 兜底链改回 **CUDA → DML → CPU（CUDA 优先）**。
+> 当前 DML 仅作为 CUDA 不可用时的兜底分支（且本机未装 onnxruntime-directml，故实际走 CUDA）。
+> 新结论与代码实现见 `python/keying/core.py`（`_prepend_cuda_dll_path` 注入 + `CUDAExecutionProvider` 优先）。
+
+> 决策日期：2026-07-30（原始决策，已失效）
 > 背景：P5 阶段尝试用 CUDA EP 加速 rmbg2（BRIA RMBG-2.0 / BiRefNet）失败，
 > 本机 RTX 5060 Ti（Blackwell, sm_120）+ onnxruntime-gpu 1.28 组合下 CUDA EP
 > 静默回退 CPU。经用户拍板：**放弃 CUDA 路线，改用 Windows 自带 DirectML（DML）**，

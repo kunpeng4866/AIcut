@@ -357,6 +357,17 @@ ipcMain.handle('beauty:generateMask', async (_e, input: string, optsJson: string
   }
 });
 
+// ── 美颜·P2 五官形变：生成瘦脸/大眼 warp 形变图（两张 gray16le rawvideo）──
+ipcMain.handle('beauty:generateWarp', async (_e, input: string, optsJson: string) => {
+  try {
+    const stdout = await callEngine('beauty', '--input', input ?? '', '--opts', optsJson ?? '');
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
 // ── 插件 ──
 ipcMain.handle('plugin:list', async () => {
   try {
