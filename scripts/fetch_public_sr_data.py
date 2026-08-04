@@ -891,11 +891,19 @@ def build_parser():
                     help="在默认查询词基础上追加，可重复")
     ap.add_argument("--pexels-key", default=None, help="Pexels API Key（或用 env PEXELS_API_KEY）")
     ap.add_argument("--pixabay-key", default=None, help="Pixabay API Key（或用 env PIXABAY_API_KEY）")
+    ap.add_argument("--proxy", default=None,
+                    help="HTTP/HTTPS 代理，如 http://127.0.0.1:10809；"
+                         "用于换出口 IP 绕开 Wikimedia 对本机/共享 IP 的 429 限流")
     return ap
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+
+    if args.proxy:
+        ph = urllib.request.ProxyHandler({"http": args.proxy, "https": args.proxy})
+        urllib.request.install_opener(urllib.request.build_opener(ph))
+        log("已启用代理: %s（换出口 IP 以绕开 Wikimedia 429 限流）" % args.proxy)
 
     if args.category == "all" and args.query:
         warn("--query 会覆盖所有类别的默认查询词，建议配合单一 --category 使用")
