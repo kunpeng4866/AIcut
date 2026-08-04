@@ -30,18 +30,24 @@ echo  Python  : %PYTHON_EXE%
 echo  Output  : %CD%\data\sr_train
 echo  Limit   : %LIMIT% per category
 echo  Proxy   : %SR_PROXY%
+echo  Log     : %CD%\data\sr_train\_collect.log
 echo ============================================
+
+set "LOG=%CD%\data\sr_train\_collect.log"
+echo [%date% %time%] START run_collect >> "%LOG%"
 
 for %%C in (portrait landscape urban text_ui) do (
     echo.
-    echo ^>^>^> Collecting category: %%C
+    echo ^>^>^> Collecting category: %%C  ^(see _collect.log for detail^)
+    echo [%date% %time%] ---- category %%C ---- >> "%LOG%"
     if not "%SR_PROXY%"=="" (
-        "%PYTHON_EXE%" %SCRIPT% --category %%C --limit %LIMIT% --delay %DELAY% --cooldown %COOLDOWN% --no-transcode --proxy %SR_PROXY%
+        "%PYTHON_EXE%" %SCRIPT% --category %%C --limit %LIMIT% --delay %DELAY% --cooldown %COOLDOWN% --no-transcode --proxy %SR_PROXY% >> "%LOG%" 2>&1
     ) else (
-        "%PYTHON_EXE%" %SCRIPT% --category %%C --limit %LIMIT% --delay %DELAY% --cooldown %COOLDOWN% --no-transcode
+        "%PYTHON_EXE%" %SCRIPT% --category %%C --limit %LIMIT% --delay %DELAY% --cooldown %COOLDOWN% --no-transcode >> "%LOG%" 2>&1
     )
-    if errorlevel 1 echo [WARN] %%C stopped early (rate-limited). Rerun this category later.
+    if errorlevel 1 (echo [WARN] %%C stopped early (rate-limited). Rerun this category later. & echo [%date% %time%] WARN %%C stopped early >> "%LOG%") else (echo [%date% %time%] OK %%C >> "%LOG%")
 )
+echo [%date% %time%] END run_collect >> "%LOG%"
 
 echo.
 echo  Done. Segments in data\sr_train\ subfolders; see ATTRIBUTIONS.csv
