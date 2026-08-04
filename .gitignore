@@ -45,3 +45,11 @@ __pycache__/
 
 # 智能抠像：模型权重不入库（运行时从 ~/.cache/aicut/models/ 或 AICUT_MODNET_MODEL 加载）
 python/keying/models/
+
+# 超清增强(SR)训练素材：大视频本地归集，不入库（未配 LFS 接管视频，避免撑爆仓库）
+# 脚手架 MANIFEST.json / README.md / .gitkeep 已入库，不受影响
+data/sr_train/**/*.webm
+data/sr_train/**/*.ogv
+data/sr_train/**/*.mov
+data/sr_train/**/*.mkv
+data/sr_train/**/*.avi
