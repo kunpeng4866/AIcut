@@ -902,8 +902,20 @@ def main(argv=None):
 
     if args.proxy:
         ph = urllib.request.ProxyHandler({"http": args.proxy, "https": args.proxy})
-        urllib.request.install_opener(urllib.request.build_opener(ph))
-        log("已启用代理: %s（换出口 IP 以绕开 Wikimedia 429 限流）" % args.proxy)
+        proxy_opener = urllib.request.build_opener(ph)
+        # 先探测代理是否可达；不可达则回退直连，避免整轮卡死
+        try:
+            probe = proxy_opener.open(
+                urllib.request.Request(
+                    "https://commons.wikimedia.org/w/api.php"
+                    "?action=query&format=json&meta=siteinfo",
+                    headers={"User-Agent": USER_AGENT}),
+                timeout=8)
+            probe.close()
+            urllib.request.install_opener(proxy_opener)
+            log("已启用代理: %s（换出口 IP 以绕开 Wikimedia 429 限流）" % args.proxy)
+        except (urllib.error.URLError, OSError) as e:
+            warn("代理 %s 不可达（%s），回退直连" % (args.proxy, e))
 
     if args.category == "all" and args.query:
         warn("--query 会覆盖所有类别的默认查询词，建议配合单一 --category 使用")
