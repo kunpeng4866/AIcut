@@ -21,6 +21,7 @@ pub mod tts;
 pub mod speech;
 pub mod keying;
 pub mod beauty;
+pub mod sr;
 pub mod timeline;
 pub mod clock;
 pub mod pipeline;
@@ -135,7 +136,11 @@ pub fn is_simple_project(project: &Project) -> bool {
         // 边缘柔化/阈值随时间变化）；beauty 关键帧由 build_video_chain / build_clip_chain 通过
         // 同样的分段切段烘焙（smoothing/whitening/clarity 随时间变化）。transform/speed/opacity
         // 等关键帧在快速路径只取中点固定值（既有行为），与逐帧动画不兼容，故含此类关键帧仍强制走完整路径。
-        let allowed_kf = |k: &String| k.starts_with("keying.") || k.starts_with("beauty.");
+        // sr.* 为防御性放行：SR 是导出级后处理（见 src/sr.rs），当前不消费关键帧，
+        // 但工程里若残留 sr.* 关键帧不应把整个工程踢出快速路径。
+        let allowed_kf = |k: &String| {
+            k.starts_with("keying.") || k.starts_with("beauty.") || k.starts_with("sr.")
+        };
         let has_unsupported_kf = clip.keyframes.keys().any(|k| !allowed_kf(k));
         if has_unsupported_kf {
             return false;
@@ -297,6 +302,22 @@ pub fn beauty_generate(input: &str, opts_json: &str) -> Result<serde_json::Value
     beauty::beauty_generate(input, opts_json)
 }
 
+/// 视频超清增强：调用 Python 桥对单个视频逐帧超分，返回 `{"ok","output_path",...}` JSON。
+pub fn sr_generate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
+    sr::sr_generate(input, opts_json)
+}
+
+/// 视频超清增强（导出级）：先把工程渲染成临时视频，再整段超分到 `output_path`。
+///
+/// 与 `export_project` 并列的独立入口——不侵入既有导出分发逻辑，由前端/CLI 显式选择。
+pub fn sr_export_project(
+    project_json: &str,
+    output_path: &str,
+    opts_json: &str,
+) -> Result<(), AppError> {
+    sr::sr_export_project(project_json, output_path, opts_json)
+}
+
 // ═══════════════════��� N-API 绑定（条件编译） ════════════════════
 
 /// N-API 导出层。需 `cargo build --features napi` 激活。
@@ -367,7 +388,7 @@ mod tests {
             time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None, transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None, super_resolution: None,
         }
     }
 

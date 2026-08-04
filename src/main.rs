@@ -300,8 +300,50 @@ fn main() {
                 Err(e) => { eprintln!("beauty 失败: {}", e); process::exit(1); }
             }
         }
+        "sr" => {
+            // aicut-engine sr --input <path> --opts <json>
+            //   或 aicut-engine sr --project <project.json> --output <out.mp4> --opts <json>
+            let mut input = String::new();
+            let mut project = String::new();
+            let mut output = String::new();
+            let mut opts = String::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--input"   => { input   = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--project" => { project = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--output"  => { output  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--opts"    => { opts    = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    other => { eprintln!("未知参数: {}", other); process::exit(2); }
+                }
+            }
+            if !project.is_empty() {
+                // 导出级后处理：工程 → 临时视频 → 超分 → output
+                if output.is_empty() {
+                    eprintln!("用法: aicut-engine sr --project <project.json> --output <out.mp4> [--opts <json>]");
+                    process::exit(2);
+                }
+                let json = fs::read_to_string(&project).unwrap_or_else(|e| {
+                    eprintln!("无法读取 {}: {}", project, e); process::exit(1);
+                });
+                match aicut_engine::sr_export_project(&json, &output, &opts) {
+                    Ok(()) => println!("{}", serde_json::json!({ "ok": true, "output_path": output })),
+                    Err(e) => { eprintln!("sr export 失败: {}", e); process::exit(1); }
+                }
+            } else {
+                // 单视频超分
+                if input.is_empty() {
+                    eprintln!("用法: aicut-engine sr --input <video> [--opts <json>]");
+                    process::exit(2);
+                }
+                match aicut_engine::sr_generate(&input, &opts) {
+                    Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
+                    Err(e) => { eprintln!("sr 失败: {}", e); process::exit(1); }
+                }
+            }
+        }
         other => {
-            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech, keying, beauty)", other);
+            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech, keying, beauty, sr)", other);
             process::exit(2);
         }
     }

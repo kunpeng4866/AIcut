@@ -368,6 +368,19 @@ ipcMain.handle('beauty:generateWarp', async (_e, input: string, optsJson: string
   }
 });
 
+// ── 视频超清增强：逐帧 ONNX 超分，产出放大后的视频 ──
+ipcMain.handle('sr:generate', async (_e, input: string, optsJson: string) => {
+  try {
+    // 与 beauty 同构：SR 只有「生成」一个动作，无需 --mode；
+    // optsJson 内由前端塞入 scale/strength/output_path/encoder 等全部参数（snake_case，见 python/sr/bridge.py）。
+    const stdout = await callEngine('sr', '--input', input ?? '', '--opts', optsJson ?? '');
+    const data = JSON.parse(stdout);
+    return { success: true, data };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  }
+});
+
 // ── 插件 ──
 ipcMain.handle('plugin:list', async () => {
   try {

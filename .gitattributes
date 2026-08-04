@@ -24,9 +24,10 @@
 *.woff    binary
 *.woff2   binary
 *.ttf      binary
-*.ttf filter=lfs diff=lfs merge=lfs -text
+# 大文件走 Git LFS（超清增强 SR 模型权重等，单个 30MB+）
 *.onnx filter=lfs diff=lfs merge=lfs -text
-*.pt filter=lfs diff=lfs merge=lfs -text
 *.pth filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.ttf filter=lfs diff=lfs merge=lfs -text
 *.woff filter=lfs diff=lfs merge=lfs -text
 *.woff2 filter=lfs diff=lfs merge=lfs -text

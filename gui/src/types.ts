@@ -58,6 +58,19 @@ export interface ClipConfig {
   keying?: KeyingConfig;
   // 美颜·皮肤管理（非破坏式，M1）
   beauty?: BeautyConfig;
+  // 视频超清增强（导出级后处理，不参与时间轴合成）
+  superResolution?: SRConfig;
+}
+// ── 视频超清增强（Super Resolution）数据模型 ──
+// SR 依赖逐帧 ONNX 推理且会整体改变分辨率，无法表达为 ffmpeg 滤镜、也不能像 keying/beauty
+// 那样以 clip 级资产参与时间轴合成（见 src/sr.rs 架构说明），故仅作为导出级后处理存在，
+// 前端只在 SRTab 内做「生成 + 原图/超分对比预览」。
+export interface SRConfig {
+  enabled: boolean;
+  scale: number;        // 放大倍数（2 / 3 / 4）
+  strength: number;     // 0..1 效果强度（与原图的混合比例，1 = 全量超分）
+  assetId?: string;     // 已生成的超分视频资产 id（预览与导出回引）
+  modelPath?: string;   // 自定义 ONNX 模型路径；缺省用引擎默认（AICUT_SR_MODEL）
 }
 // 转场配置（与后端 Transition 结构对应）
 export type TransitionType =

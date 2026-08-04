@@ -90,6 +90,12 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('beauty:generateWarp', input, optsJson),
   },
 
+  // ── 视频超清增强（导出级后处理）──
+  sr: {
+    generate: (input: string, optsJson: string) =>
+      ipcRenderer.invoke('sr:generate', input, optsJson),
+  },
+
   // ── 草稿 ──
   saveDraft: (name: string, content: string) => ipcRenderer.invoke('draft:save', name, content),
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),

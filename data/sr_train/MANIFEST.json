@@ -1,0 +1,19 @@
+{
+  "description": "AIcut 视频超清增强自研训练数据收集清单",
+  "requirement": {
+    "total_target": 600,
+    "per_category": 150,
+    "min_resolution": "1920x1080",
+    "min_duration_sec": 10,
+    "format": ["mp4", "mov", "mkv", "avi"],
+    "license": "自有拍摄或已获授权的素材；禁止含第三方版权内容/水印/logo",
+    "degradation_augment": 20
+  },
+  "categories": {
+    "portrait":  {"target": 150, "collected": 0, "dir": "portrait"},
+    "landscape": {"target": 150, "collected": 0, "dir": "landscape"},
+    "urban":     {"target": 150, "collected": 0, "dir": "urban"},
+    "text_ui":   {"target": 150, "collected": 0, "dir": "text_ui"}
+  },
+  "notes": "将视频直接放入对应场景子目录即可被 python/sr/dataset.py 扫描。训练时每段经 20x 退化增强。"
+}

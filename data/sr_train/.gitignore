@@ -1,0 +1,10 @@
+# 训练素材本体不入库（单段 1080p/4K 视频动辄数百 MB，且属自有素材/授权素材）
+*.mp4
+*.mov
+*.mkv
+*.avi
+
+# 脚手架文件保留
+!.gitkeep
+!MANIFEST.json
+!README.md

@@ -220,6 +220,9 @@ pub struct Clip {
     /// 美颜·皮肤管理（非破坏式，M1）
     #[serde(default)]
     pub beauty: Option<crate::types::BeautyConfig>,
+    /// 视频超清增强（导出级后处理，不参与时间轴合成）
+    #[serde(default)]
+    pub super_resolution: Option<crate::types::SRConfig>,
     #[serde(default)]
     pub filters: Vec<crate::types::FilterInstance>,
     #[serde(default)]
@@ -420,7 +423,7 @@ mod tests {
                             timeline_in: 0.0, timeline_out: 5.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None, super_resolution: None,
                         },
                         Clip {
                             id: "c2".into(), asset_id: "a2".into(),
@@ -428,7 +431,7 @@ mod tests {
                             timeline_in: 5.0, timeline_out: 15.0,
                             transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None, super_resolution: None,
                         },
                     ],
                     ..Default::default()
@@ -491,7 +494,7 @@ mod tests {
                     timeline_in: 0.0, timeline_out: 5.0,
                     transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
                     volume: 1.0, speed: 1.0,
-                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None, super_resolution: None,
                 }],
                 ..Default::default()
             }],

@@ -11,6 +11,7 @@ import { SpeedCurveEditor } from './SpeedCurveEditor';
 import MaskTab from './panels/MaskTab';
 import KeyingTab from './panels/KeyingTab';
 import BeautyTab from './panels/BeautyTab';
+import SRTab from './panels/SRTab';
 import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
 
 // 插件 manifest 类型（仅前端 UI 使用，不依赖 engine 包）
@@ -40,6 +41,7 @@ const PANEL_GROUPS: Record<Category, TabDef[]> = {
       { key: 'keying', label: '抠像' },
       { key: 'mask', label: '蒙版' },
       { key: 'beauty', label: '美颜美体' },
+      { key: 'superresolution', label: '超清增强' },
     ]},
     { key: 'audio', label: '音频' },
     { key: 'speed', label: '变速' },
@@ -935,6 +937,7 @@ export default function PropertiesPanel() {
       if (effSub === 'keying') return <KeyingTab clip={clip} trackId={trackId} />;
       if (effSub === 'mask') return <MaskTab clip={clip} trackId={trackId} />;
       if (effSub === 'beauty') return <BeautyTab clip={clip} trackId={trackId} />;
+      if (effSub === 'superresolution') return <SRTab clip={clip} trackId={trackId} />;
       return <TransformTab clip={clip} trackId={trackId} />; // base
     }
     if (tab.key === 'audio') return <AudioTab clip={clip} trackId={trackId} />;

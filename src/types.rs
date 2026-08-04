@@ -168,6 +168,44 @@ pub struct BeautyConfig {
     pub warp_y_asset_id: Option<String>,
 }
 
+fn default_sr_scale() -> u32 { 2 }
+fn default_sr_strength() -> f64 { 1.0 }
+
+/// 视频超清增强（Super Resolution）配置（片段级，仅作导出级后处理的开关与参数承载）。
+///
+/// 注意：SR 依赖 onnxruntime 逐帧推理且会改变分辨率，**不进入** graph.rs 滤镜链，
+/// 也不像 keying/beauty 那样以 matte/mask 资产参与时间轴合成；它只在导出后处理阶段
+/// 由 `crate::sr::sr_export_project` 消费。`asset_id` 为预留字段（超分产物落盘后回灌工程用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SRConfig {
+    pub enabled: bool,
+    /// 放大倍数，默认 2
+    #[serde(default = "default_sr_scale")]
+    pub scale: u32,
+    /// 增强强度 0~1（与原图混合比例），默认 1.0
+    #[serde(default = "default_sr_strength")]
+    pub strength: f64,
+    /// 超分产物资产 id（预留）
+    #[serde(rename = "assetId", default)]
+    pub asset_id: Option<String>,
+    /// ONNX 模型路径覆盖；None 时由 Python 桥回退 `AICUT_SR_MODEL` 或内置默认路径
+    #[serde(rename = "modelPath", default)]
+    pub model_path: Option<String>,
+}
+
+impl Default for SRConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scale: default_sr_scale(),
+            strength: default_sr_strength(),
+            asset_id: None,
+            model_path: None,
+        }
+    }
+}
+
 /// 滤镜实例（来自 Clip.filters）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterInstance {
