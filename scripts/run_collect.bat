@@ -11,8 +11,9 @@ cd /d "%~dp0.."
 
 REM ---- Python 解释器 ----
 REM 受管 Python（当前 WorkBuddy 环境）：
-set PYTHON_EXE=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe
-REM 若在本机用系统 Python，改为：  set PYTHON_EXE=python
+REM set PYTHON_EXE=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe
+REM 本机系统 Python：
+set PYTHON_EXE=python
 
 set SCRIPT=scripts\fetch_public_sr_data.py
 
@@ -22,7 +23,7 @@ set PIXABAY_API_KEY=
 
 REM ---- 可选：代理（本机有 Misty 等代理可换出口 IP 解开 429 限流）----
 REM 例：  set SR_PROXY=http://127.0.0.1:10809
-set SR_PROXY=
+set SR_PROXY=http://127.0.0.1:10809
 
 REM ---- 采集参数 ----
 set LIMIT=150
