@@ -98,8 +98,13 @@ pub fn handle_tool_call(request: &ToolRequest) -> ToolResponse {
             let path = request.arguments["audio_path"].as_str().unwrap_or("");
             let lang = request.arguments["language"].as_str().unwrap_or("zh");
             if path.is_empty() { return ToolResponse { success: false, result: None, error: Some("缺少 audio_path".into()) }; }
-            let provider = crate::provider::WhisperProvider::new();
-            match crate::provider::AsrProvider::transcribe(&provider, path, lang) {
+            // provider=bailian → 百炼 Python 桥；缺省/其它 → whisper.cpp（路径可用 enginePath/modelPath 覆盖）
+            let arg = |k: &str| request.arguments[k].as_str().unwrap_or("").to_string();
+            let provider = crate::provider::create_asr_provider(
+                &arg("provider"), &arg("enginePath"), &arg("modelPath"),
+                &arg("apiKey"), &arg("endpoint"), &arg("model"),
+            );
+            match crate::provider::AsrProvider::transcribe(provider.as_ref(), path, lang) {
                 Ok(r) => ToolResponse {
                     success: true,
                     result: Some(serde_json::to_value(&r).unwrap()),

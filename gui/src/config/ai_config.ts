@@ -10,11 +10,14 @@ export interface AIProviderConfig {
 }
 
 // ASR（语音识别）配置（用于语音转字幕）
+// provider = 'bailian' 走阿里云百炼（DashScope）云端转写，其余走 whisper.cpp 本地兜底
 export interface ASRConfig {
-  provider: 'none' | 'whisper-local' | 'whisper-api' | 'custom';
+  provider: 'none' | 'whisper-local' | 'whisper-api' | 'custom' | 'bailian';
   modelPath: string;  // 本地模型路径
   apiKey: string;     // API模式的key
   endpoint: string;
+  enginePath?: string;  // whisper-cli 可执行文件路径（留空则用引擎侧默认值）
+  model?: string;       // 云端模型名，如 paraformer-v1 / paraformer-realtime-v2 / fun-asr-realtime
 }
 
 // TTS（文字转语音）配置（用于配音生成）
@@ -65,6 +68,8 @@ export function getDefaultConfig(): AIcutConfig {
       modelPath: '',
       apiKey: '',
       endpoint: '',
+      enginePath: '',
+      model: '',
     },
     tts: {
       provider: 'none',
@@ -123,6 +128,7 @@ export function isASRConfigured(config: AIcutConfig): boolean {
   if (!asr || asr.provider === 'none') return false;
   if (asr.provider === 'whisper-local') return !!asr.modelPath;
   if (asr.provider === 'whisper-api') return !!asr.apiKey;
+  if (asr.provider === 'bailian') return !!asr.apiKey;
   return true; // custom
 }
 

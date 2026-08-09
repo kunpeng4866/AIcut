@@ -8,7 +8,8 @@
 //!   aicut-engine presets                          预置列表
 //!   aicut-engine version                          版本号
 //!   aicut-engine ai subtitles <file> <lang>       DeepSeek 生成字幕 JSON
-//!   aicut-engine asr transcribe <audio_file> <lang> [engine_path] [model_path]  whisper.cpp 本地语音转写
+//!   aicut-engine asr transcribe <audio> <lang> <provider> <enginePath> <modelPath> <apiKey> <endpoint> <model>
+//!       provider: bailian → 百炼(DashScope) Python 桥；其余/空 → whisper.cpp 本地转写
 
 use std::env;
 use std::fs;
@@ -194,21 +195,27 @@ fn main() {
             }
         }
         "asr" => {
-            // aicut-engine asr transcribe <audio_path> <lang> [engine_path] [model_path]
+            // aicut-engine asr transcribe <audio> <lang> <provider> <enginePath> <modelPath> <apiKey> <endpoint> <model>
             if args.len() < 4 {
-                eprintln!("用法: aicut-engine asr transcribe <audio_file> <lang> [engine_path] [model_path]");
+                eprintln!("用法: aicut-engine asr transcribe <audio> <lang> [provider] [enginePath] [modelPath] [apiKey] [endpoint] [model]");
                 process::exit(2);
             }
             match args[2].as_str() {
                 "transcribe" => {
+                    let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
                     let audio = &args[3];
                     let lang = args.get(4).map(|s| s.as_str()).unwrap_or("zh").to_string();
-                    let engine = args.get(5).cloned()
-                        .unwrap_or_else(|| aicut_engine::provider::DEFAULT_WHISPER_ENGINE.to_string());
-                    let model = args.get(6).cloned()
-                        .unwrap_or_else(|| aicut_engine::provider::DEFAULT_WHISPER_MODEL.to_string());
-                    let provider = aicut_engine::provider::WhisperProvider::with_paths(engine, model);
-                    match aicut_engine::provider::AsrProvider::transcribe(&provider, audio, &lang) {
+                    let lang = if lang.is_empty() { "zh".to_string() } else { lang };
+                    let provider_kind = arg(5);   // whisper-local / whisper-api / custom / 空 / bailian
+                    let engine_path = arg(6);
+                    let model_path = arg(7);
+                    let api_key = arg(8);
+                    let endpoint = arg(9);
+                    let model = arg(10);
+                    let provider = aicut_engine::provider::create_asr_provider(
+                        &provider_kind, &engine_path, &model_path, &api_key, &endpoint, &model,
+                    );
+                    match aicut_engine::provider::AsrProvider::transcribe(provider.as_ref(), audio, &lang) {
                         Ok(r) => println!("{}", serde_json::to_string(&r).unwrap()),
                         Err(e) => { eprintln!("ASR 转写失败: {}", e); process::exit(1); }
                     }

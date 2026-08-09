@@ -86,10 +86,25 @@ export default function ConfigWizard({ initialConfig, onComplete, onCancel }: Pr
               <label style={theme.label}>服务商</label>
               <select style={theme.input} value={cfg.asr.provider} onChange={e => updateASR({ provider: e.target.value as ASRConfig['provider'] })}>
                 <option value="none">未配置</option>
+                <option value="bailian">阿里云百炼</option>
                 <option value="whisper-local">Whisper本地</option>
                 <option value="whisper-api">Whisper API</option>
                 <option value="custom">自定义</option>
               </select>
+              {cfg.asr.provider === 'bailian' && (
+                <>
+                  <label style={theme.label}>API Key</label>
+                  <input style={theme.input} type="password" placeholder="sk-..." value={cfg.asr.apiKey} onChange={e => updateASR({ apiKey: e.target.value })} />
+                  <label style={theme.label}>模型</label>
+                  <select style={theme.input} value={cfg.asr.model || 'paraformer-v1'} onChange={e => updateASR({ model: e.target.value })}>
+                    <option value="paraformer-v1">paraformer-v1（录音文件转写）</option>
+                    <option value="paraformer-realtime-v2">paraformer-realtime-v2（实时）</option>
+                    <option value="fun-asr-realtime">fun-asr-realtime（实时）</option>
+                  </select>
+                  <label style={theme.label}>接口地址（可选）</label>
+                  <input style={theme.input} placeholder="留空使用百炼默认地址" value={cfg.asr.endpoint} onChange={e => updateASR({ endpoint: e.target.value })} />
+                </>
+              )}
               {cfg.asr.provider === 'whisper-local' && (
                 <>
                   <label style={theme.label}>模型路径</label>

@@ -5,6 +5,7 @@
 //! MCP 工具: transcribe_audio / generate_script / text_to_project
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// whisper.cpp CLI 默认路径（Windows 原生二进制，使用反斜杠路径）
@@ -13,6 +14,12 @@ pub const DEFAULT_WHISPER_ENGINE: &str = r"E:\codex\codex-tools\whisper\whisper-
 pub const DEFAULT_WHISPER_MODEL: &str = r"E:\codex\codex-tools\whisper\ggml-base.bin";
 /// ffmpeg 默认路径（用于把任意音视频抽成 16k 单声道 wav）
 pub const DEFAULT_FFMPEG: &str = r"E:\codex\codex-tools\bin\ffmpeg.exe";
+
+/// 托管的 Python 解释器（与 `src/speech.rs` 保持一致），可用 `AICUT_PYTHON_BIN` 覆盖
+const MANAGED_PYTHON: &str =
+    "C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe";
+/// 百炼（DashScope）默认转写模型
+pub const DEFAULT_BAILIAN_MODEL: &str = "paraformer-v1";
 
 // ════════════════════ ASR Provider ════════════════════
 
@@ -183,6 +190,294 @@ fn parse_whisper_json(json: &str) -> Result<TranscriptResult, String> {
         return Err("Whisper 返回 JSON 缺少 transcription / text / segments 字段".into());
     }
     Ok(TranscriptResult { text: root_text, segments: root_segments })
+}
+
+// ════════════════════ 百炼 (DashScope) ASR Provider ════════════════════
+
+/// 百炼语音转写实现：通过子进程调用 Python 桥 `python/asr/bridge.py`。
+///
+/// 桥契约：`python bridge.py <audio_path> <lang> <model> <api_key> <endpoint>`，
+/// stdout 输出单行 JSON（成功 `{"success":true,"data":{text,segments}}`，
+/// 失败 `{"success":false,"error":...}`），日志一律走 stderr。
+pub struct BailianAsrProvider {
+    pub api_key: String,
+    pub endpoint: String,
+    /// 为空时使用 `DEFAULT_BAILIAN_MODEL`
+    pub model: String,
+}
+
+impl BailianAsrProvider {
+    pub fn new(api_key: String, endpoint: String, model: String) -> Self {
+        Self { api_key, endpoint, model }
+    }
+
+    /// 实际生效的模型名（空 → paraformer-v1）
+    fn effective_model(&self) -> &str {
+        if self.model.trim().is_empty() { DEFAULT_BAILIAN_MODEL } else { self.model.trim() }
+    }
+}
+
+/// Python 解释器：优先环境变量 `AICUT_PYTHON_BIN`，否则用托管环境
+fn python_bin() -> String {
+    std::env::var("AICUT_PYTHON_BIN").unwrap_or_else(|_| MANAGED_PYTHON.to_string())
+}
+
+/// 解析 ASR 桥路径：
+///   - 环境变量 `AICUT_ASR_BRIDGE` 优先；
+///   - 否则从当前可执行文件反推仓库根（`<repo>/target/{debug,release}/exe`）拼 `python/asr/bridge.py`；
+///   - 仍不存在则退回编译期的 `CARGO_MANIFEST_DIR`（开发态运行 `cargo test` 时 exe 在 deps/ 下）。
+fn resolve_asr_bridge() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("AICUT_ASR_BRIDGE") {
+        return Ok(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("无法定位当前可执行文件: {}", e))?;
+    let from_exe = exe
+        .parent() // <repo>/target/debug
+        .and_then(|p| p.parent()) // <repo>/target
+        .and_then(|p| p.parent()) // <repo>
+        .map(|root| root.join("python/asr/bridge.py"));
+    if let Some(ref p) = from_exe {
+        if p.exists() {
+            return Ok(p.clone());
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/asr/bridge.py");
+    if manifest.exists() {
+        return Ok(manifest);
+    }
+    from_exe.ok_or_else(|| "无法推断 python/asr/bridge.py 路径".to_string())
+}
+
+/// 极简 `.env` 加载器（不引入任何外部 crate）：
+/// 从 `.env` 读取 `KEY=VALUE`，仅当进程尚未设置该键时才注入 `std::env`，
+/// 避免覆盖已存在的真实环境变量 / CLI 显式参数（shell 里 `export` 的 Key 优先级最高）。
+///
+/// 搜索顺序：环境变量 `AICUT_ENV_FILE` 指定路径 → `<仓库根>/.env`。
+/// 文件不存在 / 不可读 / 解析失败均静默忽略，不影响其它来源的 Key。
+fn load_dotenv() {
+    let env_path = if let Ok(p) = std::env::var("AICUT_ENV_FILE") {
+        PathBuf::from(p)
+    } else {
+        repo_root().join(".env")
+    };
+    let content = match std::fs::read_to_string(&env_path) {
+        Ok(c) => c,
+        Err(_) => return, // 无 .env 文件：静默跳过
+    };
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let kv = line.strip_prefix("export ").unwrap_or(line);
+        let mut it = kv.splitn(2, '=');
+        let (k, v) = match (it.next(), it.next()) {
+            (Some(k), Some(v)) => (k.trim(), v.trim()),
+            _ => continue,
+        };
+        if k.is_empty() {
+            continue;
+        }
+        // 去引号
+        let v = v.trim_matches(|c| c == '"' || c == '\'');
+        if std::env::var(k).is_err() {
+            std::env::set_var(k, v);
+        }
+    }
+}
+
+/// 推断仓库根目录（`<repo>`），用于定位默认 `.env` 与桥路径。
+fn repo_root() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = exe
+            .parent() // <repo>/target/debug
+            .and_then(|p| p.parent()) // <repo>/target
+            .and_then(|p| p.parent()) // <repo>
+        {
+            return root.to_path_buf();
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+impl AsrProvider for BailianAsrProvider {
+    fn transcribe(&self, audio_path: &str, language: &str) -> Result<TranscriptResult, String> {
+        load_dotenv(); // 让 .env 里的 AICUT_ASR_API_KEY 自动生效（CLI 直跑也能读）
+        let lang = if language.is_empty() { "zh" } else { language };
+        let py = python_bin();
+        let bridge = resolve_asr_bridge()?;
+        let bridge_s = bridge
+            .to_str()
+            .ok_or_else(|| "ASR 桥路径包含非 UTF-8 字符".to_string())?;
+
+        let output = Command::new(&py)
+            .env("PYTHONIOENCODING", "utf-8") // Windows 管道默认本地 codepage，中文会乱码
+            .env("PYTHONUTF8", "1")
+            .arg(bridge_s)
+            .arg(audio_path)
+            .arg(lang)
+            .arg(self.effective_model())
+            .arg(&self.api_key)
+            .arg(&self.endpoint)
+            .output()
+            .map_err(|e| format!("无法启动 Python ({}): {}", py, e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        if line.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "百炼 ASR 桥无输出 (退出码 {:?}): {}",
+                output.status.code(),
+                stderr.chars().take(600).collect::<String>()
+            ));
+        }
+
+        let root: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("百炼 ASR 桥输出解析失败: {} (原始: {})", e, line.chars().take(300).collect::<String>()))?;
+
+        if !root.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = root.get("error").and_then(|v| v.as_str()).unwrap_or("未知错误");
+            return Err(format!("百炼 ASR 转写失败: {}", err));
+        }
+
+        let data = root
+            .get("data")
+            .ok_or_else(|| "百炼 ASR 返回缺少 data 字段".to_string())?;
+
+        let segments: Vec<TranscriptSegment> = data
+            .get("segments")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|s| TranscriptSegment {
+                        start: s.get("start").and_then(as_f64).unwrap_or(0.0),
+                        end: s.get("end").and_then(as_f64).unwrap_or(0.0),
+                        text: s.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut text = data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if text.trim().is_empty() && !segments.is_empty() {
+            text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+        }
+        if text.trim().is_empty() && segments.is_empty() {
+            return Err("百炼 ASR 返回空结果（text 与 segments 均为空）".into());
+        }
+
+        Ok(TranscriptResult { text, segments })
+    }
+}
+
+// ════════════════════ 简繁安全网（OpenCC t2s，走外部 Python） ════════════════════
+
+/// 繁体 → 简体转换。通过托管 Python 调用 `opencc.OpenCC('t2s')`，文本以 argv 传入避免注入。
+///
+/// **容错**：python / opencc 不可用、进程失败、stderr 非空或输出为空时，**原样返回**输入文本，
+/// 绝不因简繁转换导致整个转写失败。
+pub fn to_simplified(text: &str) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    const SCRIPT: &str =
+        "import sys;from opencc import OpenCC;sys.stdout.write(OpenCC('t2s').convert(sys.argv[1]))";
+    let py = python_bin();
+    let output = match Command::new(&py)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .arg("-c")
+        .arg(SCRIPT)
+        .arg(text)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return text.to_string(), // python 不存在 → 原文
+    };
+    if !output.status.success() || !output.stderr.is_empty() {
+        return text.to_string(); // opencc 未安装 / 运行报错 → 原文
+    }
+    match String::from_utf8(output.stdout) {
+        // Windows 文本模式会把 \n 写成 \r\n，这里还原
+        Ok(s) if !s.is_empty() => s.replace("\r\n", "\n"),
+        _ => text.to_string(),
+    }
+}
+
+/// 对整体 text 与每个 segment.text 做简繁转换（失败即静默保持原文）。
+///
+/// 为避免逐段启动 Python 进程（几百段时开销巨大），这里把所有文本用 `\n` 拼成一次调用；
+/// 行数对不上（文本自身含换行）时退回逐条转换。
+fn simplify_result(result: &mut TranscriptResult) {
+    let mut items: Vec<&str> = Vec::with_capacity(result.segments.len() + 1);
+    items.push(result.text.as_str());
+    items.extend(result.segments.iter().map(|s| s.text.as_str()));
+    if items.iter().all(|t| t.trim().is_empty()) {
+        return;
+    }
+
+    let joined = items.join("\n");
+    let converted = to_simplified(&joined);
+    let lines: Vec<&str> = converted.split('\n').collect();
+
+    if lines.len() == items.len() {
+        result.text = lines[0].to_string();
+        for (seg, line) in result.segments.iter_mut().zip(lines[1..].iter()) {
+            seg.text = (*line).to_string();
+        }
+    } else {
+        result.text = to_simplified(&result.text);
+        for seg in result.segments.iter_mut() {
+            seg.text = to_simplified(&seg.text);
+        }
+    }
+}
+
+/// 装饰器：在内部 provider 转写完成后统一套用简繁安全网
+struct SimplifiedAsrProvider {
+    inner: Box<dyn AsrProvider>,
+}
+
+impl AsrProvider for SimplifiedAsrProvider {
+    fn transcribe(&self, audio_path: &str, language: &str) -> Result<TranscriptResult, String> {
+        let mut result = self.inner.transcribe(audio_path, language)?;
+        simplify_result(&mut result);
+        Ok(result)
+    }
+}
+
+/// ASR provider 工厂：`bailian` → 百炼；其余（`whisper-local`/`whisper-api`/`custom`/空）→ whisper.cpp。
+/// 返回的 provider 已包裹简繁安全网，转写结果统一为简体。
+pub fn create_asr_provider(
+    provider: &str,
+    engine: &str,
+    model_path: &str,
+    api_key: &str,
+    endpoint: &str,
+    model: &str,
+) -> Box<dyn AsrProvider> {
+    let inner: Box<dyn AsrProvider> = match provider.trim().to_ascii_lowercase().as_str() {
+        "bailian" => Box::new(BailianAsrProvider::new(
+            api_key.to_string(),
+            endpoint.to_string(),
+            model.to_string(),
+        )),
+        _ => {
+            let engine_path = if engine.trim().is_empty() {
+                DEFAULT_WHISPER_ENGINE.to_string()
+            } else {
+                engine.to_string()
+            };
+            let model_file = if model_path.trim().is_empty() {
+                DEFAULT_WHISPER_MODEL.to_string()
+            } else {
+                model_path.to_string()
+            };
+            Box::new(WhisperProvider::with_paths(engine_path, model_file))
+        }
+    };
+    Box::new(SimplifiedAsrProvider { inner })
 }
 
 /// 将转写结果转换为 SRT 字幕字符串

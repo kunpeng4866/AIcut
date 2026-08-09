@@ -33,3 +33,8 @@ silero-vad==6.2.1
 demucs==4.1.0
 torch==2.13.0
 torchaudio==2.11.0
+
+# ---- ASR 百炼桥（asr/bridge.py：DashScope Paraformer 实时转写）----
+# opencc-python-reimplemented 同时供 Rust 侧 OpenCC 繁简安全网使用。
+dashscope
+opencc-python-reimplemented
