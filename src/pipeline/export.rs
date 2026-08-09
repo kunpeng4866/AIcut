@@ -1178,221 +1178,26 @@ fn box_blur_channel(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
     out
 }
 
-// ════════════════════ 美颜解码（模块级自由函数） ════════════════════
+// ════════════════════ 解码（模块级自由函数） ════════════════════
 
-/// 解码单个 clip 的一帧；若 clip 启用美颜/形变，则通过 ffmpeg 施加与 graph.rs 同义的
-/// build_beauty_spec + alphamerge+overlay / remap（修复复杂导出路径「静默丢美颜/形变」）。
-/// 形变（瘦脸/大眼）先于美颜施加；任一环节失败都回退到上一级（形变失败→原帧，
-/// 形变后美颜失败→形变帧），保证导出不崩、至少不静默丢效果。
-///
-/// 设计为自由函数（而非 `&mut self` 方法）：调用点位于 `render_video_frame` 内，该处
-/// `video_clips` 仍持有对 `self.timeline` 的不可变借用；若用 `&mut self` 方法会与之冲突。
-/// 这里只借用 `project`（不可变）与 `decoder_pool`（可变）两个不相交字段，避免整体借用。
+/// 解码单个 clip 的一帧。自由函数形式以避免与 `render_video_frame` 内对 `video_clips`
+/// 持有的 `self.timeline` 不可变借用冲突；此处仅借用 `project`（不可变）与
+/// `decoder_pool`（可变）两个不相交字段。
 fn resolve_clip_frame<'a>(
-    project: &crate::project::Project,
+    _project: &crate::project::Project,
     decoder_pool: &mut DecoderPool,
     clip: &'a Clip,
     req: &PrefetchRequest,
-    now: f64,
+    _now: f64,
 ) -> Result<DecodedFrame, AppError> {
     let w = req.width;
     let h = req.height;
-    if let Some(bc) = &clip.beauty {
-        if bc.enabled {
-            // ── P2 瘦脸/大眼形变（WARP）──
-            // thinFace/bigEye>0 且 X/Y 形变图资产都存在时，先对单帧做 remap 形变；
-            // 形变失败 → 回退原解码帧（不静默丢效果，至少保证导出不崩）。
-            let warp_on = bc.thin_face.unwrap_or(0.0) > 0.0 || bc.big_eye.unwrap_or(0.0) > 0.0;
-            let warp_paths = if warp_on {
-                let wx = bc.warp_x_asset_id.as_ref()
-                    .and_then(|id| project.asset_by_id(id).map(|a| a.path.clone()));
-                let wy = bc.warp_y_asset_id.as_ref()
-                    .and_then(|id| project.asset_by_id(id).map(|a| a.path.clone()));
-                match (wx, wy) { (Some(a), Some(b)) => Some((a, b)), _ => None }
-            } else { None };
-
-            if let Some((wx, wy)) = warp_paths {
-                match decode_warp_frame(&clip.asset_id, req.source_time, w, h, &wx, &wy) {
-                    Ok(warped) => {
-                        // 形变成功：若美颜也启用，则在「形变后」的帧上继续施加美颜
-                        if crate::filters::build_beauty_spec(&clip.beauty, w, h).is_some() {
-                            let mask_path = bc.mask_asset_id.as_ref()
-                                .and_then(|id| project.asset_by_id(id).map(|a| a.path.clone()));
-                            let mask_t = (now - clip.timeline_in).max(0.0);
-                            match decode_beauty_frame_on_warped(&warped, w, h, bc, mask_path.as_deref(), mask_t) {
-                                Ok(f) => return Ok(f),
-                                Err(e) => {
-                                    eprintln!("[export] 形变后美颜失败，回退形变帧: {}", e);
-                                    return Ok(warped);
-                                }
-                            }
-                        }
-                        return Ok(warped);
-                    }
-                    Err(e) => {
-                        eprintln!("[export] 形变失败，回退原始帧: {}", e);
-                    }
-                }
-            }
-
-            // ── 原美颜逻辑（无形变或形变跳过时）──
-            if crate::filters::build_beauty_spec(&clip.beauty, w, h).is_some() {
-                let mask_path = bc.mask_asset_id.as_ref()
-                    .and_then(|id| project.asset_by_id(id).map(|a| a.path.clone()));
-                let mask_t = (now - clip.timeline_in).max(0.0);
-                let asset_path = project.asset_by_id(&clip.asset_id)
-                    .map(|a| a.path.clone())
-                    .unwrap_or_default();
-                match decode_beauty_frame(&asset_path, req.source_time, w, h, bc, mask_path.as_deref(), mask_t) {
-                    Ok(f) => return Ok(f),
-                    Err(e) => {
-                        eprintln!("[export] 美颜施加失败，回退原始帧: {}", e);
-                    }
-                }
-            } else if !warp_on {
-                eprintln!("[export] 美颜已启用但参数全 0，未施加（clip={}）", clip.id);
-            }
-        }
-    }
     decoder_pool.decode(&req.asset_path, req.source_time, w, h)
         .map_err(|e| AppError::Render(format!("解码失败 ({}): {}", clip.asset_id, e)))
 }
 
-/// 用 ffmpeg 对主素材单帧施加瘦脸/大眼 remap 形变，返回 RGBA 解码帧（与 graph.rs WARP 块同义）。
-/// 形变失败（如形变图缺失/损坏/分辨率不符）→ 抛错，由调用方回退原始帧。
-fn decode_warp_frame(
-    asset_id: &str,
-    src_t: f64,
-    w: u32,
-    h: u32,
-    xmap_path: &str,
-    ymap_path: &str,
-) -> Result<DecodedFrame, AppError> {
-    let cmd = crate::ffmpeg::build_remap_frame_cmd(asset_id, src_t, xmap_path, ymap_path, w, h);
-    let output = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| AppError::Render(format!("形变解码启动失败: {}", e)))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Render(format!("形变 ffmpeg 失败: {}", stderr.chars().take(500).collect::<String>())));
-    }
-    let expected = (w as usize) * (h as usize) * 4;
-    let data = if output.stdout.len() >= expected {
-        output.stdout[..expected].to_vec()
-    } else {
-        return Err(AppError::Render(format!("形变输出不足: {} < {}", output.stdout.len(), expected)));
-    };
-    Ok(DecodedFrame { width: w, height: h, data, source_time: src_t })
-}
 
-/// 把已形变（remap 后）的 RGBA 帧写入临时 nut 视频，再走与 graph.rs 同义的美颜路径。
-/// remap 输出的帧只是「按源时间取一帧」，故作为主素材时源时间传 0；区域 mask 仍按
-/// clip 相对时间 mask_t 对齐到真实帧。
-fn decode_beauty_frame_on_warped(
-    warped: &DecodedFrame,
-    w: u32,
-    h: u32,
-    beauty: &crate::types::BeautyConfig,
-    mask_path: Option<&str>,
-    mask_t: f64,
-) -> Result<DecodedFrame, AppError> {
-    let chain = crate::filters::build_beauty_spec(&Some(beauty.clone()), w, h)
-        .ok_or_else(|| AppError::Render("美颜滤镜为空".into()))?;
-    // 写入临时 nut（rawvideo 容器），供 build_beauty_frame_cmd 作为主素材读入
-    let tmp = make_temp_path("aicut_warp_beauty", "nut");
-    let wcmd = vec![
-        "ffmpeg".to_string(), "-y".to_string(), "-v".to_string(), "error".to_string(),
-        "-f".to_string(), "rawvideo".to_string(), "-pix_fmt".to_string(), "rgba".to_string(),
-        "-s".to_string(), format!("{}x{}", w, h), "-i".to_string(), "pipe:0".to_string(),
-        "-c:v".to_string(), "rawvideo".to_string(), "-pix_fmt".to_string(), "rgba".to_string(),
-        tmp.clone(),
-    ];
-    let mut child = Command::new(&wcmd[0])
-        .args(&wcmd[1..])
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| AppError::Render(format!("形变帧暂存启动失败: {}", e)))?;
-    {
-        use std::io::Write;
-        child.stdin.take().ok_or_else(|| AppError::Render("形变帧暂存无法获取 stdin".into()))?
-            .write_all(&warped.data)
-            .map_err(|e| AppError::Render(format!("形变帧写入失败: {}", e)))?;
-    }
-    let wout = child.wait_with_output()
-        .map_err(|e| AppError::Render(format!("形变帧暂存失败: {}", e)))?;
-    if !wout.status.success() {
-        let stderr = String::from_utf8_lossy(&wout.stderr);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(AppError::Render(format!("形变帧暂存 ffmpeg 失败: {}", stderr.chars().take(400).collect::<String>())));
-    }
-    let src_t = 0.0;
-    let cmd = crate::ffmpeg::build_beauty_frame_cmd(&tmp, src_t, w, h, &chain, mask_path, mask_t);
-    let output = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| AppError::Render(format!("形变后美颜启动失败: {}", e)))?;
-    let _ = std::fs::remove_file(&tmp);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Render(format!("形变后美颜 ffmpeg 失败: {}", stderr.chars().take(500).collect::<String>())));
-    }
-    let expected = (w as usize) * (h as usize) * 4;
-    let data = if output.stdout.len() >= expected {
-        output.stdout[..expected].to_vec()
-    } else {
-        return Err(AppError::Render(format!("形变后美颜输出不足: {} < {}", output.stdout.len(), expected)));
-    };
-    Ok(DecodedFrame { width: w, height: h, data, source_time: src_t })
-}
 
-/// 生成唯一的临时文件路径（写入目录取系统临时目录）。
-fn make_temp_path(prefix: &str, ext: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let p = std::env::temp_dir().join(format!("{}_{}_{}.{}", prefix, std::process::id(), nanos, ext));
-    p.to_string_lossy().to_string()
-}
-
-/// 用 ffmpeg 对主素材单帧施加美颜（含可选区域 mask 混合），返回 RGBA 解码帧。
-/// 与 graph.rs::build_beauty_spec + alphamerge+overlay 完全同义；区域 mask 缺失时整帧美颜。
-fn decode_beauty_frame(
-    main_input: &str,
-    src_t: f64,
-    w: u32,
-    h: u32,
-    beauty: &crate::types::BeautyConfig,
-    mask_path: Option<&str>,
-    mask_t: f64,
-) -> Result<DecodedFrame, AppError> {
-    let chain = crate::filters::build_beauty_spec(&Some(beauty.clone()), w, h)
-        .ok_or_else(|| AppError::Render("美颜滤镜为空".into()))?;
-    let cmd = crate::ffmpeg::build_beauty_frame_cmd(main_input, src_t, w, h, &chain, mask_path, mask_t);
-    let output = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| AppError::Render(format!("美颜解码启动失败: {}", e)))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Render(format!("美颜 ffmpeg 失败: {}", stderr.chars().take(500).collect::<String>())));
-    }
-    let expected = (w as usize) * (h as usize) * 4;
-    let data = if output.stdout.len() >= expected {
-        output.stdout[..expected].to_vec()
-    } else {
-        return Err(AppError::Render(format!("美颜输出不足: {} < {}", output.stdout.len(), expected)));
-    };
-    Ok(DecodedFrame { width: w, height: h, data, source_time: src_t })
-}
 
 #[cfg(test)]
 mod tests {
@@ -1419,7 +1224,7 @@ mod tests {
             text: None,
             subtitle: None,
             transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
         }
     }
 

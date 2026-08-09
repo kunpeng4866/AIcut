@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """AIcut 视频超清增强 (Super Resolution) 模块。
 
-架构（与 keying/beauty 模块一致）:
+架构（与 keying 模块一致）:
     - core.py / inference.py : ONNX CUDA EP 推理 + 分块处理 + Gaussian Blending
     - bridge.py             : CLI 入口，JSON 协议（与 Rust 引擎对接）
     - model.py              : RRDBNet 12 块 PyTorch 模型定义（训练用）

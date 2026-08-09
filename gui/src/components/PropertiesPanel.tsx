@@ -1,6 +1,6 @@
 // 属性面板 — 右侧面板，按素材类型（文本/字幕/音频/视频图片）分组展示一级 tab，
-// 同类型下再分子 tab（如视频「画面」含 基础/抠像/蒙版/美颜美体）。
-// 复用既有渲染函数（TransformTab/KeyingTab/MaskTab/BeautyTab/AudioTab/SpeedTab/TransitionTab/
+// 同类型下再分子 tab（如视频「画面」含 基础/抠像/蒙版）。
+// 复用既有渲染函数（TransformTab/KeyingTab/MaskTab/AudioTab/SpeedTab/TransitionTab/
 // ItemsTab/TextTab/SubtitleTab/KeyframesTab），不改变底层数据模型与后端契约。
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
@@ -10,8 +10,6 @@ import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, Wip
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 import MaskTab from './panels/MaskTab';
 import KeyingTab from './panels/KeyingTab';
-import BeautyTab from './panels/BeautyTab';
-import SRTab from './panels/SRTab';
 import { SUBTITLE_FONTS, SUBTITLE_FONT_GROUPS, SUBTITLE_STYLE_PRESETS, findFontCss, DEFAULT_FONT_ID } from '../utils/subtitleFonts';
 
 // 插件 manifest 类型（仅前端 UI 使用，不依赖 engine 包）
@@ -34,14 +32,12 @@ interface SubDef { key: string; label: string; }
 interface TabDef { key: RightPanel; label: string; subs?: SubDef[]; }
 
 const PANEL_GROUPS: Record<Category, TabDef[]> = {
-  // 视频 / 图片：画面(基础/抠像/蒙版/美颜美体) / 音频 / 变速 / 动画(转场) / 调整(滤镜+特效) / 关键帧
+  // 视频 / 图片：画面(基础/抠像/蒙版) / 音频 / 变速 / 动画(转场) / 调整(滤镜+特效) / 关键帧
   video: [
     { key: 'visual', label: '画面', subs: [
       { key: 'base', label: '基础' },
       { key: 'keying', label: '抠像' },
       { key: 'mask', label: '蒙版' },
-      { key: 'beauty', label: '美颜美体' },
-      { key: 'superresolution', label: '超清增强' },
     ]},
     { key: 'audio', label: '音频' },
     { key: 'speed', label: '变速' },
@@ -91,9 +87,6 @@ const KF_PROPS = [
   { key: 'keying.edgeSoftness', label: '抠像·边缘柔化' },
   { key: 'keying.spill', label: '抠像·溢出抑制' },
   { key: 'keying.threshold', label: '抠像·阈值' },
-  { key: 'beauty.smoothing', label: '美颜·磨皮' },
-  { key: 'beauty.whitening', label: '美颜·美白' },
-  { key: 'beauty.clarity', label: '美颜·清晰' },
 ];
 const VOICE_TYPES = ['无', '男声', '女声', '机器人', '萝莉'];
 
@@ -629,14 +622,10 @@ function KeyframesTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
   // 抠像属性新增关键帧时，默认取当前 keying 参数值（避免相似性默认 0=全抠的灾难初值）
   const kfField = prop.startsWith('keying.')
     ? (prop.slice('keying.'.length) as 'similarity' | 'edgeSoftness' | 'spill' | 'threshold')
-    : prop.startsWith('beauty.')
-    ? (prop.slice('beauty.'.length) as 'smoothing' | 'whitening' | 'clarity')
     : null;
-  // 抠像/美颜属性新增关键帧时，默认取当前参数值（避免相似性默认 0=全抠的灾难初值；threshold 默认 0.5）
+  // 抠像属性新增关键帧时，默认取当前参数值（避免相似性默认 0=全抠的灾难初值；threshold 默认 0.5）
   const addValue = kfField && clip.keying
     ? ((clip.keying as any)[kfField] ?? (kfField === 'threshold' ? 0.5 : 0))
-    : kfField && clip.beauty
-    ? ((clip.beauty as any)[kfField] ?? 0)
     : 0;
   const add = () => setKfs([...kfs, { time: currentTime, value: addValue, easing: '线性' }].sort((a, b) => a.time - b.time));
   const remove = (i: number) => setKfs(kfs.filter((_, idx) => idx !== i));
@@ -936,8 +925,6 @@ export default function PropertiesPanel() {
     if (tab.key === 'visual') {
       if (effSub === 'keying') return <KeyingTab clip={clip} trackId={trackId} />;
       if (effSub === 'mask') return <MaskTab clip={clip} trackId={trackId} />;
-      if (effSub === 'beauty') return <BeautyTab clip={clip} trackId={trackId} />;
-      if (effSub === 'superresolution') return <SRTab clip={clip} trackId={trackId} />;
       return <TransformTab clip={clip} trackId={trackId} />; // base
     }
     if (tab.key === 'audio') return <AudioTab clip={clip} trackId={trackId} />;

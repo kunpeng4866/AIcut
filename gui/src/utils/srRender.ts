@@ -1,5 +1,5 @@
 // 超清增强（Super Resolution）对比预览。
-// 与 keyingRender / beautyRender 不同：SR 是**导出级后处理**，会整体改变分辨率，
+// 与 keyingRender 不同：SR 是**导出级后处理**，会整体改变分辨率，
 // 无法进入 WebGPU 时间轴合成（见 src/sr.rs 架构说明）。因此这里不做逐帧像素处理，
 // 只用两个 <video> 元素叠放 + clip-path 滑块做「原图 vs 超分」左右对比。
 //

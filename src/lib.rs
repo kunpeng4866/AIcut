@@ -20,7 +20,6 @@ pub mod plugin;
 pub mod tts;
 pub mod speech;
 pub mod keying;
-pub mod beauty;
 pub mod sr;
 pub mod timeline;
 pub mod clock;
@@ -131,15 +130,14 @@ pub fn is_simple_project(project: &Project) -> bool {
                 .any(|c| c.keying.as_ref().map_or(false, |k| k.enabled));
             if has_keying { return false; }
         }
-        // 关键帧路由：仅当关键帧全部落在「graph.rs 可烘焙的参数」(keying.* / beauty.*) 上时，
+        // 关键帧路由：仅当关键帧全部落在「graph.rs 可烘焙的参数」(keying.*) 上时，
         // 才允许走快速路径。keying 关键帧由 build_video_chain 在边界切段烘焙（相似度/溢出抑制/
-        // 边缘柔化/阈值随时间变化）；beauty 关键帧由 build_video_chain / build_clip_chain 通过
-        // 同样的分段切段烘焙（smoothing/whitening/clarity 随时间变化）。transform/speed/opacity
+        // 边缘柔化/阈值随时间变化）。transform/speed/opacity
         // 等关键帧在快速路径只取中点固定值（既有行为），与逐帧动画不兼容，故含此类关键帧仍强制走完整路径。
         // sr.* 为防御性放行：SR 是导出级后处理（见 src/sr.rs），当前不消费关键帧，
         // 但工程里若残留 sr.* 关键帧不应把整个工程踢出快速路径。
         let allowed_kf = |k: &String| {
-            k.starts_with("keying.") || k.starts_with("beauty.") || k.starts_with("sr.")
+            k.starts_with("keying.") || k.starts_with("sr.")
         };
         let has_unsupported_kf = clip.keyframes.keys().any(|k| !allowed_kf(k));
         if has_unsupported_kf {
@@ -297,11 +295,6 @@ pub fn keying_generate(input: &str, opts_json: &str) -> Result<serde_json::Value
     keying::keying_generate(input, opts_json)
 }
 
-/// 美颜·皮肤管理：调用 Python 桥生成皮肤区域 mask（灰度 mp4），返回 mask 路径/尺寸/帧率等 JSON。
-pub fn beauty_generate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
-    beauty::beauty_generate(input, opts_json)
-}
-
 /// 视频超清增强：调用 Python 桥对单个视频逐帧超分，返回 `{"ok","output_path",...}` JSON。
 pub fn sr_generate(input: &str, opts_json: &str) -> Result<serde_json::Value, AppError> {
     sr::sr_generate(input, opts_json)
@@ -388,7 +381,7 @@ mod tests {
             time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None, transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, beauty: None, super_resolution: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
         }
     }
 

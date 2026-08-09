@@ -283,23 +283,6 @@ fn main() {
                 other => { eprintln!("未知 keying 模式: {} (可用: matte, manual)", other); process::exit(2); }
             }
         }
-        "beauty" => {
-            // aicut-engine beauty --input <path> --opts <json>
-            let mut input = String::new();
-            let mut opts = String::new();
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--input" => { input = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
-                    "--opts"  => { opts  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
-                    other => { eprintln!("未知参数: {}", other); process::exit(2); }
-                }
-            }
-            match aicut_engine::beauty_generate(&input, &opts) {
-                Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
-                Err(e) => { eprintln!("beauty 失败: {}", e); process::exit(1); }
-            }
-        }
         "sr" => {
             // aicut-engine sr --input <path> --opts <json>
             //   或 aicut-engine sr --project <project.json> --output <out.mp4> --opts <json>
@@ -343,7 +326,7 @@ fn main() {
             }
         }
         other => {
-            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech, keying, beauty, sr)", other);
+            eprintln!("未知子命令: {} (可用: render, export, probe, new, validate, presets, version, mcp, mcp-tools, mcp-tool, tts, ai, asr, speech, keying, sr)", other);
             process::exit(2);
         }
     }

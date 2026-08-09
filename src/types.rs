@@ -113,68 +113,13 @@ pub struct KeyingConfig {
 fn default_keying_mode() -> String { "chroma".to_string() }
 fn default_keying_color() -> String { "#00ff00".to_string() }
 
-fn default_beauty_enabled() -> bool { false }
-fn default_beauty_smoothing() -> f64 { 0.0 }
-fn default_beauty_whitening() -> f64 { 0.0 }
-fn default_beauty_clarity() -> f64 { 0.0 }
-fn default_beauty_skin_tone() -> String { "none".to_string() }
-
-/// 美颜·皮肤管理配置（片段级，非破坏式）。
-/// 仅做皮肤管理（磨皮/美白/清晰/肤色），不做美体/五官塑形/美妆。
-/// M1 全部为传统图像处理，不依赖 AI 模型；M3 高阶（匀肤/祛斑/黑眼圈）为自研模型，本期不实现。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct BeautyConfig {
-    #[serde(default = "default_beauty_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_beauty_smoothing")]
-    pub smoothing: f64,
-    #[serde(default = "default_beauty_whitening")]
-    pub whitening: f64,
-    #[serde(default = "default_beauty_clarity")]
-    pub clarity: f64,
-    #[serde(default = "default_beauty_skin_tone")]
-    pub skin_tone: String,
-    #[serde(default)]
-    pub mask_asset_id: Option<String>,
-    // ── P1 多区域 mask（自研解析模型产出，与前端统一契约）──
-    /// face 区域皮肤 mask 资产 id（灰度 mp4）；与 mask_asset_id 互斥，优先于 legacy。
-    #[serde(rename = "faceMaskAssetId", default)]
-    pub face_mask_asset_id: Option<String>,
-    /// neck 区域皮肤 mask 资产 id
-    #[serde(rename = "neckMaskAssetId", default)]
-    pub neck_mask_asset_id: Option<String>,
-    /// arm 区域皮肤 mask 资产 id
-    #[serde(rename = "armMaskAssetId", default)]
-    pub arm_mask_asset_id: Option<String>,
-    /// 人脸关键点/landmark 资产 id（预留，供后续五官级美颜使用）
-    #[serde(rename = "landmarkAssetId", default)]
-    pub landmark_asset_id: Option<String>,
-    /// 自研皮肤解析模型标识（如 "beauty_parse_v1"）；None 时回退阈值法
-    #[serde(rename = "parseModel", default)]
-    pub parse_model: Option<String>,
-    // ── P2 五官级形变（瘦脸/大眼）──
-    /// 瘦脸强度 ∈ [0,1]；>0 且 warp map 资产存在时施加 remap 形变。
-    #[serde(rename = "thinFace", default)]
-    pub thin_face: Option<f64>,
-    /// 大眼强度 ∈ [0,1]；>0 且 warp map 资产存在时施加 remap 形变。
-    #[serde(rename = "bigEye", default)]
-    pub big_eye: Option<f64>,
-    /// 瘦脸/大眼形变图 X 通道（gray16le rawvideo，uint16 绝对像素坐标）资产 id；由 warp 模式产出。
-    #[serde(rename = "warpXAssetId", default)]
-    pub warp_x_asset_id: Option<String>,
-    /// 瘦脸/大眼形变图 Y 通道（gray16le rawvideo，uint16 绝对像素坐标）资产 id；由 warp 模式产出。
-    #[serde(rename = "warpYAssetId", default)]
-    pub warp_y_asset_id: Option<String>,
-}
-
 fn default_sr_scale() -> u32 { 2 }
 fn default_sr_strength() -> f64 { 1.0 }
 
 /// 视频超清增强（Super Resolution）配置（片段级，仅作导出级后处理的开关与参数承载）。
 ///
 /// 注意：SR 依赖 onnxruntime 逐帧推理且会改变分辨率，**不进入** graph.rs 滤镜链，
-/// 也不像 keying/beauty 那样以 matte/mask 资产参与时间轴合成；它只在导出后处理阶段
+/// 也不像 keying 那样以 matte/mask 资产参与时间轴合成；它只在导出后处理阶段
 /// 由 `crate::sr::sr_export_project` 消费。`asset_id` 为预留字段（超分产物落盘后回灌工程用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

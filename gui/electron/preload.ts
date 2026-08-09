@@ -82,14 +82,6 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('keying:generate', input, optsJson),
   },
 
-  // ── 美颜·皮肤管理 ──
-  beauty: {
-    generate: (input: string, optsJson: string) =>
-      ipcRenderer.invoke('beauty:generateMask', input, optsJson),
-    generateWarp: (input: string, optsJson: string) =>
-      ipcRenderer.invoke('beauty:generateWarp', input, optsJson),
-  },
-
   // ── 视频超清增强（导出级后处理）──
   sr: {
     generate: (input: string, optsJson: string) =>

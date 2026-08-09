@@ -4,12 +4,13 @@
 use crate::ffmpeg;
 use crate::ffmpeg::InputSpec;
 use crate::project::{Clip, Project, Track};
+use crate::subtitle;
 use crate::types::*;
 use std::collections::HashMap;
 
 // ════════════════════ 曲线变速 ════════════════════
 
-use crate::filters::{build_beauty_spec, build_clip_filters, build_filter_spec, build_keying_spec, build_mask_spec, fmt};
+use crate::filters::{build_clip_filters, build_filter_spec, build_keying_spec, build_mask_spec, fmt};
 
 /// 从"速度曲线"构建分段线性 setpts 表达式。
 ///
@@ -63,11 +64,86 @@ fn build_piecewise_setpts_from_ctrl(ctrl: &[(f64, f64)]) -> Option<String> {
 
 // ════════════════════ FilterGraphBuilder ════════════════════
 
-/// 从关键帧轨道采样属性值；无关键帧则回退 base。取 clip 中位时间近似。
+/// 从关键帧轨道采样属性值；无关键帧则回退 base。取 clip 中位时间近似（静态回退用）。
+/// 兼容前端键名：依次尝试 `transform.X` 与 `X` 两种前缀；scaleX/scaleY 额外兼容前端
+/// 单一 `scale` 键（前端 `KF_PROPS` 写 `scale` 同时驱动两轴，后端拆分 scaleX/scaleY，#6 修复）。
 fn keyframed(clip: &Clip, path: &str, base: f64) -> f64 {
-    clip.keyframes.get(path)
-        .map(|t| { let mid = (clip.timeline_in + clip.timeline_out) * 0.5; t.sample(mid) })
-        .unwrap_or(base)
+    if let Some(tr) = clip.keyframes.get(path) {
+        let mid = (clip.timeline_in + clip.timeline_out) * 0.5;
+        return tr.sample(mid);
+    }
+    let alt = if let Some(s) = path.strip_prefix("transform.") { s.to_string() } else { format!("transform.{}", path) };
+    if let Some(tr) = clip.keyframes.get(&alt) {
+        let mid = (clip.timeline_in + clip.timeline_out) * 0.5;
+        return tr.sample(mid);
+    }
+    if path == "transform.scaleX" || path == "transform.scaleY" {
+        if let Some(tr) = clip.keyframes.get("scale") {
+            let mid = (clip.timeline_in + clip.timeline_out) * 0.5;
+            return tr.sample(mid);
+        }
+    }
+    base
+}
+
+/// 取属性动画表达式：依次尝试候选键名，命中轨道则烘焙为 ffmpeg 时间表达式（局部 t）；
+/// 无命中返回 None（调用方回退静态值）。
+fn kf_factor(clip: &Clip, candidates: &[&str], timeline_in: f64) -> Option<String> {
+    for c in candidates {
+        if let Some(tr) = clip.keyframes.get(*c) {
+            return build_kf_expr(tr, timeline_in);
+        }
+    }
+    None
+}
+
+/// 把关键帧轨道烘焙为 ffmpeg 时间表达式（局部时间 t，单位秒）。
+/// 关键帧时间为**全局时间线**时刻，这里统一减去 `timeline_in` 换算为 clip 局部时间，
+/// 与 filtergraph 内各滤镜的 `t`（clip 局部时间轴）对齐。
+/// 节点策略：直接以关键帧时刻为节点（保证精确命中各关键帧值）；线性段只取端点（表达式
+/// 内本就是线性插值，无需细分），缓动段按 8 等分细分采样 `sample()`（Rust 侧已含缓动曲线）
+/// 以分段线性近似曲线形状。整体构造 `if(lt(t,p),v0+(v1-v0)*(t-p0)/(p1-p0),…)` 链，
+/// 使导出与预览逐帧采样一致（#6 修复：此前 keyframed 只取中点→静态，关键帧形同虚设）。
+fn build_kf_expr(track: &KeyframeTrack, timeline_in: f64) -> Option<String> {
+    if track.is_empty() { return None; }
+    let mut kfs: Vec<&Keyframe> = track.keyframes.iter().collect();
+    kfs.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    let tmin = kfs[0].time;
+    let tmax = kfs[kfs.len() - 1].time;
+    if !(tmax > tmin) {
+        return Some(fmt(kfs[0].value));
+    }
+    // 收集节点（局部时间, 值）：线性段仅端点；缓动段 8 等分细分以近似曲线。
+    let mut nodes: Vec<(f64, f64)> = Vec::new();
+    nodes.push((kfs[0].time - timeline_in, kfs[0].value));
+    for w in kfs.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        if !matches!(b.easing, Easing::Linear) {
+            let sub = 8u32;
+            for i in 1..sub {
+                let f = i as f64 / sub as f64;
+                let gt = a.time + (b.time - a.time) * f;
+                nodes.push((gt - timeline_in, track.sample(gt)));
+            }
+        }
+        nodes.push((b.time - timeline_in, b.value));
+    }
+    let (first_p, first_v) = nodes[0];
+    // 从后往前嵌套：t < p1 段内插值，否则落入外层（更晚时段 / 末值）。
+    let mut expr = fmt(nodes[nodes.len() - 1].1);
+    for i in (0..nodes.len() - 1).rev() {
+        let (p0, v0) = nodes[i];
+        let (p1, v1) = nodes[i + 1];
+        let denom = (p1 - p0).max(1e-9);
+        let seg = format!("({}+({}-{})*(t-{})/{})", fmt(v0), fmt(v1), fmt(v0), fmt(p0), fmt(denom));
+        expr = format!("if(lt(t,{}),{},{})", fmt(p1), seg, expr);
+    }
+    // t 早于首个关键帧时钳到首值，避免线性外推偏离。
+    if first_p > 0.0 {
+        expr = format!("if(lt(t,{}),{},{})", fmt(first_p), fmt(first_v), expr);
+    }
+    Some(expr)
 }
 
 /// 采样单个抠像关键帧属性在全局时间 t 的值；无轨道回退 base。
@@ -127,50 +203,11 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
     out
 }
 
-/// 是否美颜已启用且 smoothing/whitening/clarity 中存在关键帧。
-fn is_beauty_keyframed(c: &Clip) -> bool {
-    let Some(b) = &c.beauty else { return false; };
-    if !b.enabled { return false; }
-    ["beauty.smoothing", "beauty.whitening", "beauty.clarity"]
-        .iter()
-        .any(|p| c.keyframes.contains_key(*p))
-}
-
-/// 把打了关键帧的美颜参数按时间线切分为若干段；返回 (本地开始, 本地结束, 该段有效 BeautyConfig)。
-fn beauty_segments(c: &Clip) -> Vec<(f64, f64, BeautyConfig)> {
-    let mut times: Vec<f64> = Vec::new();
-    for key in ["beauty.smoothing", "beauty.whitening", "beauty.clarity"] {
-        if let Some(track) = c.keyframes.get(key) {
-            for kf in &track.keyframes {
-                if kf.time > c.timeline_in && kf.time < c.timeline_out {
-                    times.push(kf.time);
-                }
-            }
-        }
-    }
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-    let mut boundaries = vec![c.timeline_in];
-    boundaries.extend(times);
-    boundaries.push(c.timeline_out);
-    let mut out = Vec::new();
-    for w in boundaries.windows(2) {
-        let (g0, g1) = (w[0], w[1]);
-        if g1 - g0 < 1e-6 { continue; }
-        let mid = (g0 + g1) * 0.5;
-        let mut b = c.beauty.clone().unwrap();
-        b.smoothing = sample_keying(c, "beauty.smoothing", b.smoothing, mid);
-        b.whitening = sample_keying(c, "beauty.whitening", b.whitening, mid);
-        b.clarity = sample_keying(c, "beauty.clarity", b.clarity, mid);
-        out.push((g0 - c.timeline_in, g1 - c.timeline_in, b));
-    }
-    out
-}
-
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>, warp_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
-    let idx = *asset_to_idx.get(&c.asset_id)?;
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
+    let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
+    let input = resolve_clip_input(c, ci, asset_to_idx, w, h, nodes, base_dur)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, idx, w, h, &label, fps, matte_map, bg_map, beauty_map, warp_map);
+    let chain = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map);
     nodes.extend(chain);
     Some(label)
 }
@@ -182,16 +219,61 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
 /// `matte_map`：智能抠像(smart)用 matte 素材 → 全局输入索引（由 build_render_command 收集）。
 /// 若 clip 启用 smart 抠像且 matte_asset_id 命中，则把该 matte 输入作为额外 alpha 源，
 /// 经 threshold 曲线映射为 alpha 后与源视频 alphamerge（替代 chromakey 的 YUV→alpha 手段）。
-fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, beauty_map: &HashMap<String, usize>, warp_map: &HashMap<String, usize>) -> Vec<String> {
+/// 解析 clip 的视频输入标签：
+/// - 有真实素材 → `[idx:v]`；
+/// - 无素材但带 text/subtitle（前端用哨兵 assetId='_text'/'_subtitle'，无对应素材）→ 合成
+///   透明底色流作为 drawtext 画布（overlay 时透出底层视频，避免"导出后一个字没有" #1）；
+/// - 否则返回 None（跳过，如孤立的哨兵 clip）。
+/// `base_dur`：合成底色流时长。单 clip 文字轨 overlay 用 shortest=1，底色流需近无限长
+/// 以免截断主时间线；多 clip 文字轨走 concat/xfade，需等于片段真实时长。
+fn resolve_clip_input(
+    c: &Clip,
+    vci: usize,
+    asset_to_idx: &HashMap<String, usize>,
+    w: u32,
+    h: u32,
+    nodes: &mut Vec<String>,
+    base_dur: f64,
+) -> Option<String> {
+    if let Some(i) = asset_to_idx.get(&c.asset_id) {
+        return Some(format!("[{}:v]", i));
+    }
+    if c.text.is_some() || c.subtitle.is_some() {
+        let base = format!("vb{}", vci);
+        // 透明黑底：overlay 时透出底层视频。drawtext 的 enable 控制字幕实际出现的时段。
+        nodes.push(format!("color=c=black@0:s={}x{}:d={},format=rgba[{}]", w, h, fmt(base_dur), base));
+        return Some(format!("[{}]", base));
+    }
+    None
+}
+
+fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>) -> Vec<String> {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     let sw = (w as f64 * sx).round() as u32;
     let sh = (h as f64 * sy).round() as u32;
+    // 关键帧动画：scale 走 eval=frame 时间表达式（前端 `scale` 键同时驱动两轴，#6 修复）。
+    let sx_a = kf_factor(c, &["transform.scaleX", "scaleX", "scale"], c.timeline_in);
+    let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
     let mut nodes: Vec<String> = Vec::new();
 
     // 1) 预抠像链：scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
     let mut pre_label = format!("{}p", label);
-    let mut pre = format!("[{}:v]scale={}:{}", idx, sw, sh);
+    let mut pre = match (&sx_a, &sy_a) {
+        (Some(ex), Some(ey)) => format!(
+            "{}scale=w='trunc(({})*{}/2)*2':h='trunc(({})*{}/2)*2':eval=frame",
+            input, ex, w, ey, h
+        ),
+        (Some(ex), None) => format!(
+            "{}scale=w='trunc(({})*{}/2)*2':h={}:eval=frame",
+            input, ex, w, sh
+        ),
+        (None, Some(ey)) => format!(
+            "{}scale=w={}:h='trunc(({})*{}/2)*2':eval=frame",
+            input, sw, ey, h
+        ),
+        (None, None) => format!("{}scale={}:{}", input, sw, sh),
+    };
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
     if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur) {
@@ -199,104 +281,36 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     } else if (c.speed - 1.0).abs() > 0.001 {
         pre.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
     }
-    let rot = keyframed(c, "transform.rotation", c.transform.rotation);
-    if rot.abs() > 0.01 { pre.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
+    let rot_a = kf_factor(c, &["transform.rotation", "rotation"], c.timeline_in);
+    if let Some(re) = rot_a {
+        // 关键帧旋转：rotate 的 a 表达式逐帧求值（支持 t），#6 修复。
+        pre.push_str(&format!(",rotate=a='({})*PI/180'", re));
+    } else {
+        let rot = keyframed(c, "transform.rotation", c.transform.rotation);
+        if rot.abs() > 0.01 { pre.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
+    }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
     if !clip_filters.is_empty() { pre.push_str(&format!(",{}", clip_filters)); }
-    pre.push_str(&format!("[{}]", pre_label));
-    nodes.push(pre);
-
-    // 1.2) 瘦脸/大眼形变（WARP）：在美颜/抠像之前对源做几何 remap。
-    // 仅当 clip 启用美颜且 thinFace/bigEye>0 且 X/Y 形变图资产都存在时施加，向后兼容
-    // （默认不施加，旧工程无 warp 资产 → 走历史行为）。形变图（gray16le rawvideo，uint16 绝对像素
-    // 坐标，尺寸 = (sw,sh) 已与源一致）作为额外输入，原样 format=gray16le（**不做 scale**，
-    // 否则插值破坏绝对坐标、破坏 thinFace=bigEye=0 的恒等不变性），与 [pre] 帧同步 remap。
-    // 本机引擎 ffmpeg（N-125258）不支持 remap=format=float / grayf32le，仅 gray16le 可用，
-    // 16-bit 值被 remap 直接当作源坐标。注：源按 speed 重定时，形变图未同步 setpts，
-    // 故 speed≠1 时存在轻微错位（M1 范围 talking-head 多 speed=1，可接受）。
-    if let Some((wx, wy)) = collect_warp_maps(c, &warp_map) {
-        let warped = format!("{}warp", label);
-        let wxn = format!("{}wx", label);
-        let wyn = format!("{}wy", label);
-        nodes.push(format!(
-            "[{mi}:v]format=gray16le[{wxn}]",
-            mi = wx, wxn = wxn
-        ));
-        nodes.push(format!(
-            "[{mi}:v]format=gray16le[{wyn}]",
-            mi = wy, wyn = wyn
-        ));
-        nodes.push(format!(
-            "[{pre}][{wxn}][{wyn}]remap[{warped}]",
-            pre = pre_label, wxn = wxn, wyn = wyn, warped = warped
-        ));
-        pre_label = warped;
-    }
-
-    // 1.5) 美颜·皮肤管理：多区域 mask（face/neck/arm 并集，回退 legacy mask_asset_id）。
-    // 与 matte 类似，mask 作为额外输入；先把源 split 成 orig + src_for_beauty，
-    // 对 src 施加美颜链，再按 mask luma 混合（out = orig*(1-mask) + beauty*mask）。
-    // mask 必须缩放到与源一致尺寸（sw×sh），否则三路分辨率不一致会报 Invalid argument。
-    // 多区域：face/neck/arm 各为一个灰度 mask 输入，两两 blend=lighten 取并集（max luma）。
-    let beauty_masks = collect_beauty_region_masks(c, &beauty_map);
-    if !beauty_masks.is_empty() {
-        if is_beauty_keyframed(c) {
-            let segs = beauty_segments(c);
-            let n = segs.len();
-            let split_outs: Vec<String> = (0..n).map(|i| format!("{}bsp{}", label, i)).collect();
-            nodes.push(format!(
-                "[{pre}]split={n}{outs}",
-                pre = pre_label, n = n,
-                outs = split_outs.iter().map(|o| format!("[{}]", o)).collect::<String>()
-            ));
-            let mut seg_labels: Vec<String> = Vec::new();
-            for (i, (s0, s1, bcfg)) in segs.iter().enumerate() {
-                let seg_out = format!("{}bs{}", label, i);
-                seg_labels.push(seg_out.clone());
-                let sf = ((*s0) * (fps as f64)).round() as i64;
-                let mut ef = ((*s1) * (fps as f64)).round() as i64;
-                if ef <= sf { ef = sf + 1; }
-                let borig = format!("{}borig{}", label, i);
-                let bsrc = format!("{}bsrc{}", label, i);
-                let bbeauty = format!("{}bbeauty{}", label, i);
-                let bra = format!("{}bra{}", label, i);
-                // 每段：源扇出 2 路（orig 作 overlay 底，src 作美颜输入）；mask 同步 trim+setpts 到同窗口
-                nodes.push(format!(
-                    "[{pre}]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,split=2[{borig}][{bsrc}]",
-                    pre = split_outs[i], sf = sf, ef = ef, borig = borig, bsrc = bsrc
-                ));
-                if let Some(chain) = build_beauty_spec(&Some(bcfg.clone()), w, h) {
-                    nodes.push(format!("[{bsrc}]{chain}[{bbeauty}]"));
-                } else {
-                    nodes.push(format!("[{bsrc}][{bbeauty}]"));
-                }
-                let (mask_nodes, bmask) = build_beauty_mask_nodes(label, &beauty_masks, sw, sh, fps, Some((sf, ef)), i);
-                nodes.extend(mask_nodes);
-                nodes.push(format!("[{bbeauty}][{bmask}]alphamerge[{bra}]"));
-                nodes.push(format!("[{borig}][{bra}]overlay=format=auto[{seg_out}]"));
+    // 字幕/文字叠加层烧录：GUI 导出走本路径（render→graph.rs），必须把 clip.text /
+    // clip.subtitle 烤进视频，否则预览可见、导出成片丢失（#1 P0）。
+    // 复用 subtitle 模块的 drawtext 构造函数。graph.rs 各 clip 链使用**局部时间戳**
+    // （t 从 0 起、到本片段时长 dur 止），故以 0..dur 为 enable 窗口（与 ExportPipeline
+    // 用工程时间线不同）。仅当片段确含 text/subtitle 时才改此链，普通导出不受影响。
+    if dur > 0.0 {
+        let fontfile_dir = std::env::var("AICUT_FONTS_DIR").unwrap_or_default();
+        if let Some(t) = &c.text {
+            if let Some(f) = subtitle::build_text_overlay_filter(t, 0.0, dur, w, h, &fontfile_dir) {
+                pre.push_str(&format!(",{}", f));
             }
-            let inputs = seg_labels.iter().map(|s| format!("[{}]", s)).collect::<String>();
-            let bout_final = format!("{}bout", label);
-            nodes.push(format!("{}concat=n={}:v=1:a=0[{}]", inputs, seg_labels.len(), bout_final));
-            pre_label = bout_final;
-        } else if let Some(chain) = build_beauty_spec(&c.beauty, w, h) {
-            let borig = format!("{}borig", label);
-            let bsrc = format!("{}bsrc", label);
-            let bbeauty = format!("{}bbeauty", label);
-            let beauty_rgba = format!("{}bra", label);
-            let bout = format!("{}bout", label);
-            // 用 alphamerge 把灰度 mask 的 luma 注入美颜结果的 alpha，
-            // 再用 overlay 按 alpha 把「美颜版」混合回「原版」（out = orig*(1-a) + beauty*a）。
-            // 注：maskedmerge 在本机 ffmpeg 构建下不按 luma 限制（背景仍被改动），故不用它。
-            nodes.push(format!("[{pre}]split=2[{borig}][{bsrc}]", pre = pre_label));
-            nodes.push(format!("[{bsrc}]{chain}[{bbeauty}]"));
-            let (mask_nodes, bmask) = build_beauty_mask_nodes(label, &beauty_masks, sw, sh, fps, None, 0);
-            nodes.extend(mask_nodes);
-            nodes.push(format!("[{bbeauty}][{bmask}]alphamerge[{beauty_rgba}]"));
-            nodes.push(format!("[{borig}][{beauty_rgba}]overlay=format=auto[{bout}]"));
-            pre_label = bout;
+        }
+        if let Some(s) = &c.subtitle {
+            for f in subtitle::build_subtitle_overlay_filters(s, 0.0, w, h, &fontfile_dir) {
+                pre.push_str(&format!(",{}", f));
+            }
         }
     }
+    pre.push_str(&format!("[{}]", pre_label));
+    nodes.push(pre);
 
     // 2) 抠像：chroma 用 chromakey（作用于 YUV）；smart/manual 用 matte alphamerge。
     // 若相关参数（chroma: similarity/edgeSoftness/spill；smart/manual: threshold/edgeSoftness）
@@ -407,11 +421,17 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     }
     let core = format!("[{}]", keyed_label);
     // opacity + fps 作为尾部统一施加（在蒙版/matte 合成之后），保证各路输入帧率一致、透明度正确。
-    let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
-    let tail = if opacity < 1.0 {
-        format!(",colorchannelmixer=aa={},fps={}", fmt(opacity), fps)
+    // 关键帧不透明度：colorchannelmixer 的 aa 走 eval=frame 时间表达式（#6 修复）。
+    let op_a = kf_factor(c, &["transform.opacity", "opacity"], c.timeline_in);
+    let tail = if let Some(oe) = op_a {
+        format!(",colorchannelmixer=aa='({})':eval=frame,fps={}", oe, fps)
     } else {
-        format!(",fps={}", fps)
+        let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
+        if opacity < 1.0 {
+            format!(",colorchannelmixer=aa={},fps={}", fmt(opacity), fps)
+        } else {
+            format!(",fps={}", fps)
+        }
     };
     // 蒙版：geq 形状（heart/circle/...）走单输入 geq；文字(text) 走独立 drawtext 流 + alphamerge。
     // 中间标签 mlabel = 蒙版合成后、matte 合成前、尾部之前的视频流。
@@ -519,93 +539,22 @@ fn build_video_chain(c: &Clip, idx: usize, w: u32, h: u32, label: &str, fps: u32
     nodes
 }
 
-/// 收集 clip 的瘦脸/大眼形变图输入索引 (x_idx, y_idx)。
-/// 仅当 clip 启用美颜且 thinFace/bigEye>0 且 X/Y 两张形变图资产都存在时返回 Some，
-/// 否则 None（不施加形变，向后兼容）。形变图由 warp 模式产出（gray16le rawvideo，uint16 绝对像素坐标）。
-fn collect_warp_maps(c: &Clip, warp_map: &HashMap<String, usize>) -> Option<(usize, usize)> {
-    let b = match &c.beauty { Some(b) if b.enabled => b, _ => return None };
-    let tf = b.thin_face.unwrap_or(0.0);
-    let be = b.big_eye.unwrap_or(0.0);
-    if tf <= 0.0 && be <= 0.0 { return None; }
-    let xid = b.warp_x_asset_id.as_ref()?;
-    let yid = b.warp_y_asset_id.as_ref()?;
-    let xi = *warp_map.get(xid)?;
-    let yi = *warp_map.get(yid)?;
-    Some((xi, yi))
-}
-
-/// 收集 clip 的美颜区域 mask 输入索引（按 face/neck/arm 优先，无则回退 legacy mask_asset_id）。
-/// 返回 [(input_index, region_label), ...]；空 = 无 mask（不施加美颜，保持历史行为）。
-fn collect_beauty_region_masks(c: &Clip, beauty_map: &HashMap<String, usize>) -> Vec<(usize, String)> {
-    let b = match &c.beauty { Some(b) if b.enabled => b, _ => return Vec::new() };
-    let mut out: Vec<(usize, String)> = Vec::new();
-    // 多区域优先
-    if let Some(id) = &b.face_mask_asset_id {
-        if let Some(&mi) = beauty_map.get(id) { out.push((mi, "face".to_string())); }
+/// 计算 clip 在画布上的水平偏移（像素）。关键帧位置 X 走 overlay 的 x 时间表达式（#6 修复）。
+fn offset_x(c: &Clip, w: u32) -> String {
+    if let Some(e) = kf_factor(c, &["transform.x", "x"], c.timeline_in) {
+        return format!("'(({})-0.5)*{}'", e, w);
     }
-    if let Some(id) = &b.neck_mask_asset_id {
-        if let Some(&mi) = beauty_map.get(id) { out.push((mi, "neck".to_string())); }
-    }
-    if let Some(id) = &b.arm_mask_asset_id {
-        if let Some(&mi) = beauty_map.get(id) { out.push((mi, "arm".to_string())); }
-    }
-    // 无多区域 mask 时回退 legacy 单区域
-    if out.is_empty() {
-        if let Some(id) = &b.mask_asset_id {
-            if let Some(&mi) = beauty_map.get(id) { out.push((mi, "legacy".to_string())); }
-        }
-    }
-    out
-}
-
-/// 构建多区域 mask 并集节点，返回 (节点列表, 并集 mask 标签)。
-/// - seg=Some((sf, ef))：对每个区域 mask 做 trim+setpts 对齐到该 segment 时间窗；
-/// - seg=None：整段（静态美颜）。
-/// 多个区域 mask 用 blend=all_mode=lighten 两两取并集（max luma），得到单一 alpha 源。
-fn build_beauty_mask_nodes(
-    label: &str,
-    masks: &[(usize, String)],
-    sw: u32,
-    sh: u32,
-    _fps: u32,
-    seg: Option<(i64, i64)>,
-    suffix: usize,
-) -> (Vec<String>, String) {
-    let mut nodes: Vec<String> = Vec::new();
-    let mut scaled: Vec<String> = Vec::new();
-    for (i, (mi, reg)) in masks.iter().enumerate() {
-        let sl = format!("{}bm{}s{}_{}", label, suffix, i, reg);
-        match seg {
-            Some((sf, ef)) => {
-                nodes.push(format!(
-                    "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,format=gray,scale={sw}:{sh}[{sl}]",
-                    mi = mi, sf = sf, ef = ef, sw = sw, sh = sh, sl = sl
-                ));
-            }
-            None => {
-                nodes.push(format!("[{mi}:v]format=gray,scale={sw}:{sh}[{sl}]", mi = mi, sw = sw, sh = sh, sl = sl));
-            }
-        }
-        scaled.push(sl);
-    }
-    let mut cur = scaled[0].clone();
-    for sl in &scaled[1..] {
-        // 标签需全局唯一：用节点数保证不冲突
-        let uniq = format!("{}bmu{}_{}", label, suffix, nodes.len());
-        nodes.push(format!("[{cur}][{sl}]blend=all_mode=lighten[{uniq}]", cur = cur, sl = sl, uniq = uniq));
-        cur = uniq;
-    }
-    (nodes, cur)
-}
-
-fn offset_x(c: &Clip, w: u32) -> i64 {
     let x = keyframed(c, "transform.x", c.transform.x);
-    ((x - 0.5) * w as f64).round() as i64
+    format!("{}", ((x - 0.5) * w as f64).round() as i64)
 }
 
-fn offset_y(c: &Clip, h: u32) -> i64 {
+/// 计算 clip 在画布上的垂直偏移（像素）。关键帧位置 Y 走 overlay 的 y 时间表达式（#6 修复）。
+fn offset_y(c: &Clip, h: u32) -> String {
+    if let Some(e) = kf_factor(c, &["transform.y", "y"], c.timeline_in) {
+        return format!("'(0.5-({}))*{}'", e, h);
+    }
     let y = keyframed(c, "transform.y", c.transform.y);
-    ((0.5 - y) * h as f64).round() as i64
+    format!("{}", ((0.5 - y) * h as f64).round() as i64)
 }
 
 pub struct FilterGraphBuilder;
@@ -661,70 +610,6 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             }
         }
     }
-    // 美颜·皮肤管理：皮肤区域 mask 素材（灰度 mp4）作为额外输入加入导出（独立 -i），
-    // 记录其全局输入索引供 build_video_chain 引用 [idx:v]，与 matte 同一条 maskedmerge 路径。
-    // P1：除 legacy mask_asset_id 外，也注册 face/neck/arm 多区域 mask 资产。
-    let mut beauty_map: HashMap<String, usize> = HashMap::new();
-    for (_, c) in &video_clips {
-        if let Some(b) = &c.beauty {
-            if b.enabled {
-                let candidate_ids: Vec<&String> = [
-                    b.mask_asset_id.as_ref(),
-                    b.face_mask_asset_id.as_ref(),
-                    b.neck_mask_asset_id.as_ref(),
-                    b.arm_mask_asset_id.as_ref(),
-                ]
-                .iter()
-                .flatten()
-                .map(|id| *id)
-                .collect();
-                for id in candidate_ids {
-                    if !beauty_map.contains_key(id) {
-                        if let Some(a) = project.asset_by_id(id) {
-                            beauty_map.insert(id.to_string(), cmd.inputs.len());
-                            cmd.inputs.push(InputSpec { path: a.path.clone(), stream_loop: None, raw_video: None });
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // 瘦脸/大眼形变图（P2）：X/Y 形变图（gray16le rawvideo，uint16 绝对像素坐标）作为额外输入加入
-    // 导出，记录全局输入索引供 build_video_chain 引用 [idx:v]，与 matte/beauty 同一条 remap 路径。
-    // 形变图以 rawvideo + gray16le 读取，分辨率 = clip 渲染源尺寸 (sw, sh)（与 build_video_chain
-    // 中源缩放目标一致），remap 输出亦为此尺寸，保证滤镜链维度一致 + 恒等不变性。
-    let mut warp_map: HashMap<String, usize> = HashMap::new();
-    for (_, c) in &video_clips {
-        if let Some(b) = &c.beauty {
-            if b.enabled {
-                // 该 clip 的渲染源尺寸（与 build_video_chain 的 sw/sh 同义，取静态 scale）。
-                let sx = c.transform.scale_x.max(0.01);
-                let sy = c.transform.scale_y.max(0.01);
-                let sw = (project.canvas.width as f64 * sx).round() as u32;
-                let sh = (project.canvas.height as f64 * sy).round() as u32;
-                let candidate_ids: Vec<&String> = [
-                    b.warp_x_asset_id.as_ref(),
-                    b.warp_y_asset_id.as_ref(),
-                ]
-                .iter()
-                .flatten()
-                .map(|id| *id)
-                .collect();
-                for id in candidate_ids {
-                    if !warp_map.contains_key(id) {
-                        if let Some(a) = project.asset_by_id(id) {
-                            warp_map.insert(id.to_string(), cmd.inputs.len());
-                            cmd.inputs.push(InputSpec {
-                                path: a.path.clone(),
-                                stream_loop: None,
-                                raw_video: Some((sw, sh)),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
     // 背景合成（P3）：背景图片/视频作为额外输入加入导出（独立 -i），记录全局输入索引供 build_video_chain 引用。
     let mut bg_map: HashMap<String, usize> = HashMap::new();
     for (_, c) in &video_clips {
@@ -765,16 +650,16 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             if clips.is_empty() { continue; }
             if clips.len() == 1 {
                 let c = clips[0];
-                let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => { vci += 1; continue; } };
                 let src = format!("vs{}", vci);
-                let chain = build_video_chain(c, idx, w, h, &src, project.canvas.fps, &matte_map, &bg_map, &beauty_map, &warp_map);
+                let Some(input) = resolve_clip_input(c, vci, &asset_to_idx, w, h, &mut nodes, 1e9) else { vci += 1; continue; };
+                let chain = build_video_chain(c, &input, w, h, &src, project.canvas.fps, &matte_map, &bg_map);
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
-                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, &beauty_map, &warp_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                 vci += 1;
                 // 累积时间线原点 = 本轨首个片段的主时间线起点。xfade 的 offset 是相对
                 // 累积视频流时间轴的，而转场窗锚点在出片段（prev）的主时间线
@@ -789,7 +674,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
                     let trans_params = clip_transition_params(prev).or_else(|| clip_transition_params(curr));
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
-                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, &beauty_map, &warp_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
                     vci += 1;
                     if has_transition {
                         let (xstyle, xdur_raw) = trans_opt.unwrap();
@@ -806,12 +691,21 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                         track_acc = merged.clone();
                         // feather：xfade 的 wipe/circle 无原生软边参数；
                         // feather>0 时在 xfade 输出后追加 gblur（按 feather 折算 sigma）近似软边。
+                        // 关键修复（#5）：gblur 必须加 enable 时间门控，仅作用于转场窗
+                        // [offset, offset+xdur]。否则 gblur 会糊住整条 merged 流，而 merged 被赋回
+                        // track_acc、成为后续所有 xfade/concat 的输入 → 成片从该转场起**永久失焦**，
+                        // 且转场越多叠加越重。enable=false 时 gblur 透传原帧（保持清晰）。
                         if let Some((_, _, _, feather, _, _)) = trans_params {
                             let is_wipe = xstyle.starts_with("wipe") || xstyle == "circleopen";
                             if is_wipe && feather > 0.0 {
                                 let sigma = (feather * 0.25).max(0.3);
                                 let blurred = format!("xb{}", vci);
-                                nodes.push(format!("[{}]gblur=sigma={:.2}[{}]", merged, sigma, blurred));
+                                let trans_start = offset;
+                                let trans_end = offset + xdur;
+                                nodes.push(format!(
+                                    "[{}]gblur=sigma={:.2}:enable='between(t,{},{})'[{}]",
+                                    merged, sigma, fmt(trans_start), fmt(trans_end), blurred
+                                ));
                                 track_acc = blurred;
                             }
                         }
@@ -1009,9 +903,14 @@ fn build_clip_audio_node(c: &Clip, idx: usize, track_vol: f64, label: &str, enve
         let tempo = c.speed.clamp(0.5, 2.0);
         chain.push_str(&format!(",atempo={}", fmt(tempo)));
     }
-    let vol = keyframed(c, "volume", c.volume).clamp(0.0, 2.0) * track_vol;
-    if (vol - 1.0).abs() > 0.01 {
-        chain.push_str(&format!(",volume={}", fmt(vol)));
+    // 关键帧音量：volume 走 eval=frame 时间表达式（#6 修复）。否则回退静态增益。
+    if let Some(ve) = kf_factor(c, &["volume"], c.timeline_in) {
+        chain.push_str(&format!(",volume='({})*{}':eval=frame", ve, fmt(track_vol)));
+    } else {
+        let vol = c.volume.clamp(0.0, 2.0) * track_vol;
+        if (vol - 1.0).abs() > 0.01 {
+            chain.push_str(&format!(",volume={}", fmt(vol)));
+        }
     }
     // 转场 equal-power 包络（afade, curve=qsin）：out=cos 淡出 / in=sin 淡入，与 export.rs / 预览一致。
     // 用本地时间轴 st = tw0 - timeline_in（转场窗起点相对本片段起点），置于 adelay 之前。

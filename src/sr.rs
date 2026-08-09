@@ -6,7 +6,7 @@
 //!   - `sr_export_project` : 导出级后处理——先把工程渲染成临时视频，再超分到最终输出。
 //!
 //! 架构说明：SR 依赖 onnxruntime CUDA EP 逐帧推理，**无法**表达为 ffmpeg 滤镜，
-//! 故不能进入 `graph.rs::build_video_chain`；且 SR 会改变分辨率，也不能仿 keying/beauty
+//! 故不能进入 `graph.rs::build_video_chain`；且 SR 会改变分辨率，也不能仿 keying
 //! 的 clip 级资产引用模式（会破坏时间轴合成）。因此 SR 只作为**导出级后处理**存在。
 //!
 //! 错误统一用 `crate::AppError::Render(String)` 返回，保持与 `keying_generate` 一致的风格。

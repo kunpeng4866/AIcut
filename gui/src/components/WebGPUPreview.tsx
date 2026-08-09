@@ -7,7 +7,6 @@ import { useProjectStore } from '../store/projectStore';
 import { computeOutClipOpacity, getOutClipTransition, type MaskRect } from '../utils/transitionUtils';
 import { composeMaskedFrame } from '../utils/maskRender';
 import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
-import { applyBeauty, drawBeautyMaskFrame, applyBeautyMulti, getBeautyMaskCanvases, resolveBeautyMaskRefs, applyWarp, type MultiMaskBeauty } from '../utils/beautyRender';
 
 // 文件路径转 aicut-asset:// URL（与 PreviewCanvas 内 pathToUrl 保持一致；此处本地副本避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -21,32 +20,6 @@ const vidSrc = (a: { path: string; proxyPath?: string }): string =>
   a.proxyPath ? pathToUrl(a.proxyPath) : pathToUrl(a.path);
 
 // ── P2 形变（warp）形变图解码缓存 ──
-// 形变图是 gray16le rawvideo（uint16 小端、行优先 (H,W)、值=绝对源像素坐标，X 图 0..W-1，Y 图 0..H-1）。
-// 按 warp 资产 pair 缓存已解码的 Float32 坐标数组——绝不可每帧重读文件。
-const warpMapCache = new Map<string, { x: Float32Array; y: Float32Array; w: number; h: number }>();
-
-async function decodeWarpMaps(xPath: string, yPath: string, w: number, h: number, cacheKey: string): Promise<void> {
-  if (warpMapCache.has(cacheKey)) return;
-  if (!w || !h) return;
-  try {
-    const [xb, yb] = await Promise.all([
-      fetch(pathToUrl(xPath)).then((r) => r.arrayBuffer()),
-      fetch(pathToUrl(yPath)).then((r) => r.arrayBuffer()),
-    ]);
-    const xu = new Uint16Array(xb);
-    const yu = new Uint16Array(yb);
-    const xf = new Float32Array(xu.length);
-    const yf = new Float32Array(yu.length);
-    for (let i = 0; i < xu.length; i++) { xf[i] = xu[i]; yf[i] = yu[i]; }
-    // 限制缓存条目数，避免反复「重新生成形变网格」堆积旧资产坐标（单条 1080p 约 16MB）
-    if (warpMapCache.size > 6) warpMapCache.clear();
-    warpMapCache.set(cacheKey, { x: xf, y: yf, w, h });
-  } catch (e) {
-    // 解码失败（文件缺失/未就绪）仅跳过本帧，下一帧重试
-    console.error('[warp] 形变图解码失败', e);
-  }
-}
-
 // 从 transform CSS 字符串（如 "scale(1.12)"）解析缩放因子，供 zoom 转场折进 WebGPU 用户 scale
 function parseScale(s: string | null | undefined): number {
   if (!s) return 1;
@@ -190,11 +163,6 @@ export function useWebGPUPreview({
   // 智能抠像（smart）matte 视频缓存：matteAssetId → 隐藏 <video>；离屏 canvas 复用。
   const matteVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  // 美颜（beauty）skin_mask 视频缓存：maskAssetId → 隐藏 <video>；离屏 canvas 复用。
-  const beautyVideoCacheRef = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const beautyCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  // 美颜多区域：每个区域 mask 资产 id → 独立离屏 canvas（避免脸/脖/臂 互相覆盖）。
-  const beautyMultiCanvasCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   // 当前工程（含 assets），供按 matteAssetId 查真实路径。直接写 ref 避免触发重渲染。
   const projectRef = useRef(useProjectStore.getState().project);
   projectRef.current = useProjectStore((s) => s.project);
@@ -244,21 +212,6 @@ export function useWebGPUPreview({
     if (!mctx) return null;
     mctx.drawImage(video, 0, 0, targetW, targetH);
     return mc;
-  };
-
-  // 美颜（beauty）取当前时刻的 skin_mask 帧（灰度）绘制到离屏 canvas 并返回。
-  // 与 getMatteFrame 完全对称，仅资产 id 指向 skin_mask 而非 matte。未就绪返回 null。
-  const getBeautyMaskFrame = (
-    maskAssetId: string,
-    srcTime: number,
-    srcPaused: boolean,
-    srcRate: number,
-    targetW: number,
-    targetH: number,
-  ): HTMLCanvasElement | null => {
-    const asset = projectRef.current?.assets?.find((a) => a.id === maskAssetId);
-    if (!asset) return null;
-    return drawBeautyMaskFrame(pathToUrl(asset.path), beautyVideoCacheRef, beautyCanvasRef, srcTime, srcPaused, srcRate, targetW, targetH);
   };
 
   // 背景合成（P3）：取当前时刻的背景帧，供 compositeBackground 垫在 keyed 之下。
@@ -452,10 +405,6 @@ export function useWebGPUPreview({
       matteVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); (v as any).load?.(); } catch (_) {} });
       matteVideoCacheRef.current.clear();
       matteCanvasRef.current = null;
-      // 释放美颜 skin_mask 视频缓存
-      beautyVideoCacheRef.current.forEach((v) => { try { v.pause(); v.removeAttribute('src'); (v as any).load?.(); } catch (_) {} });
-      beautyVideoCacheRef.current.clear();
-      beautyCanvasRef.current = null;
     };
   }, [enabled, canvasWidth, canvasHeight]);
 
@@ -600,68 +549,6 @@ export function useWebGPUPreview({
               }
             } catch {
               /* 背景合成失败则回退 keyed 帧 */
-            }
-          }
-
-          // 美颜（beauty）+ P2 形变（warp）实时预览合成：在抠像/背景之后。
-          // 顺序：先 warp（瘦脸/大眼 remap 形变）→ 再 applyBeautyMulti（皮肤磨皮/美白/清晰/肤色）。
-          // warp 资产读取 clip.beauty.warpXAssetId/warpYAssetId（灰色16le 形变图），与后端导出一致；
-          // 皮肤遮罩读取 faceMaskAssetId/neckMaskAssetId/armMaskAssetId（回退 maskAssetId），非 keying.matteAssetId。
-          const mb = clip.beauty as MultiMaskBeauty | undefined;
-          const hasWarp = !!(mb && (mb.warpXAssetId || mb.warpYAssetId) && ((mb.thinFace ?? 0) > 0 || (mb.bigEye ?? 0) > 0));
-          const hasBeauty = !!(mb && mb.enabled && (mb.faceMaskAssetId || mb.neckMaskAssetId || mb.armMaskAssetId || mb.maskAssetId));
-          if (mb && (hasWarp || hasBeauty)) {
-            try {
-              const srcVideo = videoRefs.current.get(clip.id) || null;
-              const srcTime = srcVideo ? srcVideo.currentTime : currentTimeRef.current;
-              const srcPaused = srcVideo ? srcVideo.paused : true;
-              const srcRate = srcVideo ? srcVideo.playbackRate : 1;
-
-              // uploadSource 可能不是 canvas（纯 <video>/ImageBitmap）：先落到离屏 canvas 再就地处理，
-              // 避免直接改写源元素（warp 与美颜都对 canvas 像素就地修改）。
-              if (!(uploadSource instanceof HTMLCanvasElement)) {
-                const tc = document.createElement('canvas');
-                tc.width = vw; tc.height = vh;
-                const tctx = tc.getContext('2d');
-                if (tctx) {
-                  tctx.drawImage(uploadSource, 0, 0, vw, vh);
-                  uploadSource = tc;
-                }
-              }
-
-              // ── warp（瘦脸/大眼）── 在皮肤美颜之前施加 remap 形变
-              if (hasWarp && uploadSource instanceof HTMLCanvasElement) {
-                const warpXAsset = (projectRef.current?.assets ?? []).find((a) => a.id === mb!.warpXAssetId);
-                const warpYAsset = (projectRef.current?.assets ?? []).find((a) => a.id === mb!.warpYAssetId);
-                if (warpXAsset && warpYAsset && warpXAsset.path && warpYAsset.path) {
-                  const cacheKey = `${warpXAsset.id}|${warpYAsset.id}`;
-                  const cached = warpMapCache.get(cacheKey);
-                  if (cached) {
-                    applyWarp(uploadSource, cached.x, cached.y, cached.w, cached.h);
-                  } else {
-                    // 形变图尚未解码：异步读取并缓存，下一帧生效（绝不可每帧重读文件）。
-                    void decodeWarpMaps(warpXAsset.path, warpYAsset.path, warpXAsset.width ?? 0, warpYAsset.height ?? 0, cacheKey);
-                  }
-                }
-              }
-
-              // ── 皮肤美颜（磨皮/美白/清晰/肤色）── 在 warp 之后
-              if (hasBeauty && uploadSource instanceof HTMLCanvasElement) {
-                const maskRefs = resolveBeautyMaskRefs(mb, projectRef.current?.assets ?? []);
-                const maskCanvases = getBeautyMaskCanvases(maskRefs, beautyVideoCacheRef, beautyMultiCanvasCacheRef, srcTime, srcPaused, srcRate, vw, vh);
-                if (maskCanvases.length) {
-                  const t = currentTimeRef.current;
-                  const effBeauty = {
-                    ...mb,
-                    smoothing: sampleKeyframe(clip.keyframes?.['beauty.smoothing'], t, mb.smoothing),
-                    whitening: sampleKeyframe(clip.keyframes?.['beauty.whitening'], t, mb.whitening),
-                    clarity: sampleKeyframe(clip.keyframes?.['beauty.clarity'], t, mb.clarity),
-                  };
-                  applyBeautyMulti(uploadSource, maskCanvases, effBeauty);
-                }
-              }
-            } catch {
-              /* 美颜/形变失败则回退原帧 */
             }
           }
 

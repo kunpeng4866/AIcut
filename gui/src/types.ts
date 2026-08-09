@@ -56,13 +56,11 @@ export interface ClipConfig {
   audioFadeOut?: number;
   // 抠像：色度/智能/手动（非破坏式）
   keying?: KeyingConfig;
-  // 美颜·皮肤管理（非破坏式，M1）
-  beauty?: BeautyConfig;
   // 视频超清增强（导出级后处理，不参与时间轴合成）
   superResolution?: SRConfig;
 }
 // ── 视频超清增强（Super Resolution）数据模型 ──
-// SR 依赖逐帧 ONNX 推理且会整体改变分辨率，无法表达为 ffmpeg 滤镜、也不能像 keying/beauty
+// SR 依赖逐帧 ONNX 推理且会整体改变分辨率，无法表达为 ffmpeg 滤镜、也不能像 keying
 // 那样以 clip 级资产参与时间轴合成（见 src/sr.rs 架构说明），故仅作为导出级后处理存在，
 // 前端只在 SRTab 内做「生成 + 原图/超分对比预览」。
 export interface SRConfig {
@@ -148,32 +146,6 @@ export interface KeyingConfig {
   matteAssetId?: string;       // 已生成的 matte 资产 id（导出时回引）
   // ── 背景合成（P3）──
   background?: KeyingBackground;
-}
-// ── 美颜·皮肤管理（Beauty）数据模型（前后端统一）──
-// 仅做皮肤管理（磨皮/美白/清晰/肤色），不做美体/五官塑形/美妆。
-// M1 全部为传统图像处理，不依赖 AI 模型；M3 高阶（匀肤/祛斑/黑眼圈）为自研模型，本期不实现。
-export type SkinTone = 'none' | 'cool' | 'natural' | 'warm' | 'wheat' | 'bronze';
-export interface BeautyConfig {
-  enabled: boolean;
-  // M1 基础参数（0~100，前端滑块；导出/预览映射为滤镜强度）
-  smoothing: number;   // 磨皮
-  whitening: number;   // 美白
-  clarity: number;     // 清晰
-  // 肤色预设（单选，不参与 0~100 映射）
-  skinTone: SkinTone;
-  // 预计算资产（点「生成蒙版」后由后端回写）
-  maskAssetId?: string;   // 自研皮肤分割产出的灰度 skin_mask.mp4 资产 id（legacy，单区域）
-  // ── P1 多区域 mask（自研解析模型产出）──
-  faceMaskAssetId?: string; // face 区域皮肤 mask 资产 id（优先于 maskAssetId）
-  neckMaskAssetId?: string; // neck 区域皮肤 mask 资产 id
-  armMaskAssetId?: string;  // arm 区域皮肤 mask 资产 id
-  landmarkAssetId?: string; // 人脸关键点/landmark 资产 id（预留）
-  parseModel?: string;      // 自研皮肤解析模型标识；未提供则回退阈值法
-  // ── P2 五官级形变（瘦脸/大眼）──
-  thinFace?: number;        // 瘦脸强度 [0,1]；>0 且 warp map 资产存在时施加 remap 形变
-  bigEye?: number;          // 大眼强度 [0,1]；>0 且 warp map 资产存在时施加 remap 形变
-  warpXAssetId?: string;    // 形变图 X 通道（gray16le rawvideo，绝对像素坐标）资产 id；warp 模式产出
-  warpYAssetId?: string;    // 形变图 Y 通道（gray16le rawvideo，绝对像素坐标）资产 id；warp 模式产出
 }
 export interface TransitionConfig {
   transitionType?: TransitionType; // 默认 'none'
@@ -324,8 +296,6 @@ export interface AicutAPI {
   asr: AsrAPI;
   // 口播剪辑
   speech: SpeechAPI;
-  // 美颜·皮肤管理
-  beauty: { generate(input: string, optsJson: string): Promise<{ success: boolean; data?: any; error?: string }> };
   // 插件
   listPlugins(): Promise<string>;
   scanPlugins(): Promise<number>;

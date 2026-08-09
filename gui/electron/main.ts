@@ -345,40 +345,54 @@ ipcMain.handle('keying:generate', async (_e, input: string, optsJson: string) =>
   }
 });
 
-// ── 美颜·皮肤管理：生成皮肤区域 mask（灰度 mp4）──
-ipcMain.handle('beauty:generateMask', async (_e, input: string, optsJson: string) => {
-  try {
-    // 美颜 mask 是唯一的生成动作，无需 --mode；optsJson 内由前端塞入全部参数与 output 路径。
-    const stdout = await callEngine('beauty', '--input', input ?? '', '--opts', optsJson ?? '');
-    const data = JSON.parse(stdout);
-    return { success: true, data };
-  } catch (e: any) {
-    return { success: false, error: e?.message ?? String(e) };
-  }
-});
-
-// ── 美颜·P2 五官形变：生成瘦脸/大眼 warp 形变图（两张 gray16le rawvideo）──
-ipcMain.handle('beauty:generateWarp', async (_e, input: string, optsJson: string) => {
-  try {
-    const stdout = await callEngine('beauty', '--input', input ?? '', '--opts', optsJson ?? '');
-    const data = JSON.parse(stdout);
-    return { success: true, data };
-  } catch (e: any) {
-    return { success: false, error: e?.message ?? String(e) };
-  }
-});
-
 // ── 视频超清增强：逐帧 ONNX 超分，产出放大后的视频 ──
-ipcMain.handle('sr:generate', async (_e, input: string, optsJson: string) => {
-  try {
-    // 与 beauty 同构：SR 只有「生成」一个动作，无需 --mode；
-    // optsJson 内由前端塞入 scale/strength/output_path/encoder 等全部参数（snake_case，见 python/sr/bridge.py）。
-    const stdout = await callEngine('sr', '--input', input ?? '', '--opts', optsJson ?? '');
-    const data = JSON.parse(stdout);
-    return { success: true, data };
-  } catch (e: any) {
-    return { success: false, error: e?.message ?? String(e) };
-  }
+// 与导出（render:export）同构：直接 spawn 引擎子进程，解析其 stderr 上的 SRPROG: 进度行，
+// 通过 event.sender.send('sr:progress', ...) 实时推给渲染层；最终 JSON 结果仍走 stdout。
+ipcMain.handle('sr:generate', (event, input: string, optsJson: string) => {
+  return new Promise((resolve) => {
+    const child = spawn(ENGINE_BIN, ['sr', '--input', input ?? '', '--opts', optsJson ?? ''], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d: Buffer) => {
+      const text = d.toString();
+      stderr += text;
+      // 解析 SRPROG: 前缀的进度行，向渲染层推送 sr:progress 事件（含 stage/frame/total/fps/eta_sec）
+      for (const raw of text.split('\n')) {
+        const m = raw.match(/^SRPROG:(.*)$/);
+        if (m) {
+          try { event.sender.send('sr:progress', JSON.parse(m[1])); } catch { /* 忽略坏行 */ }
+        }
+      }
+    });
+    child.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const data = JSON.parse(stdout.trim());
+          // 收尾：推送 100% 完成事件，前端据此收起进度条
+          event.sender.send('sr:progress', {
+            stage: 'done', frame: data.frames ?? 0, total: data.frames ?? 0, done: true,
+          });
+          resolve({ success: true, data });
+        } catch (e: any) {
+          const msg = '超清结果解析失败: ' + (e?.message ?? String(e));
+          event.sender.send('sr:error', msg);
+          resolve({ success: false, error: msg });
+        }
+      } else {
+        const errMsg = stderr || `引擎退出码 ${code}`;
+        event.sender.send('sr:error', errMsg);
+        resolve({ success: false, error: errMsg });
+      }
+    });
+    child.on('error', (e: any) => {
+      const msg = e?.message ?? String(e);
+      event.sender.send('sr:error', msg);
+      resolve({ success: false, error: msg });
+    });
+  });
 });
 
 // ── 插件 ──

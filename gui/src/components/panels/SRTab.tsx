@@ -1,5 +1,5 @@
 // 视频超清增强面板（SRTab）：启用开关、放大倍数、效果强度、生成超清预览、原图/超分对比。
-// 与 KeyingTab / BeautyTab 的区别：SR 是**导出级后处理**（整体提升分辨率），
+// 与 KeyingTab 的区别：SR 是**导出级后处理**（整体提升分辨率），
 // 无法进入 WebGPU 时间轴合成（见 src/sr.rs 架构说明），故这里不回写供预览管线消费的 mask 资产，
 // 只注册超分产物资产供导出回引，并在本面板内用 srRender.renderSRCompare 做独立对比预览。
 // 写入方式沿用现有范式：结构变更（启用/倍数/生成）走 updateClip（改前 pushHistorySnapshot），
@@ -72,7 +72,7 @@ function ToggleBtn({ active, disabled, onClick, children }: { active: boolean; d
   return <button style={{ ...S.btn, ...(active ? S.btnActive : {}), opacity: disabled ? 0.5 : 1 }} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
-// 生成按钮：与 KeyingTab / BeautyTab 一致的外观与禁用态
+// 生成按钮：与 KeyingTab 一致的外观与禁用态
 function GenerateButton({ processing, disabled, onClick, children }: {
   processing: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode;
 }) {
@@ -176,7 +176,7 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
     try {
       // 结构变更：先压一次历史快照（生成会 addAsset + updateClip，二者内部亦各压快照）
       pushHistorySnapshot();
-      // 与 keying:* / beauty:* 一致的 IPC 契约：handler 返回 { success, data, error } 对象，
+      // 与 keying:* 一致的 IPC 契约：handler 返回 { success, data, error } 对象，
       // 不可对返回值再做 JSON.parse（否则会得到 "[object Object]" is not valid JSON）。
       // opts 字段名用 snake_case，与 python/sr/bridge.py 的 opts 约定对齐。
       const res = await (window as unknown as { aicut: { sr: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.sr.generate(
