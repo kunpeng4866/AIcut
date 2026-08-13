@@ -1,3 +1,0 @@
-- generic [active] [ref=e1]:
-  - heading "缇藉寲鏂瑰紡瀵规瘮娴嬭瘯" [level=2] [ref=e2]
-  - generic [ref=e3]: "鍦嗗舰 feather=0.26 on 1920x1088 canvas --- blur娉曪紙褰撳墠瀹炵幇锛� --- blur th=64: H=783px V=783px ratio=1.0000 OK blur th=128: H=581px V=581px ratio=1.0000 OK blur th=192: H=369px V=369px ratio=1.0000 OK --- 寰勫悜娓愬彉娉曪紙涓績绛夋瘮渚嬶級 --- gradient th=64: H=791px V=791px ratio=1.0000 OK gradient th=128: H=649px V=649px ratio=1.0000 OK gradient th=192: H=507px V=507px ratio=1.0000 OK --- 鐭╁舰娴嬭瘯 --- rect blur th=64: W=1143px H=747px ratio=1.5301 rect blur th=128: W=945px H=557px ratio=1.6966 rect blur th=192: W=731px H=363px ratio=2.0138"

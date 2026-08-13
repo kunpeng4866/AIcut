@@ -6,6 +6,12 @@
 // 内置字体：思源/阿里普惠/鸿蒙/站酷 已随安装包内置到 gui/public/fonts（打包后位于
 // process.resourcesPath/fonts）。渲染器通过 @font-face 加载 /fonts/*.woff2(ttf)，
 // 导出时由 Rust 引擎按 BUNDLED_FONT_FILES 拼 fontfile= 路径，保证预览/导出字体一致。
+//
+// ⚠️ 关键兜底：仓库里的 *.woff2 字体文件经实测为子集/不含完整中文字形，ffmpeg drawtext
+// 与浏览器 @font-face 加载后都会渲染成白色方框（tofu）。因此所有 CJK 字体统一兜底到
+// 已验证完整包含中文的 TTF（HarmonyOS-SansSC-Regular.ttf）。预览/导出的实际字形一致，
+// 仅字重/风格可能略有差异；后续如替换为完整 Source Han Sans / 阿里巴巴普惠体 TTF，
+// 可恢复标签对应的原始字体外观。
 
 export interface SubtitleFont {
   id: string;            // 稳定标识（存进工程）
@@ -26,9 +32,10 @@ export const SUBTITLE_FONTS: SubtitleFont[] = [
   { id: 'fangsong', label: '仿宋', group: '系统字体', css: "FangSong, STFangsong, serif", note: '系统自带' },
 
   // ── 开源 / 厂商永久免费商用（随安装包内置） ──
-  { id: 'source-han-sans', label: '思源黑体', group: '开源·免费商用', bundled: 'NotoSansSC-Regular.woff2', css: "'Source Han Sans SC', 'Noto Sans SC', 'NotoSansSC', 'Source Han Sans', sans-serif" },
-  { id: 'alipuhui', label: '阿里巴巴普惠体', group: '开源·免费商用', bundled: 'AlibabaPuHuiTi-Regular.woff2', css: "'Alibaba PuHuiTi', 'AlibabaPuHuiTi', 'Alibaba Sans', sans-serif" },
-  { id: 'source-han-serif', label: '思源宋体', group: '开源·免费商用', bundled: 'NotoSerifSC-Regular.woff2', css: "'Source Han Serif SC', 'Noto Serif SC', 'NotoSerifSC', 'Source Han Serif', serif" },
+  // 注：woff2 文件实测缺失中文字形，统一兜底到 HarmonyOS-SansSC-Regular.ttf。
+  { id: 'source-han-sans', label: '思源黑体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'Source Han Sans SC', 'Noto Sans SC', 'NotoSansSC', 'Source Han Sans', sans-serif" },
+  { id: 'alipuhui', label: '阿里巴巴普惠体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'Alibaba PuHuiTi', 'AlibabaPuHuiTi', 'Alibaba Sans', sans-serif" },
+  { id: 'source-han-serif', label: '思源宋体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'Source Han Serif SC', 'Noto Serif SC', 'NotoSerifSC', 'Source Han Serif', serif" },
   { id: 'harmonyos', label: '鸿蒙字体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'HarmonyOS Sans SC', 'HarmonyOS Sans', sans-serif" },
   { id: 'zcool-kuaile', label: '站酷快乐体', group: '开源·免费商用', bundled: 'ZCOOLKuaiLe-Regular.ttf', css: "'ZCOOL KuaiLe', sans-serif" },
   { id: 'zcool-hei', label: '站酷酷黑', group: '开源·免费商用', bundled: 'ZCOOLQingKeHuangYou-Regular.ttf', css: "'ZCOOL QingKe HuangYou', sans-serif" },
@@ -50,26 +57,33 @@ export function findFontCss(id?: string): string {
 }
 
 // 默认字体（新建文字/字幕片段时使用）
-export const DEFAULT_FONT_ID = 'source-han-sans';
+// 使用已验证完整包含中文的 TTF，避免默认出现白色方框。
+export const DEFAULT_FONT_ID = 'harmonyos';
 
-// 内置字体文件名 → 字体 id（供 Rust 引擎将 family 名解析为 fontfile 路径时使用）。
-// 注意：key 用文件名，因为导出侧只拿到 font_family 字符串，会优先匹配内置文件名。
+// 字体 id → 实际随包字体文件名（供 Rust 引擎将 family 名解析为 fontfile 路径时使用）。
+// 由于 woff2 子集缺失中文，所有 CJK 字体 id 统一映射到完整 TTF 兜底文件。
 export const BUNDLED_FONT_FILES: Record<string, string> = {
-  // 思源黑体（导入工程时 family 名可能是下面任一写法）
-  'NotoSansSC-Regular.woff2': 'NotoSansSC-Regular.woff2',
-  'NotoSansSC-Bold.woff2': 'NotoSansSC-Bold.woff2',
-  // 思源宋体
-  'NotoSerifSC-Regular.woff2': 'NotoSerifSC-Regular.woff2',
-  'NotoSerifSC-Bold.woff2': 'NotoSerifSC-Bold.woff2',
-  // 阿里巴巴普惠体
-  'AlibabaPuHuiTi-Regular.woff2': 'AlibabaPuHuiTi-Regular.woff2',
-  'AlibabaPuHuiTi-Bold.woff2': 'AlibabaPuHuiTi-Bold.woff2',
-  'AlibabaPuHuiTi-Thin.woff2': 'AlibabaPuHuiTi-Thin.woff2',
+  // 思源黑体（导入工程时 family 名可能是下面任一写法）→ 兜底 TTF
+  'source-han-sans': 'HarmonyOS-SansSC-Regular.ttf',
+  'NotoSansSC-Regular.woff2': 'HarmonyOS-SansSC-Regular.ttf',
+  'NotoSansSC-Bold.woff2': 'HarmonyOS-SansSC-Regular.ttf',
+  // 思源宋体 → 兜底 TTF
+  'source-han-serif': 'HarmonyOS-SansSC-Regular.ttf',
+  'NotoSerifSC-Regular.woff2': 'HarmonyOS-SansSC-Regular.ttf',
+  'NotoSerifSC-Bold.woff2': 'HarmonyOS-SansSC-Regular.ttf',
+  // 阿里巴巴普惠体 → 兜底 TTF
+  'alipuhui': 'HarmonyOS-SansSC-Regular.ttf',
+  'AlibabaPuHuiTi-Regular.woff2': 'HarmonyOS-SansSC-Regular.ttf',
+  'AlibabaPuHuiTi-Bold.woff2': 'HarmonyOS-SansSC-Regular.ttf',
+  'AlibabaPuHuiTi-Thin.woff2': 'HarmonyOS-SansSC-Regular.ttf',
   // 鸿蒙
+  'harmonyos': 'HarmonyOS-SansSC-Regular.ttf',
   'HarmonyOS-SansSC-Regular.ttf': 'HarmonyOS-SansSC-Regular.ttf',
-  'HarmonyOS-SansSC-Bold.ttf': 'HarmonyOS-SansSC-Bold.ttf',
+  'HarmonyOS-SansSC-Bold.ttf': 'HarmonyOS-SansSC-Regular.ttf',
   // 站酷
+  'zcool-kuaile': 'ZCOOLKuaiLe-Regular.ttf',
   'ZCOOLKuaiLe-Regular.ttf': 'ZCOOLKuaiLe-Regular.ttf',
+  'zcool-hei': 'ZCOOLQingKeHuangYou-Regular.ttf',
   'ZCOOLQingKeHuangYou-Regular.ttf': 'ZCOOLQingKeHuangYou-Regular.ttf',
 };
 

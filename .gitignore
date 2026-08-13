@@ -91,3 +91,4 @@ data/sr_train/_*.txt
 python/sr/_*.log
 python/sr/_*.txt
 python/sr/_*.py
+.playwright-cli/
