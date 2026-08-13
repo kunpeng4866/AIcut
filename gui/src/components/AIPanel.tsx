@@ -86,21 +86,37 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
 
   // 用 ASR 真实语音时间戳直接生成字幕（与音频精准对齐，无需 DeepSeek 重猜时间轴）
   const handleBuildFromAsr = () => {
-    if (!asrResult) return;
-    const sub: SubtitleGenResult = {
-      items: asrResult.segments.map((s) => ({ start: s.start, end: s.end, text: s.text })),
-      fontFamily: undefined,
-      fontSize: undefined,
-      color: undefined,
-      position: 'bottom',
-    };
-    if (onApply) {
-      const msg = onApply(sub);
-      setAppliedInfo(msg || '✅ 已用语音时间戳生成字幕（与音频对齐），可在画布预览');
-    } else {
+    try {
+      if (!asrResult) {
+        setAppliedInfo('暂无 ASR 结果，请先执行语音转写');
+        return;
+      }
+      const segs = asrResult.segments;
+      if (!segs || !Array.isArray(segs) || segs.length === 0) {
+        setAppliedInfo('ASR 结果中没有语音片段（segments 为空），可能音频无人声');
+        return;
+      }
+      const sub: SubtitleGenResult = {
+        items: segs.map((s) => ({ start: s.start, end: s.end, text: s.text })),
+        fontFamily: undefined,
+        fontSize: undefined,
+        color: undefined,
+        position: 'bottom',
+      };
+      // 写入 aiStore.result，让 AIPanel 显示字幕列表（与 DeepSeek 路径一致）
+      useAiStore.setState({ result: sub as any });
+      if (onApply) {
+        const msg = onApply(sub);
+        setAppliedInfo(msg || '✅ 已用语音时间戳生成字幕（与音频对齐），可在画布预览');
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn('[AIPanel] 未提供 onApply 回调，字幕未写入片段');
+        setAppliedInfo('未接入 onApply：字幕已生成但未写入片段');
+      }
+    } catch (e: any) {
       // eslint-disable-next-line no-console
-      console.warn('[AIPanel] 未提供 onApply 回调，字幕未写入片段');
-      setAppliedInfo('未接入 onApply：字幕已生成但未写入片段');
+      console.error('[AIPanel] handleBuildFromAsr 异常:', e);
+      setAppliedInfo('生成字幕失败: ' + (e?.message || String(e)));
     }
   };
 
@@ -206,6 +222,10 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
         <div style={{ color: '#ff6b6b', marginBottom: 8 }}>错误：{error}</div>
       )}
 
+      {appliedInfo && (
+        <div style={{ color: '#7bed9f', marginTop: 6 }}>{appliedInfo}</div>
+      )}
+
       {result && (
         <div style={{ marginTop: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -227,9 +247,6 @@ export const AIPanel: React.FC<AIPanelProps> = ({ onApply }) => {
               </div>
             ))}
           </div>
-          {appliedInfo && (
-            <div style={{ color: '#7bed9f', marginTop: 6 }}>{appliedInfo}</div>
-          )}
         </div>
       )}
 

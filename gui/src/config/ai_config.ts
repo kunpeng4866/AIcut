@@ -64,12 +64,12 @@ export function getDefaultConfig(): AIcutConfig {
       model: 'deepseek-chat',
     },
     asr: {
-      provider: 'none',
+      provider: 'bailian',
       modelPath: '',
       apiKey: '',
       endpoint: '',
       enginePath: '',
-      model: '',
+      model: 'paraformer-realtime-v2',
     },
     tts: {
       provider: 'none',

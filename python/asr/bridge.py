@@ -271,7 +271,13 @@ def _recognize(wav_path: str, lang: str, model: str) -> list:
 
         def on_error(self, result) -> None:
             msg = getattr(result, "message", None) or str(result)
-            errors.append(str(msg))
+            msg = str(msg).strip()
+            # "stopped" / "idle timeout" 是会话正常结束的服务端通知，非致命错误
+            low = msg.lower()
+            if any(kw in low for kw in ("stopped", "idle timeout", "no audio", "silence")):
+                _log("识别状态(非错误): {}".format(msg))
+                return
+            errors.append(msg)
             _log("识别错误: {}".format(msg))
 
         def on_event(self, result) -> None:
@@ -321,11 +327,18 @@ def _recognize(wav_path: str, lang: str, model: str) -> list:
                 data = wf.readframes(_FRAME_SAMPLES)
                 if not data:
                     break
-                recognition.send_audio_frame(data)
+                try:
+                    recognition.send_audio_frame(data)
+                except Exception as e:  # noqa: BLE001
+                    _log("send_audio_frame 失败(会话可能已关闭): {}".format(e))
+                    break  # 异常时退出循环，让 finally → stop() 触达 on_error/on_complete
                 n += 1
                 if frame_sleep > 0:
                     time.sleep(frame_sleep)
         _log("音频推送完毕，共 {} 帧".format(n))
+        # 等 1 秒让服务端有时间处理最后一帧并触发 on_event → on_complete，
+        # 避免 stop() 立刻打出 "Speech recognition has stopped."
+        time.sleep(1.0)
     finally:
         try:
             recognition.stop()   # 阻塞直到 on_complete / on_error
@@ -333,7 +346,8 @@ def _recognize(wav_path: str, lang: str, model: str) -> list:
             _log("stop() 异常: {}".format(e))
 
     if not segments and errors:
-        raise RuntimeError("百炼识别失败: " + "; ".join(errors))
+        _log("流式识别无结果: {}".format("; ".join(errors)))
+        return []  # 不抛异常，让 _recognize_file_fallback() 兜底
     return segments
 
 
@@ -353,10 +367,16 @@ def _recognize_file_fallback(wav_path: str, lang: str, model: str) -> list:
         kwargs["language_hints"] = hints
 
     _log("流式无结果，回退非流式 call()")
-    result = Recognition(**kwargs).call(wav_path)
+    try:
+        result = Recognition(**kwargs).call(wav_path)
+    except Exception as e:
+        _log("非流式 call 异常: {}".format(e))
+        return []
     status = getattr(result, "status_code", None)
     if status is not None and status != HTTPStatus.OK:
-        raise RuntimeError("百炼识别失败({}): {}".format(status, getattr(result, "message", "")))
+        msg = getattr(result, "message", "") or getattr(result, "code", "") or ""
+        _log("非流式识别失败({}): {}".format(status, str(msg)[:200]))
+        return []
 
     sentences = _get_sentence(result) or []
     if isinstance(sentences, dict):

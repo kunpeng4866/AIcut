@@ -60,7 +60,11 @@ export function createTextClip(timelineIn = 0, duration = 5): ClipConfig {
     src_range: { start: 0, end: duration },
     timelineIn,
     timelineOut: timelineIn + duration,
-    text: { content: '新文字', fontSize: 48, color: '#ffffff', textAlign: 'center', x: 0.5, y: 0.5 },
+    text: {
+      content: '新文字', fontSize: 48, color: '#ffffff', strokeColor: '#000000', strokeWidth: 0, strokeOpacity: 1, textAlign: 'center', x: 0.5, y: 0.5,
+      background: { enabled: false, color: '#000000', opacity: 0.9, radius: 0.06, width: 0.19, height: 0.13, offsetX: 0.5, offsetY: 0.5 },
+      shadow: { enabled: false, color: '#000000', opacity: 0.9, blur: 0.15, distance: 5, angle: -45 },
+    },
   };
 }
 

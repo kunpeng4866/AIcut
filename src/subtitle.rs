@@ -2,6 +2,35 @@
 //! SRT 解析 + ASS 基础解析 + drawtext 滤镜生成
 
 use serde::{Deserialize, Serialize};
+use std::f64::consts::PI;
+
+/// 前端 TextBackground 的 Rust 映射
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextBackground {
+    #[serde(default)] pub enabled: bool,
+    #[serde(default = "default_black")] pub color: String,
+    #[serde(default)] pub opacity: f64,
+    #[serde(default)] pub radius: f64,
+    #[serde(default)] pub width: f64,
+    #[serde(default)] pub height: f64,
+    #[serde(default)] pub offset_x: f64,
+    #[serde(default)] pub offset_y: f64,
+}
+
+/// 前端 TextShadow 的 Rust 映射
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextShadow {
+    #[serde(default)] pub enabled: bool,
+    #[serde(default = "default_black")] pub color: String,
+    #[serde(default)] pub opacity: f64,
+    #[serde(default)] pub blur: f64,
+    #[serde(default)] pub distance: f64,
+    #[serde(default)] pub angle: f64,
+}
+
+fn default_black() -> String { "#000000".into() }
 
 /// 前端 TextContent 的 Rust 映射（字段用 camelCase 对齐）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -13,12 +42,15 @@ pub struct TextOverlay {
     #[serde(default)] pub font_weight: Option<String>,
     #[serde(default)] pub color: Option<String>,
     #[serde(default)] pub stroke_color: Option<String>,
-    #[serde(default)] pub stroke_width: Option<u32>,
+    #[serde(default)] pub stroke_width: Option<f64>,
+    #[serde(default)] pub stroke_opacity: Option<f64>,
     #[serde(default)] pub text_align: Option<String>,
     #[serde(default)] pub x: Option<f64>,
     #[serde(default)] pub y: Option<f64>,
     #[serde(default)] pub rotation: Option<f64>,
     #[serde(default)] pub opacity: Option<f64>,
+    #[serde(default)] pub background: Option<TextBackground>,
+    #[serde(default)] pub shadow: Option<TextShadow>,
 }
 
 /// 前端 SubtitleContent 的 Rust 映射
@@ -29,6 +61,9 @@ pub struct SubtitleOverlay {
     #[serde(default)] pub font_family: Option<String>,
     #[serde(default)] pub font_size: Option<u32>,
     #[serde(default)] pub color: Option<String>,
+    #[serde(default)] pub stroke_color: Option<String>,
+    #[serde(default)] pub stroke_width: Option<f64>,
+    #[serde(default)] pub stroke_opacity: Option<f64>,
     #[serde(default)] pub position: Option<String>,
 }
 
@@ -279,24 +314,67 @@ pub fn build_text_overlay_filter(
     let escaped = text.content.replace(':', "\\:").replace('\'', "'\\''");
     let fontsize = text.font_size.unwrap_or(48);
     let fontcolor = text.color.clone().unwrap_or_else(|| "white".to_string());
+
+    // 背景偏移（像素）：0.5 为居中，范围 [-100, 100]
+    let bg_offset_x = text.background.as_ref().map(|b| ((b.offset_x - 0.5) * 200.0).round() as i64).unwrap_or(0);
+    let bg_offset_y = text.background.as_ref().map(|b| ((b.offset_y - 0.5) * 200.0).round() as i64).unwrap_or(0);
+
+    // ffmpeg drawtext 的 text_w / text_h 已包含 borderw（描边），描边变粗会撑大 text_w/text_h，
+    // 导致居中表达式 (w-text_w)/2 偏移、文字随粗细移动。补偿 borderw/2 抵消，保证仅描边粗细变化、文字不动。
+    let borderw = text.stroke_width.filter(|w| *w > 0.0).map(|w| w.round() as i64).unwrap_or(0);
+    let stroke_comp = borderw as f64 / 2.0;
+    // 合并背景偏移与描边补偿，统一以带符号形式拼接（0 则不显示 +0）
+    let x_off = bg_offset_x as f64 + stroke_comp;
+    let y_off = bg_offset_y as f64 + stroke_comp;
+    let off_str = |v: f64| -> String { if v.abs() < 1e-9 { String::new() } else { format!("{:+}", v) } };
+
     // x 定位
     let x_expr = match text.text_align.as_deref() {
-        Some("left") => "20".to_string(),
-        Some("right") => "(w-text_w-20)".to_string(),
-        _ => "(w-text_w)/2".to_string(), // center 默认
+        Some("left") => format!("20{}", off_str(x_off)),
+        Some("right") => format!("(w-text_w-20){}", off_str(x_off)),
+        _ => format!("(w-text_w)/2{}", off_str(x_off)), // center 默认
     };
     // y 定位：优先用 text.y（归一化 0-1，原点左下角 → 像素），否则垂直居中偏上
     let y_expr = if let Some(y) = text.y {
-        format!("((1-{})*h - text_h/2)", y)
+        format!("((1-{})*h - text_h/2){}", y, off_str(y_off))
     } else {
-        format!("(h - {})/2", fontsize)
+        format!("(h - {})/2{}", fontsize, off_str(y_off))
     };
     let _ = (width, height);
-    let base = format!(
+    let mut base = format!(
         "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:enable='between(t,{},{})'",
         escaped, fontsize, fontcolor, x_expr, y_expr,
         timeline_in, timeline_out
     );
+
+    // 背景：ffmpeg drawtext 原生 box 为矩形，圆角仅在前端预览生效；导出为矩形背景盒
+    if let Some(bg) = &text.background {
+        if bg.enabled {
+            let boxcolor = format!("{}@{:.2}", bg.color, bg.opacity.clamp(0.0, 1.0));
+            // width/height 取平均作为 boxborderw（单边边框宽度，近似内边距）
+            let boxborderw = (((bg.width + bg.height) / 2.0) * 100.0).round() as i64;
+            base.push_str(&format!(":box=1:boxcolor={}:boxborderw={}", boxcolor, boxborderw.max(0)));
+        }
+    }
+
+    // 描边：borderw + bordercolor（支持不透明度）。borderw 已在上方计算并用于位置补偿
+    if borderw > 0 {
+        let bordercolor = format!("{}@{:.2}", text.stroke_color.clone().unwrap_or_else(|| "#000000".into()), text.stroke_opacity.unwrap_or(1.0).clamp(0.0, 1.0));
+        base.push_str(&format!(":borderw={}:bordercolor={}", borderw, bordercolor));
+    }
+
+    // 阴影：drawtext 原生 shadowx/shadowy/shadowcolor（无模糊）。
+    // 距离 + 角度极坐标：角度 0°=右，90°=下，-45°=右上；文字本身不被移动
+    if let Some(sh) = &text.shadow {
+        if sh.enabled {
+            let rad = sh.angle * PI / 180.0;
+            let shadowx = (sh.distance * rad.cos()).round() as i64;
+            let shadowy = (sh.distance * rad.sin()).round() as i64;
+            let shadowcolor = format!("{}@{:.2}", sh.color, sh.opacity.clamp(0.0, 1.0));
+            base.push_str(&format!(":shadowx={}:shadowy={}:shadowcolor={}", shadowx, shadowy, shadowcolor));
+        }
+    }
+
     let fontfile = resolve_bundled_font(&text.font_family, fontfile_dir);
     Some(with_fontfile(base, &fontfile))
 }
@@ -311,10 +389,17 @@ pub fn build_subtitle_overlay_filters(
 ) -> Vec<String> {
     let fontsize = sub.font_size.unwrap_or(48);
     let fontcolor = sub.color.clone().unwrap_or_else(|| "white".to_string());
+    let stroke_width = sub.stroke_width.unwrap_or(0.0);
+    let stroke_color = sub.stroke_color.clone().unwrap_or_else(|| "#000000".into());
+    let stroke_opacity = sub.stroke_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+    // ffmpeg 的 text_w / text_h 已包含 borderw，描边变粗会撑大 text_w/text_h 导致位置偏移。
+    // 补偿 borderw/2 抵消，保证仅描边粗细变化、文字不动。
+    let borderw = if stroke_width > 0.0 { stroke_width.round() as i64 } else { 0 };
+    let stroke_comp = borderw / 2; // 整数像素补偿
     let y_pos = match sub.position.as_deref() {
-        Some("top") => 40i64,
-        Some("bottom") => (height as i64) - fontsize as i64 - 40,
-        _ => ((height as i64) / 2) - (fontsize as i64) / 2, // center 默认
+        Some("top") => 40i64 + stroke_comp,
+        Some("bottom") => (height as i64) - fontsize as i64 - 40 + stroke_comp,
+        _ => ((height as i64) / 2) - (fontsize as i64) / 2 + stroke_comp, // center 默认
     };
     let _ = width;
     let fontfile = resolve_bundled_font(&sub.font_family, fontfile_dir);
@@ -322,10 +407,14 @@ pub fn build_subtitle_overlay_filters(
         let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
         let abs_start = timeline_in + item.start;
         let abs_end = timeline_in + item.end;
-        let base = format!(
-            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2:y={}:enable='between(t,{},{})'",
-            escaped, fontsize, fontcolor, y_pos, abs_start, abs_end
+        let mut base = format!(
+            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:enable='between(t,{},{})'",
+            escaped, fontsize, fontcolor, stroke_comp, y_pos, abs_start, abs_end
         );
+        if borderw > 0 {
+            let bordercolor = format!("{}@{:.2}", stroke_color, stroke_opacity);
+            base.push_str(&format!(":borderw={}:bordercolor={}", borderw, bordercolor));
+        }
         with_fontfile(base, &fontfile)
     }).collect()
 }
@@ -381,5 +470,89 @@ mod tests {
         assert_eq!(fs.len(), 1);
         assert!(fs[0].contains("你好"));
         assert!(fs[0].contains("between(t,11,13)"));  // 10 + 1 .. 10 + 3
+    }
+
+    // 关键回归：阴影偏移必须是「阴影相对文字」的偏移，文字本身定位不应被阴影移动
+    #[test]
+    fn test_shadow_offset_is_relative_to_text() {
+        let mut t = TextOverlay {
+            content: "标题".into(),
+            font_size: Some(60),
+            ..Default::default()
+        };
+        t.shadow = Some(TextShadow {
+            enabled: true,
+            color: "#000000".into(),
+            opacity: 0.9,
+            blur: 0.1,
+            distance: 22.36,  // sqrt(20^2+10^2) ≈ 22.36 → shadowx≈20, shadowy≈10（角度≈26.565°）
+            angle: 26.565,
+        });
+        let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080, "").unwrap();
+        // 1) 阴影相对文字：正确生成 shadowx/shadowy 偏移量
+        assert!(f.contains("shadowx=20"), "shadow must offset relative to text, got: {}", f);
+        assert!(f.contains("shadowy=10"), "shadow must offset relative to text, got: {}", f);
+        // 2) 文字自身定位由 text_align 决定（默认 center → x=(w-text_w)/2），与阴影偏移完全独立
+        assert!(f.contains("x=(w-text_w)/2"), "text positioning must be independent of shadow offset, got: {}", f);
+        // 3) 把阴影段去掉后，文字定位段里不应残留 shadowx/shadowy（证明二者是独立字段）
+        let text_part = f.split(":shadowx=").next().unwrap_or("");
+        assert!(!text_part.contains("shadowx"), "shadow leaked into text positioning: {}", f);
+        assert!(!text_part.contains("shadowy"), "shadow leaked into text positioning: {}", f);
+    }
+
+    // 描边回归：borderw/bordercolor 必须生成，且 bordercolor 带 alpha 反映 stroke_opacity
+    #[test]
+    fn test_text_stroke_opacity_in_filter() {
+        let t = TextOverlay {
+            content: "描边".into(),
+            font_size: Some(48),
+            stroke_color: Some("#ff0000".into()),
+            stroke_width: Some(2.5),
+            stroke_opacity: Some(0.75),
+            ..Default::default()
+        };
+        let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080, "").unwrap();
+        assert!(f.contains("borderw=3"), "stroke width must round to integer borderw, got: {}", f);
+        assert!(f.contains("bordercolor=#ff0000@0.75"), "stroke color must carry opacity, got: {}", f);
+    }
+
+    #[test]
+    fn test_subtitle_stroke_in_filter() {
+        let s = SubtitleOverlay {
+            items: vec![SubtitleItemOverride { start: 0.0, end: 2.0, text: "字幕描边".into() }],
+            stroke_color: Some("#00ff00".into()),
+            stroke_width: Some(1.5),
+            stroke_opacity: Some(0.6),
+            ..Default::default()
+        };
+        let fs = build_subtitle_overlay_filters(&s, 0.0, 1920, 1080, "");
+        assert_eq!(fs.len(), 1);
+        assert!(fs[0].contains("borderw=2"), "subtitle stroke width must round, got: {}", fs[0]);
+        assert!(fs[0].contains("bordercolor=#00ff00@0.60"), "subtitle stroke color must carry opacity, got: {}", fs[0]);
+    }
+
+    // 关键回归：描边粗细变化不应移动文字中心（导出侧 borderw 补偿）
+    // ffmpeg 的 text_w 含 borderw，描边变粗会撑大 text_w，使 (w-text_w)/2 偏移；
+    // 补偿 borderw/2 后中心 x = (w-real_text_w)/2 恒定，仅描边粗细变、文字不动。
+    #[test]
+    fn test_stroke_width_does_not_shift_text_center() {
+        let base = TextOverlay { content: "标题".into(), font_size: Some(60), ..Default::default() };
+        let f0 = build_text_overlay_filter(&base, 0.0, 5.0, 1920, 1080, "").unwrap();
+        let mut thin = base.clone(); thin.stroke_width = Some(2.0);
+        let f_thin = build_text_overlay_filter(&thin, 0.0, 5.0, 1920, 1080, "").unwrap();
+        let mut thick = base.clone(); thick.stroke_width = Some(10.0);
+        let f_thick = build_text_overlay_filter(&thick, 0.0, 5.0, 1920, 1080, "").unwrap();
+        assert!(f0.contains("x=(w-text_w)/2"), "无描边应无补偿: {}", f0);
+        assert!(f_thin.contains("x=(w-text_w)/2+1"), "细描边 borderw=2 → 补偿 +1: {}", f_thin);
+        assert!(f_thick.contains("x=(w-text_w)/2+5"), "粗描边 borderw=10 → 补偿 +5: {}", f_thick);
+        // y 同样需要补偿（center 默认 y=(h-fontsize)/2+...）
+        assert!(f_thin.contains("+1"), "细描边 y 也应补偿 +1: {}", f_thin);
+        assert!(f_thick.contains("+5"), "粗描边 y 也应补偿 +5: {}", f_thick);
+
+        // 字幕分支同理
+        let s_base = SubtitleOverlay { items: vec![SubtitleItemOverride { start: 0.0, end: 2.0, text: "字幕".into() }], ..Default::default() };
+        let mut s_thick = s_base.clone(); s_thick.stroke_width = Some(10.0);
+        let fs = build_subtitle_overlay_filters(&s_thick, 0.0, 1920, 1080, "");
+        assert!(fs[0].contains("x=(w-text_w)/2+5"), "字幕粗描边 x 补偿 +5: {}", fs[0]);
     }
 }

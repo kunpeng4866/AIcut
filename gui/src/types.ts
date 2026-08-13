@@ -5,6 +5,28 @@ export interface CanvasConfig { width: number; height: number; fps?: number; sam
 export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number; proxyPath?: string }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number }
 export interface RangeConfig { start: number; end: number }
+// 文字背景
+export interface TextBackground {
+  enabled: boolean;
+  color: string;
+  opacity: number;
+  radius: number;
+  width: number;
+  height: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+// 文字阴影（距离 + 角度 极坐标，角度 0°=右，90°=下，-45°=右上）
+export interface TextShadow {
+  enabled: boolean;
+  color: string;
+  opacity: number;
+  blur: number;
+  distance: number;
+  angle: number;
+}
+
 // 文字片段内容
 export interface TextContent {
   content: string;
@@ -14,11 +36,14 @@ export interface TextContent {
   color?: string;
   strokeColor?: string;
   strokeWidth?: number;
+  strokeOpacity?: number;
   textAlign?: 'left' | 'center' | 'right';
   x?: number;
   y?: number;
   rotation?: number;
   opacity?: number;
+  background?: TextBackground;
+  shadow?: TextShadow;
 }
 
 // 字幕片段内容
@@ -34,6 +59,7 @@ export interface SubtitleContent {
   color?: string;
   strokeColor?: string;
   strokeWidth?: number;
+  strokeOpacity?: number;
   position?: 'bottom' | 'top' | 'center';
 }
 
@@ -60,7 +86,7 @@ export interface ClipConfig {
   superResolution?: SRConfig;
 }
 // ── 视频超清增强（Super Resolution）数据模型 ──
-// SR 依赖逐帧 ONNX 推理且会整体改变分辨率，无法表达为 ffmpeg 滤镜、也不能像 keying
+// SR 依赖逐帧 ONNX 推理且会整体改变分辨率，无法表达为 ffmpeg 滤镜、也不像 keying
 // 那样以 clip 级资产参与时间轴合成（见 src/sr.rs 架构说明），故仅作为导出级后处理存在，
 // 前端只在 SRTab 内做「生成 + 原图/超分对比预览」。
 export interface SRConfig {
@@ -69,6 +95,35 @@ export interface SRConfig {
   strength: number;     // 0..1 效果强度（与原图的混合比例，1 = 全量超分）
   assetId?: string;     // 已生成的超分视频资产 id（预览与导出回引）
   modelPath?: string;   // 自定义 ONNX 模型路径；缺省用引擎默认（AICUT_SR_MODEL）
+}
+// 超清增强生成结果（对应 python/sr/bridge.py 输出的一行 JSON）
+export interface SRResult {
+  ok?: boolean;
+  error?: string;
+  output_path?: string;
+  model_path?: string;
+  frames?: number;
+  width?: number;
+  height?: number;
+  src_width?: number;
+  src_height?: number;
+  fps?: number;
+  duration?: number;
+  scale?: number;
+  provider?: string;
+  encoder?: string;
+  has_audio?: boolean;
+  elapsed_sec?: number;
+}
+
+// 超清增强实时进度（由 python/sr/bridge.py 经 Rust 转发，逐帧上报）
+export interface SRProgress {
+  stage?: 'load' | 'probe' | 'infer' | 'done' | string; // 当前阶段：模型加载/读信息/推理/完成
+  frame?: number;     // 已处理帧数
+  total?: number;     // 总帧数（部分视频 nb_frames=0，此时为不确定进度）
+  fps?: number;       // 当前推理速度（帧/秒）
+  eta_sec?: number;   // 预计剩余秒数
+  done?: boolean;     // 是否为收尾 100% 事件
 }
 // 转场配置（与后端 Transition 结构对应）
 export type TransitionType =
@@ -296,6 +351,13 @@ export interface AicutAPI {
   asr: AsrAPI;
   // 口播剪辑
   speech: SpeechAPI;
+  // 视频超清增强（导出级后处理）
+  sr: {
+    generate(input: string, optsJson: string): Promise<{ success: boolean; data?: SRResult; error?: string }>;
+    onProgress(callback: (p: SRProgress) => void): void;
+    onDone(callback: () => void): void;
+    onError(callback: (err: string) => void): void;
+  };
   // 插件
   listPlugins(): Promise<string>;
   scanPlugins(): Promise<number>;

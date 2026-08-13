@@ -1,0 +1,47 @@
+{
+  "version": "1.0",
+  "canvas": { "width": 1920, "height": 1080, "fps": 30, "sample_rate": 48000 },
+  "assets": [
+    { "id": "a1", "type": "video", "path": "dummy.mp4", "duration": 5.0, "width": 1920, "height": 1080, "codec": "h264" }
+  ],
+  "tracks": [
+    {
+      "id": "tv", "type": "video", "order": 0,
+      "clips": [
+        {
+          "id": "cv", "assetId": "a1",
+          "src_range": { "start": 0.0, "end": 5.0 },
+          "timelineIn": 0.0, "timelineOut": 5.0,
+          "volume": 1.0, "speed": 1.0
+        }
+      ]
+    },
+    {
+      "id": "tt", "type": "video", "order": 1,
+      "clips": [
+        {
+          "id": "ctext", "assetId": "_text",
+          "src_range": { "start": 0.0, "end": 5.0 },
+          "timelineIn": 0.0, "timelineOut": 5.0,
+          "volume": 1.0, "speed": 1.0,
+          "text": { "content": "标题文字（哨兵 assetId=_text，无素材）" }
+        }
+      ]
+    },
+    {
+      "id": "ts", "type": "video", "order": 2,
+      "clips": [
+        {
+          "id": "csub", "assetId": "_subtitle",
+          "src_range": { "start": 0.0, "end": 5.0 },
+          "timelineIn": 0.0, "timelineOut": 5.0,
+          "volume": 1.0, "speed": 1.0,
+          "subtitle": { "items": [
+            { "start": 1.0, "end": 3.0, "text": "第一条字幕" },
+            { "start": 3.0, "end": 5.0, "text": "第二条字幕" }
+          ] }
+        }
+      ]
+    }
+  ]
+}

@@ -82,6 +82,9 @@ interface ProjectState {
   addTrack: (type: 'video' | 'audio' | 'text' | 'sticker' | 'subtitle') => string;  // 返回新轨 id
   insertTrackAt: (index: number, type: 'video' | 'audio' | 'text' | 'sticker' | 'subtitle') => string;
   removeTrack: (id: string) => void;
+  addTrackLive: (type: string) => string;
+  // 连续拖动中专用：在指定下标插入一条同类型空白轨道（不重新按类型排序，便于「拖到两条轨道之间」精准落位），返回 id。
+  addTrackLiveAt: (index: number, type: string) => string;
   toggleTrackLock: (id: string) => void;
   toggleTrackVisible: (id: string) => void;
   toggleTrackMute: (id: string) => void;
@@ -119,6 +122,7 @@ interface ProjectState {
   pushHistorySnapshot: () => void;
   // 拖后调用一次：按磁吸规则把主轨重排（连续拖动过程不做重排，避免抖动与开销）。
   realignProject: () => void;
+  removeEmptyTrack: (id: string) => void;
   getMainVideoTrack: () => TrackConfig | undefined;
 }
 
@@ -184,14 +188,14 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       set({ isDirty: false, filePath: target });
     },
     undo: () => {
-      const snapshot = useHistoryStore.getState().undo();
+      const snapshot = useHistoryStore.getState().undo(get().project);
       if (snapshot) {
         const tracks = sortTracks(snapshot.tracks);
         set({ project: { ...snapshot, tracks }, isDirty: true });
       }
     },
     redo: () => {
-      const snapshot = useHistoryStore.getState().redo();
+      const snapshot = useHistoryStore.getState().redo(get().project);
       if (snapshot) {
         const tracks = sortTracks(snapshot.tracks);
         set({ project: { ...snapshot, tracks }, isDirty: true });
@@ -232,6 +236,30 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       return newId;
     },
     removeTrack: (id) => mutate((p) => ({ ...p, tracks: p.tracks.filter((t) => t.id !== id) })),
+    // 连续拖动中专用：不压快照（拖动开始已压一次），直接新建一条同类型空白轨道并返回 id。
+    // 供「拖到空白区即时建轨」使用，与 pushHistorySnapshot + 拖后 prune 配合实现「一次拖动=一次撤销」。
+    addTrackLive: (type) => {
+      const newId = uid('track');
+      set((state) => {
+        const insertAt = calcInsertIndex(state.project.tracks, type);
+        const newTrack: TrackConfig = { id: newId, type, order: state.project.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false, volume: 1, pan: 0 };
+        const tracks = [...state.project.tracks.slice(0, insertAt), newTrack, ...state.project.tracks.slice(insertAt)];
+        return { project: { ...state.project, tracks }, isDirty: true };
+      });
+      return newId;
+    },
+    // 连续拖动中专用：在指定下标精确插入一条同类型空白轨道（不做 sortTracks 重排，保持「拖到两轨之间」的落点），
+    // 但调用方需自行把下标夹紧到「同类型轨道分组」范围内（见 Timeline 的 clampToGroup），以免破坏文字/视频/音频的既定相对位置。
+    addTrackLiveAt: (index, type) => {
+      const newId = uid('track');
+      set((state) => {
+        const clamped = Math.max(0, Math.min(index, state.project.tracks.length));
+        const newTrack: TrackConfig = { id: newId, type, order: state.project.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false, volume: 1, pan: 0 };
+        const tracks = [...state.project.tracks.slice(0, clamped), newTrack, ...state.project.tracks.slice(clamped)];
+        return { project: { ...state.project, tracks }, isDirty: true };
+      });
+      return newId;
+    },
     toggleTrackLock: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, locked: !t.locked } : t) })),
     toggleTrackVisible: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, visible: !t.visible } : t) })),
     toggleTrackMute: (id) => mutate((p) => ({ ...p, tracks: p.tracks.map((t) => t.id === id ? { ...t, muted: !t.muted } : t) })),
@@ -465,6 +493,21 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (!srcTrack || !destTrack || srcTrack.locked || destTrack.locked) return state;
       const clip = srcTrack.clips.find((c) => c.id === clipId);
       if (!clip) return state;
+      // 同源同轨：只改时间位置，禁止先删后加（否则 src===dest 时会被整体移除，导致片段凭空消失）。
+      if (srcTrackId === destTrackId) {
+        const dur = clip.timelineOut - clip.timelineIn;
+        return {
+          project: {
+            ...state.project,
+            tracks: state.project.tracks.map((t) => t.id === srcTrackId
+              ? { ...t, clips: t.clips.map((c) => c.id === clipId
+                ? { ...c, timelineIn: Math.max(0, newTimelineIn), timelineOut: Math.max(0, newTimelineIn) + dur }
+                : c) }
+              : t),
+          },
+          isDirty: true,
+        };
+      }
       const dur = clip.timelineOut - clip.timelineIn;
       const movedClip = { ...clip, timelineIn: Math.max(0, newTimelineIn), timelineOut: Math.max(0, newTimelineIn) + dur };
       const tracks = state.project.tracks.map((t) => {
@@ -476,6 +519,13 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     }),
     pushHistorySnapshot: () => useHistoryStore.getState().pushSnapshot(clone(get().project)),
     realignProject: () => set((state) => ({ project: withMainTrackRealign(state.project), isDirty: true })),
+    // 移除空白轨道（仅当该轨无片段且非主视频轨）。主视频轨永远保留。
+    // 拖动结束收尾时调用：把素材全部移走后变空的轨道相应消失。不压快照（拖动开始已压一次）。
+    removeEmptyTrack: (id) => set((state) => {
+      const t = state.project.tracks.find((t) => t.id === id);
+      if (!t || t.clips.length > 0 || t.isMain) return state;
+      return { project: { ...state.project, tracks: state.project.tracks.filter((t) => t.id !== id) }, isDirty: true };
+    }),
     getMainVideoTrack: () => {
       const tracks = get().project.tracks;
       return tracks.find(t => t.type === 'video' && t.isMain) ?? tracks.find(t => t.type === 'video');

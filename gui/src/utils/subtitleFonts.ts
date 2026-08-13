@@ -123,15 +123,16 @@ export interface SubtitleStylePreset {
   color: string;            // 文字颜色
   strokeColor: string;      // 描边颜色
   strokeWidth: number;      // 描边宽度（px）
+  strokeOpacity?: number;   // 描边不透明度
   fontWeight?: string;      // 字重
 }
 
 // 字幕样式预设：字体 + 描边 + 配色 打包，一键应用到当前片段
 export const SUBTITLE_STYLE_PRESETS: SubtitleStylePreset[] = [
-  { key: 'clear', label: '通用清晰', fontId: 'source-han-sans', color: '#ffffff', strokeColor: '#000000', strokeWidth: 2, fontWeight: 'bold' },
-  { key: 'ecom', label: '电商带货', fontId: 'alipuhui', color: '#FFE135', strokeColor: '#000000', strokeWidth: 2, fontWeight: 'bold' },
-  { key: 'guofeng', label: '古风情感', fontId: 'kaiti', color: '#F5F5F5', strokeColor: '#5C3A21', strokeWidth: 2.5, fontWeight: 'normal' },
-  { key: 'tech', label: '数码科技', fontId: 'harmonyos', color: '#EAF2FF', strokeColor: '#1A3A6B', strokeWidth: 1.5, fontWeight: 'bold' },
-  { key: 'title', label: '标题冲击', fontId: 'zcool-hei', color: '#ffffff', strokeColor: '#000000', strokeWidth: 3, fontWeight: 'bold' },
-  { key: 'news', label: '严肃新闻', fontId: 'fangsong', color: '#1A1A1A', strokeColor: '#ffffff', strokeWidth: 1, fontWeight: 'normal' },
+  { key: 'clear', label: '通用清晰', fontId: 'source-han-sans', color: '#ffffff', strokeColor: '#000000', strokeWidth: 2, strokeOpacity: 1, fontWeight: 'bold' },
+  { key: 'ecom', label: '电商带货', fontId: 'alipuhui', color: '#FFE135', strokeColor: '#000000', strokeWidth: 2, strokeOpacity: 1, fontWeight: 'bold' },
+  { key: 'guofeng', label: '古风情感', fontId: 'kaiti', color: '#F5F5F5', strokeColor: '#5C3A21', strokeWidth: 2.5, strokeOpacity: 1, fontWeight: 'normal' },
+  { key: 'tech', label: '数码科技', fontId: 'harmonyos', color: '#EAF2FF', strokeColor: '#1A3A6B', strokeWidth: 1.5, strokeOpacity: 1, fontWeight: 'bold' },
+  { key: 'title', label: '标题冲击', fontId: 'zcool-hei', color: '#ffffff', strokeColor: '#000000', strokeWidth: 3, strokeOpacity: 1, fontWeight: 'bold' },
+  { key: 'news', label: '严肃新闻', fontId: 'fangsong', color: '#1A1A1A', strokeColor: '#ffffff', strokeWidth: 1, strokeOpacity: 1, fontWeight: 'normal' },
 ];

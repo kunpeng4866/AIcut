@@ -86,6 +86,18 @@ contextBridge.exposeInMainWorld('aicut', {
   sr: {
     generate: (input: string, optsJson: string) =>
       ipcRenderer.invoke('sr:generate', input, optsJson),
+    onProgress: (callback: (p: any) => void) => {
+      ipcRenderer.removeAllListeners('sr:progress');
+      ipcRenderer.on('sr:progress', (_, p: any) => callback(p));
+    },
+    onDone: (callback: () => void) => {
+      ipcRenderer.removeAllListeners('sr:done');
+      ipcRenderer.on('sr:done', () => callback());
+    },
+    onError: (callback: (err: string) => void) => {
+      ipcRenderer.removeAllListeners('sr:error');
+      ipcRenderer.on('sr:error', (_, err: string) => callback(err));
+    },
   },
 
   // ── 草稿 ──
