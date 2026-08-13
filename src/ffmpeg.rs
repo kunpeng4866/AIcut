@@ -115,6 +115,10 @@ impl RenderCommand {
             self.crf.to_string(),
             "-r".to_string(),
             self.fps.to_string(),
+            // 现代 ffmpeg(2026 构建)默认 vsync 行为变更，仅 -r 不足以 100% 保证恒定帧率；
+            // 显式 -fps_mode cfr 强制 CFR 输出，杜绝 VFR 导致的播放卡顿。
+            "-fps_mode".to_string(),
+            "cfr".to_string(),
             "-b:v".to_string(),
             format!("{}M", self.bitrate),
             // 播放流畅 + 可拖拽：固定关键帧间隔（约每 2 秒一个），faststart 把 moov 前置
@@ -358,6 +362,8 @@ pub fn build_pipe_encoder_cmd(
         "-movflags".to_string(), "+faststart".to_string(),
         "-pix_fmt".to_string(), "yuv420p".to_string(),
         "-r".to_string(), fps.to_string(),
+        // 强制 CFR，避免现代 ffmpeg 默认 vsync 行为导致 VFR 输出、播放卡顿
+        "-fps_mode".to_string(), "cfr".to_string(),
         output.to_string(),
     ]
 }

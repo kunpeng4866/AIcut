@@ -363,23 +363,51 @@ fn system_font_candidates(family_lc: &str, weight: &str) -> Vec<&'static str> {
     out
 }
 
+/// 返回随包字体可能的目录列表（按优先级）：
+/// 1) 调用方传入的 fontfile_dir（通常来自 AICUT_FONTS_DIR，由 Electron 主进程设置）；
+/// 2) 引擎可执行文件所在目录的相对候选（兼容 AICUT_FONTS_DIR 未设置/路径错误导致随包字体
+///    静默回退成默认细体的场景）：
+///    - 开发态: target/debug/aicut-engine.exe -> ../../gui/public/fonts
+///    - 打包态: resources/engine/aicut-engine.exe -> ../fonts
+fn bundled_font_dirs(fontfile_dir: &str) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let d = fontfile_dir.trim();
+    if !d.is_empty() {
+        dirs.push(std::path::PathBuf::from(d));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for rel in ["fonts", "../fonts", "../gui/public/fonts", "../../gui/public/fonts"] {
+                let p = exe_dir.join(rel);
+                if !dirs.iter().any(|x| x == &p) {
+                    dirs.push(p);
+                }
+            }
+        }
+    }
+    dirs
+}
+
 /// 解析字体文件绝对路径。
 /// 策略：1) 随包字体目录（优先字重匹配，bold 回退 Regular）；2) 系统字体目录；3) 全局兜底（NotoSansSC-Regular.ttf）。
+/// 随包字体目录在「调用方传入的 fontfile_dir」之外，额外尝试「引擎可执行文件相对目录」，
+/// 避免 AICUT_FONTS_DIR 未生效时随包字体（思源黑体等）静默回退成默认细体、与预览不一致。
 fn resolve_font(font_family: &Option<String>, weight: &str, fontfile_dir: &str) -> Option<String> {
-    let dir = fontfile_dir.trim();
     let family_lc = font_family.as_ref().map(|s| s.to_lowercase()).unwrap_or_default();
+    let dirs = bundled_font_dirs(fontfile_dir);
 
-    // 1) 随包字体目录
-    if !dir.is_empty() {
+    // 1) 随包字体目录（多候选：传入目录 + 引擎相对目录）
+    for dir in &dirs {
+        let dir = dir.to_string_lossy().into_owned();
         if let Some(file) = resolve_bundled_filename(&family_lc, weight) {
-            let p = std::path::Path::new(dir).join(file);
+            let p = std::path::Path::new(&dir).join(file);
             if p.exists() { return Some(p.to_string_lossy().into_owned()); }
         }
         // bold 请求但 Bold 变体缺失 → 回退 Regular（仅当 base 与 bold 不同，避免死循环）
         if weight.trim().eq_ignore_ascii_case("bold") {
             if let Some(file) = resolve_bundled_filename(&family_lc, "normal") {
                 if file != resolve_bundled_filename(&family_lc, weight).unwrap_or("") {
-                    let p = std::path::Path::new(dir).join(file);
+                    let p = std::path::Path::new(&dir).join(file);
                     if p.exists() { return Some(p.to_string_lossy().into_owned()); }
                 }
             }
@@ -400,8 +428,8 @@ fn resolve_font(font_family: &Option<String>, weight: &str, fontfile_dir: &str) 
         }
     }
 
-    // 3) 最终兜底：随包目录里的全局 CJK 字体
-    if !dir.is_empty() {
+    // 3) 最终兜底：随包目录里的全局 CJK 字体（同样遍历多候选目录）
+    for dir in &dirs {
         let p = std::path::Path::new(dir).join(CJK_FALLBACK_FILE);
         if p.exists() { return Some(p.to_string_lossy().into_owned()); }
     }
