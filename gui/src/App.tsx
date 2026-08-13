@@ -56,7 +56,9 @@ export default function App() {
   } = useUIStore();
   const [rightView, setRightView] = React.useState<'props' | 'mixer' | 'ai'>('props');
 
-  // AI 字幕生成结果 → 写入当前选中片段的 subtitle 字段
+  // AI 字幕生成结果 → 写入当前选中片段的 subtitle 字段（由引擎在导出时通过
+  // drawtext 烧录进视频，时间/位置均正确；此前改为独立 _text 文字轨会被引擎
+  // 当作无时间偏移的合成层、且 y 坐标解释不一致，导致字幕不随视频导出）。
   const handleApplySubtitles = (result: SubtitleGenResult): string => {
     const { selectedTrackId, selectedClipId } = useUIStore.getState();
     if (!selectedTrackId || !selectedClipId) {
