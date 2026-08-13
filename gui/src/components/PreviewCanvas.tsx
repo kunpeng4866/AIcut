@@ -14,6 +14,7 @@ import { CANVAS_PRESETS, findPresetIndex } from '../utils/canvasPresets';
 import { findFontCss } from '../utils/subtitleFonts';
 import { buildMaskImageUrl, buildMaskShadowFilter } from '../utils/maskRender';
 import { applyKeying, applyMatte, compositeBackground, sampleKeyframe } from '../utils/keyingRender';
+import { computeTextOverlayStyle, hexToRgba } from '../utils/textOverlayStyle';
 
 // 文件路径转 aicut-asset:// URL（绕过系统代理，修复 SSL handshake failed）
 const pathToUrl = (path: string): string => {
@@ -21,6 +22,14 @@ const pathToUrl = (path: string): string => {
   const normalized = path.replace(/\\/g, '/');
   return `aicut-asset:///${normalized}`;
 };
+
+// 文字渲染：始终用 <span>。描边通过 textStyle 上的 WebkitTextStroke + paint-order: stroke fill 实现实心填充（避免镂空且文字始终可见）
+function renderTextBody(
+  text: string,
+  textStyle: React.CSSProperties,
+) {
+  return <span style={textStyle}>{text}</span>;
+}
 
 // 视频素材预览源：4K 源素材优先走 720p 代理（proxyPath），保证 4K 源流畅；其余回退原路径。
 // proxyPath 仅存在于用户导入的 4K 视频素材上，贴纸/matte/背景等派生资产无此字段，安全回退。
@@ -143,6 +152,15 @@ const theme = {
   stage: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative' } as React.CSSProperties,
   video: { maxWidth: '100%', maxHeight: '100%' } as React.CSSProperties,
   canvas: { width: '100%', height: '100%', display: 'block', background: '#000' } as React.CSSProperties,
+  // 画面用的隐藏 <video> 源：必须"在渲染树中但不可见"，绝不能 display:none。
+  // 原因：WebGPU 预览画面由 canvas 合成（video 仅作解码源），若用 display:none，
+  // Chromium 会挂起该 media 元素的音频管线 → 声音被丢弃（画面仍能抓取帧，故无声但可见）。
+  // 用 opacity:0 + 1px 离屏定位：元素仍在渲染树、持续解码/播放音频，画面不可见且不影响布局。
+  hiddenVideo: {
+    position: 'absolute', top: 0, left: 0, width: 1, height: 1,
+    opacity: 0, pointerEvents: 'none', zIndex: -1, border: 'none', background: 'transparent',
+  } as React.CSSProperties,
+  // 纯音频元素（无画面）：display:none 不影响音频输出，可保持原样
   hiddenMedia: { display: 'none' } as React.CSSProperties,
   placeholder: { color: '#555', fontSize: 14, textAlign: 'center' } as React.CSSProperties,
   controls: { height: 48, background: '#1a1a2e', borderTop: '1px solid #0f3460', display: 'flex', alignItems: 'center', padding: '0 12px', gap: 10, flexShrink: 0 } as React.CSSProperties,
@@ -316,9 +334,8 @@ const KeyedCanvas = ({
         key={`${clip.id}__src`}
         ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
         src={asset ? vidSrc(asset) : ''}
-        style={{ display: 'none' }}
+        style={theme.hiddenVideo}
         onLoadedMetadata={onLoadedMetadata}
-        muted
         playsInline
       />
       <canvas
@@ -559,26 +576,21 @@ export default function PreviewCanvas() {
   })();
 
   // 查找当前文字/字幕叠加层
-  const activeTextOverlays: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; style: React.CSSProperties }[] = (() => {
-    const result: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; style: React.CSSProperties }[] = [];
+  const activeTextOverlays: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; wrapperStyle: React.CSSProperties; bgStyle: React.CSSProperties | null; textStyle: React.CSSProperties }[] = (() => {
+    const result: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; wrapperStyle: React.CSSProperties; bgStyle: React.CSSProperties | null; textStyle: React.CSSProperties }[] = [];
     for (const track of project.tracks) {
       for (const clip of track.clips) {
         if (!(currentTime >= clip.timelineIn && currentTime < clip.timelineOut)) continue;
         if (clip.text) {
-          const t = clip.text;
+          const parts = computeTextOverlayStyle(clip.text);
           result.push({
-            text: t.content,
+            text: clip.text.content,
             kind: 'text',
             trackId: track.id,
             clipId: clip.id,
-            style: {
-              position: 'absolute', left: `${(t.x ?? 0.5) * 100}%`, top: `${(t.y ?? 0.5) * 100}%`,
-              transform: 'translate(-50%, -50%)', color: t.color || '#fff',
-              fontSize: t.fontSize || 48, fontFamily: findFontCss(t.fontFamily),
-              textAlign: (t.textAlign || 'center') as any, fontWeight: (t.fontWeight as any) || 'bold',
-              ...(t.strokeWidth ? { WebkitTextStroke: `${t.strokeWidth}px ${t.strokeColor || '#000'}` } : {}),
-              pointerEvents: 'auto', cursor: 'pointer', zIndex: 100, textShadow: '0 0 10px rgba(0,0,0,0.8)',
-            },
+            wrapperStyle: parts.wrapperStyle as React.CSSProperties,
+            bgStyle: parts.bgStyle as React.CSSProperties | null,
+            textStyle: parts.textStyle as React.CSSProperties,
           });
         }
         if (clip.subtitle) {
@@ -588,23 +600,36 @@ export default function PreviewCanvas() {
           const item = s.items.find(i => offset >= i.start && offset < i.end);
           if (item) {
             const isCenter = s.position === 'center';
+            const subWrapper: React.CSSProperties = {
+              position: 'absolute', left: '50%',
+              bottom: s.position === 'bottom' ? 40 : undefined,
+              top: s.position === 'top' ? 40 : isCenter ? '50%' : undefined,
+              transform: isCenter ? 'translate(-50%, -50%)' : 'translateX(-50%)',
+              zIndex: 101, pointerEvents: 'none', maxWidth: '90%',
+            };
+            const subText: React.CSSProperties = {
+              color: s.color || '#fff', fontSize: s.fontSize || 24,
+              fontFamily: findFontCss(s.fontFamily), textAlign: 'center' as any,
+              textShadow: '0 0 10px rgba(0,0,0,0.8)', whiteSpace: 'pre-wrap' as any,
+            };
+            if (s.strokeWidth && s.strokeWidth > 0) {
+              const subStrokeColor = hexToRgba(s.strokeColor || '#000', s.strokeOpacity ?? 1);
+              subText.WebkitTextStroke = `${s.strokeWidth}px ${subStrokeColor}`;
+              subText.paintOrder = 'stroke fill';
+            }
+            const subBgStyle: React.CSSProperties | null = isCenter ? null : {
+              position: 'absolute', inset: 0,
+              background: 'rgba(0,0,0,0.5)', padding: '4px 16px', borderRadius: 4,
+              zIndex: -1,
+            };
             result.push({
               text: item.text,
               kind: 'subtitle',
               trackId: track.id,
               clipId: clip.id,
-              style: {
-                position: 'absolute', left: '50%',
-                bottom: s.position === 'bottom' ? 40 : undefined,
-                top: s.position === 'top' ? 40 : isCenter ? '50%' : undefined,
-                transform: isCenter ? 'translate(-50%, -50%)' : 'translateX(-50%)',
-                color: s.color || '#fff', fontSize: s.fontSize || 24,
-                fontFamily: findFontCss(s.fontFamily), textAlign: 'center' as any, pointerEvents: 'none', zIndex: 101,
-                ...(s.strokeWidth ? { WebkitTextStroke: `${s.strokeWidth}px ${s.strokeColor || '#000'}` } : {}),
-                textShadow: '0 0 10px rgba(0,0,0,0.8)', maxWidth: '90%', whiteSpace: 'pre-wrap' as any,
-                background: isCenter ? 'transparent' : 'rgba(0,0,0,0.5)',
-                padding: isCenter ? 0 : '4px 16px', borderRadius: isCenter ? 0 : 4,
-              },
+              wrapperStyle: subWrapper,
+              bgStyle: subBgStyle,
+              textStyle: subText,
             });
           }
         }
@@ -1159,7 +1184,7 @@ export default function PreviewCanvas() {
                   key={clip.id}
                   ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                   src={vidSrc(asset)}
-                  style={theme.hiddenMedia}
+                  style={theme.hiddenVideo}
                   onLoadedMetadata={onLoadedMetadataFor(clip)}
                 />
               ))}
@@ -1178,7 +1203,7 @@ export default function PreviewCanvas() {
                       key={clip.id}
                       ref={(el) => { if (el) videoRefs.current.set(clip.id, el); else videoRefs.current.delete(clip.id); }}
                       src={vidSrc(asset)}
-                      style={theme.hiddenMedia}
+                      style={theme.hiddenVideo}
                       onLoadedMetadata={onLoadedMetadataFor(clip)}
                     />
                   );
@@ -1326,14 +1351,17 @@ export default function PreviewCanvas() {
           {activeTextOverlays.map((item, idx) => (
             <div
               key={idx}
-              style={item.style}
+              style={item.wrapperStyle}
               title="单击选中 · 双击编辑文字"
               onClick={() => useUIStore.getState().selectClip(item.trackId, item.clipId)}
               onDoubleClick={() => {
                 useUIStore.getState().selectClip(item.trackId, item.clipId);
                 useUIStore.getState().setActiveRightPanel(item.kind === 'subtitle' ? 'subtitle' : 'text');
               }}
-            >{item.text}</div>
+            >
+              {item.bgStyle && <div style={item.bgStyle} />}
+              {renderTextBody(item.text, item.textStyle)}
+            </div>
           ))}
 
           {/* 贴纸图片叠加层（DOM <img>，跨 WebGPU/HTML5 通用） */}
