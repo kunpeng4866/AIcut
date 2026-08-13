@@ -205,55 +205,58 @@ pub fn build_drawtext_filters(track: &SubtitleTrack, width: u32, height: u32) ->
 }
 
 /// 随安装包内置的字体文件名（与前端 gui/public/fonts 保持一致）。
+/// 仅包含「非系统字体」（思源黑体 / 站酷 / Bebas），系统字体（楷体/黑体/仿宋/Impact）
+/// 不随包，交由 resolve_font 的系统字体库步骤从终端用户的系统字体目录读取。
 /// 导出时若 fontfile_dir 存在，将 font_family 解析为具体字体文件路径，
 /// 拼入 drawtext 的 fontfile=，保证预览/导出一致。
 const BUNDLED_FONT_FILES: &[&str] = &[
-    "KaiTi.ttf",
-    "SimHei.ttf",
-    "FangSong.ttf",
     "NotoSansSC-Regular.ttf",
     "NotoSansSC-Bold.ttf",
     "ZCOOLKuaiLe-Regular.ttf",
     "ZCOOLQingKeHuangYou-Regular.ttf",
-    "Impact.ttf",
     "BebasNeue-Regular.ttf",
 ];
 
 /// 字体 id（前端存进工程的 font_family 值）→ 随包字体文件名。
-/// 这是导出一致性的关键映射：渲染器写入工程的 font_family 即下方 id，
-/// 必须能精确解析到随包字体文件。
+/// 仅包含随包字体；楷体/黑体/仿宋/Impact 等系统字体不在此映射，
+/// 由 resolve_font 的系统字体库步骤解析（不随包、不兜底到下面 CJK 字体）。
 const FONT_ID_TO_FILE: &[(&str, &str)] = &[
-    ("kaiti", "KaiTi.ttf"),
-    ("simhei", "SimHei.ttf"),
-    ("fangsong", "FangSong.ttf"),
     ("source-han-sans", "NotoSansSC-Regular.ttf"),
     ("zcool-kuaile", "ZCOOLKuaiLe-Regular.ttf"),
     ("zcool-hei", "ZCOOLQingKeHuangYou-Regular.ttf"),
-    ("impact", "Impact.ttf"),
     ("bebas", "BebasNeue-Regular.ttf"),
 ];
 
 /// 全局兜底：未知/未指定/旧工程 id 时使用，保证中文不渲染成 tofu。
 const CJK_FALLBACK_FILE: &str = "NotoSansSC-Regular.ttf";
 
-/// 根据字体 id/家族名返回随包字体文件名。
+/// 根据字体 id/家族名返回随包字体文件名（仅限随包字体，不含系统字体）。
+/// 系统字体（楷体/黑体/仿宋/Impact 等）不随包，交由 resolve_font 的系统字体库步骤解析。
 fn resolve_bundled_filename(family_lc: &str) -> Option<&'static str> {
     let family_lc = family_lc.trim();
     if family_lc.is_empty() { return None; }
-    // 0) 按字体 id 精确匹配
+    // 0) 按字体 id 精确匹配（仅随包字体）
     for (id, file) in FONT_ID_TO_FILE {
         if family_lc.eq_ignore_ascii_case(id) { return Some(file); }
     }
-    // 1) 若 font_family 已直接是内置文件名
+    // 1) 若 font_family 已直接是随包字体文件名（.ttf/.otf/.woff2）
     if family_lc.ends_with(".ttf") || family_lc.ends_with(".otf") || family_lc.ends_with(".woff2") {
         for f in BUNDLED_FONT_FILES {
             if f.eq_ignore_ascii_case(family_lc) { return Some(f); }
         }
+        // 旧工程里的 woff2 子集文件名 → 映射到完整随包 TTF
+        if family_lc.ends_with(".woff2") {
+            if family_lc.contains("zcool") {
+                if family_lc.contains("kuai") { return Some("ZCOOLKuaiLe-Regular.ttf"); }
+                if family_lc.contains("qing") { return Some("ZCOOLQingKeHuangYou-Regular.ttf"); }
+            }
+            if family_lc.contains("noto") || family_lc.contains("source") || family_lc.contains("alibaba")
+                || family_lc.contains("puhuiti") || family_lc.contains("harmony") || family_lc.contains("douyin") {
+                return Some("NotoSansSC-Regular.ttf");
+            }
+        }
     }
-    // 2) 按字体家族关键字匹配（兼容手写/旧工程/导入工程里的 family 名）
-    if family_lc.contains("kaiti") { return Some("KaiTi.ttf"); }
-    if family_lc.contains("simhei") || family_lc.contains("heiti") { return Some("SimHei.ttf"); }
-    if family_lc.contains("fangsong") { return Some("FangSong.ttf"); }
+    // 2) 关键字匹配（兼容旧工程/导入工程里的 family 名 → 映射到随包的完整 CJK 字体）
     if family_lc.contains("noto sans sc") || family_lc.contains("source han sans") || family_lc.contains("notosanssc") {
         return Some("NotoSansSC-Regular.ttf");
     }
@@ -264,9 +267,9 @@ fn resolve_bundled_filename(family_lc: &str) -> Option<&'static str> {
     }
     if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") { return Some("ZCOOLKuaiLe-Regular.ttf"); }
     if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") { return Some("ZCOOLQingKeHuangYou-Regular.ttf"); }
-    if family_lc.contains("impact") { return Some("Impact.ttf"); }
     if family_lc.contains("bebas") { return Some("BebasNeue-Regular.ttf"); }
     if family_lc.contains("douyin") || family_lc.contains("meihao") { return Some("NotoSansSC-Regular.ttf"); }
+    // 注：kaiti/simhei/fangsong/impact 等系统字体不在此返回，交系统字体库步骤解析。
     None
 }
 
@@ -624,40 +627,50 @@ mod tests {
         assert!(fs[0].contains("bordercolor=#00ff00@0.60"), "subtitle stroke color must carry opacity, got: {}", fs[0]);
     }
 
-    // 关键回归：中文字体必须能解析到完整 TTF，不能回退到缺失中文的 woff2；
-    // 系统字体在随包目录不存在时应能回退到系统字体库。
+    // 关键回归：随包字体解析到随包 TTF；系统字体（楷体/黑体/仿宋/Impact）必须读取
+    // 终端用户的系统字体库，绝不能把系统字体直接兜底成 NotoSansSC-Regular.ttf。
     #[test]
     fn test_cjk_font_fallback_to_ttf() {
         let fonts_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/gui/public/fonts");
-        // 当前支持的字体 id 应解析到对应真实 TTF
-        let cases = vec![
+        // 随包字体：必须解析到随包目录里的真实 TTF
+        let bundled_cases = vec![
             (Some("source-han-sans".into()), "NotoSansSC-Regular.ttf"),
-            (Some("kaiti".into()), "KaiTi.ttf"),
-            (Some("simhei".into()), "SimHei.ttf"),
-            (Some("fangsong".into()), "FangSong.ttf"),
             (Some("zcool-kuaile".into()), "ZCOOLKuaiLe-Regular.ttf"),
             (Some("zcool-hei".into()), "ZCOOLQingKeHuangYou-Regular.ttf"),
-            (Some("NotoSansSC-Regular.woff2".into()), "NotoSansSC-Regular.ttf"), // 旧工程 woff2 映射到完整 TTF
-            (Some("alipuhui".into()), "NotoSansSC-Regular.ttf"),                   // 已移除 id 回退到可用 CJK
-            (Some("source-han-serif".into()), "NotoSansSC-Regular.ttf"),           // 已移除 id 回退到可用 CJK
-            (None, "NotoSansSC-Regular.ttf"),                                      // 未指定也兜底
+            (Some("bebas".into()), "BebasNeue-Regular.ttf"),
+            (Some("NotoSansSC-Regular.woff2".into()), "NotoSansSC-Regular.ttf"), // 旧工程 woff2 → 完整 TTF
+            (Some("alipuhui".into()), "NotoSansSC-Regular.ttf"),                   // 已移除 id → 可用 CJK
+            (Some("source-han-serif".into()), "NotoSansSC-Regular.ttf"),           // 已移除 id → 可用 CJK
+            (None, "NotoSansSC-Regular.ttf"),                                      // 未指定 → 兜底
         ];
-        for (family, expected_tail) in cases {
+        for (family, expected) in bundled_cases {
             let resolved = resolve_font(&family, fonts_dir);
             assert!(resolved.is_some(), "family={:?} should resolve", family);
             let path = resolved.unwrap();
-            assert!(path.replace('\\', "/").ends_with(expected_tail),
-                "family={:?} expected to end with {}, got {}", family, expected_tail, path);
+            assert!(path.replace('\\', "/").ends_with(expected),
+                "family={:?} expected to end with {}, got {}", family, expected, path);
         }
-        // 英文字体保持原样
-        let bebas = resolve_font(&Some("bebas".into()), fonts_dir);
-        assert!(bebas.unwrap().replace('\\', "/").ends_with("BebasNeue-Regular.ttf"));
 
-        // 系统字体解析：给空随包目录时，应能回退到 C:/Windows/Fonts（本机测试环境）
-        let sys_kaiti = resolve_font(&Some("kaiti".into()), "");
-        if sys_kaiti.is_some() {
-            assert!(sys_kaiti.unwrap().replace('\\', "/").to_lowercase().contains("simkai"),
-                "kaiti should resolve to system simkai.ttf when bundled missing");
+        // 系统字体（楷体/黑体/仿宋/Impact）：不随包，必须读取终端用户的系统字体库。
+        // 仅在当前环境能发现系统字体目录时才断言（跨平台 CI 可能无系统字体）。
+        let has_sys = system_fonts_dirs().iter().any(|d| d.exists());
+        if has_sys {
+            let sys_cases = vec![
+                ("kaiti", "simkai"),
+                ("simhei", "simhei"),
+                ("fangsong", "simfang"),
+                ("impact", "impact"),
+            ];
+            for (id, needle) in sys_cases {
+                // 传空随包目录，强制只走系统字体库路径，验证不落到保底字体
+                let resolved = resolve_font(&Some(id.into()), "");
+                assert!(resolved.is_some(), "system font {} should resolve from system lib", id);
+                let p = resolved.unwrap().replace('\\', "/").to_lowercase();
+                assert!(p.contains(needle),
+                    "system font {} must resolve to *{}* in user's system font library, got {}", id, needle, p);
+                assert!(!p.ends_with("notosanssc-regular.ttf"),
+                    "system font {} must NOT be silently fallback to bundled CJK font, got {}", id, p);
+            }
         }
     }
 

@@ -1,17 +1,17 @@
 // 视频字幕 / 文字常用字体目录 + 字幕样式预设
 // 原则：只保留“本机/随包确实有完整字形文件”的字体，避免下拉菜单出现无法正确导出的字体。
 //
-// 系统字体（楷体/黑体/仿宋）与 Impact：从 Windows 系统字体目录复制到 gui/public/fonts，
-// 随安装包分发。注意这些字体带有微软/方正授权，仅供本产品在授权环境下使用。
+// 系统字体（楷体/黑体/仿宋/Impact）：不随安装包分发，由导出引擎在终端用户的
+// 系统字体库（C:/Windows/Fonts 等）中按字体名查找渲染，预览时浏览器也直接调用系统字体。
 //
 // 思源黑体：从系统 NotoSansSC-VF.ttf 抽取 Regular/Bold 静态实例，生成 NotoSansSC-*.ttf，
-// 解决仓库原有 .woff2 子集缺失中文、ffmpeg drawtext 渲染为白色方框（tofu）的问题。
+// 解决仓库原有 .woff2 子集缺失中文、ffmpeg drawtext 渲染为白色方框（tofu）的问题，并随包分发。
 //
-// 站酷快乐体 / 站酷酷黑 / Bebas Neue：已有完整 TTF，直接随包。
+// 站酷快乐体 / 站酷酷黑 / Bebas Neue：已有完整 TTF，随包分发。
 //
-// 导出时 Rust 引擎按 BUNDLED_FONT_FILES 将字体 id 解析为 fontfile= 路径；若随包目录缺失，
-// 还会回退到系统字体库（C:/Windows/Fonts 等），最后再使用全局兜底字体。保证预览与导出
-// 尽量一致，不再强制把所有中文回退到单一字体。
+// 导出时 Rust 引擎（src/subtitle.rs 的 resolve_font）三级解析：
+//   1) 随包字体目录（非系统字体）；2) 终端用户系统字体库；3) 仅当以上都缺失才兜底到 NotoSansSC。
+// 系统字体一定走第 2 级，不会被直接兜底成单一字体。
 
 export interface SubtitleFont {
   id: string;            // 稳定标识（存进工程）
@@ -26,18 +26,18 @@ export interface SubtitleFont {
 export const SUBTITLE_FONT_GROUPS = ['系统字体', '开源·免费商用', '平台·品牌字体', '英文标题'] as const;
 
 export const SUBTITLE_FONTS: SubtitleFont[] = [
-  // ── 系统字体（已打包进安装包，同时导出也会回退到系统字体库） ──
-  { id: 'kaiti', label: '楷体', group: '系统字体', bundled: 'KaiTi.ttf', css: "KaiTi, STKaiti, 'Kaiti SC', serif", note: '系统字体·已打包' },
-  { id: 'simhei', label: '黑体', group: '系统字体', bundled: 'SimHei.ttf', css: "SimHei, Heiti SC, 'Microsoft YaHei', sans-serif", note: '系统字体·已打包' },
-  { id: 'fangsong', label: '仿宋', group: '系统字体', bundled: 'FangSong.ttf', css: "FangSong, STFangsong, serif", note: '系统字体·已打包' },
+  // ── 系统字体（不打包，导出引擎读取终端用户系统字体库；预览由浏览器调用系统字体） ──
+  { id: 'kaiti', label: '楷体', group: '系统字体', css: "KaiTi, STKaiti, 'Kaiti SC', serif", note: '系统字体·不打包' },
+  { id: 'simhei', label: '黑体', group: '系统字体', css: "SimHei, Heiti SC, 'Microsoft YaHei', sans-serif", note: '系统字体·不打包' },
+  { id: 'fangsong', label: '仿宋', group: '系统字体', css: "FangSong, STFangsong, serif", note: '系统字体·不打包' },
 
   // ── 开源 / 免费商用（随安装包内置） ──
   { id: 'source-han-sans', label: '思源黑体', group: '开源·免费商用', bundled: 'NotoSansSC-Regular.ttf', css: "'Source Han Sans SC', 'Noto Sans SC', 'NotoSansSC', 'Source Han Sans', sans-serif" },
   { id: 'zcool-kuaile', label: '站酷快乐体', group: '开源·免费商用', bundled: 'ZCOOLKuaiLe-Regular.ttf', css: "'ZCOOL KuaiLe', sans-serif" },
   { id: 'zcool-hei', label: '站酷酷黑', group: '开源·免费商用', bundled: 'ZCOOLQingKeHuangYou-Regular.ttf', css: "'ZCOOL QingKe HuangYou', sans-serif" },
 
-  // ── 英文标题（Impact 已打包，Bebas Neue 已内置） ──
-  { id: 'impact', label: 'Impact', group: '英文标题', bundled: 'Impact.ttf', css: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" },
+  // ── 英文标题（Impact 系统字体不打包；Bebas Neue 已随包内置） ──
+  { id: 'impact', label: 'Impact', group: '英文标题', css: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif", note: '系统字体·不打包' },
   { id: 'bebas', label: 'Bebas Neue', group: '英文标题', bundled: 'BebasNeue-Regular.ttf', css: "'Bebas Neue', Impact, sans-serif" },
 ];
 
@@ -53,20 +53,12 @@ export function findFontCss(id?: string): string {
 // 使用已验证完整包含中文的随包 TTF。
 export const DEFAULT_FONT_ID = 'source-han-sans';
 
-// 字体 id / 字体文件名 → 实际随包字体文件名（供 Rust 引擎将 family 名解析为 fontfile 路径时使用）。
+// 字体 id / 字体文件名 → 实际随包字体文件名（仅供前端 injectBundledFontFaces 注入 @font-face 使用）。
+// 仅包含“随包字体”；系统字体（楷体/黑体/仿宋/Impact）不在此表，由浏览器与导出引擎直接读取
+// 终端用户系统字体库，不随包、不在此映射。
 // 注：旧工程/导入工程里可能出现已被移除的 id（如 alipuhui、source-han-serif、douyin、harmonyos），
 // Rust 端会按关键字尽量解析到最接近的可用字体，避免 tofu。
 export const BUNDLED_FONT_FILES: Record<string, string> = {
-  // 系统字体（已打包）
-  'kaiti': 'KaiTi.ttf',
-  'KaiTi': 'KaiTi.ttf',
-  'KaiTi.ttf': 'KaiTi.ttf',
-  'simhei': 'SimHei.ttf',
-  'SimHei': 'SimHei.ttf',
-  'SimHei.ttf': 'SimHei.ttf',
-  'fangsong': 'FangSong.ttf',
-  'FangSong': 'FangSong.ttf',
-  'FangSong.ttf': 'FangSong.ttf',
   // 思源黑体（静态实例，已替换缺失中文的 woff2 子集）
   'source-han-sans': 'NotoSansSC-Regular.ttf',
   'NotoSansSC-Regular.ttf': 'NotoSansSC-Regular.ttf',
@@ -76,10 +68,7 @@ export const BUNDLED_FONT_FILES: Record<string, string> = {
   'ZCOOLKuaiLe-Regular.ttf': 'ZCOOLKuaiLe-Regular.ttf',
   'zcool-hei': 'ZCOOLQingKeHuangYou-Regular.ttf',
   'ZCOOLQingKeHuangYou-Regular.ttf': 'ZCOOLQingKeHuangYou-Regular.ttf',
-  // 英文标题
-  'impact': 'Impact.ttf',
-  'Impact': 'Impact.ttf',
-  'Impact.ttf': 'Impact.ttf',
+  // 英文标题（Bebas Neue 随包；Impact 为系统字体不在此）
   'bebas': 'BebasNeue-Regular.ttf',
   'BebasNeue-Regular.ttf': 'BebasNeue-Regular.ttf',
 };
