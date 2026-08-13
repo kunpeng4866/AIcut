@@ -206,7 +206,7 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
 
 fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
     let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
-    let input = resolve_clip_input(c, ci, asset_to_idx, w, h, nodes, base_dur)?;
+    let input = resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur)?;
     let label = format!("vs{}", ci);
     let chain = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map);
     nodes.extend(chain);
@@ -233,6 +233,7 @@ fn resolve_clip_input(
     asset_to_idx: &HashMap<String, usize>,
     w: u32,
     h: u32,
+    fps: u32,
     nodes: &mut Vec<String>,
     base_dur: f64,
 ) -> Option<String> {
@@ -242,7 +243,10 @@ fn resolve_clip_input(
     if c.text.is_some() || c.subtitle.is_some() {
         let base = format!("vb{}", vci);
         // 透明黑底：overlay 时透出底层视频。drawtext 的 enable 控制字幕实际出现的时段。
-        nodes.push(format!("color=c=black@0:s={}x{}:d={},format=rgba[{}]", w, h, fmt(base_dur), base));
+        // 关键修复：color 源必须显式指定帧率 = 工程帧率（canvas.fps）。否则 color 默认 25fps，
+        // 与 30fps 主视频 overlay 时需靠尾部 `fps=canvas.fps` 重新上采样，25→30 帧率错配在部分
+        // 解码器/PotPlayer 上会在结尾产生 1 帧定格（卡顿），且仅在带字幕时出现（无字幕不触发）。
+        nodes.push(format!("color=c=black@0:s={}x{}:r={}:d={},format=rgba[{}]", w, h, fps, fmt(base_dur), base));
         return Some(format!("[{}]", base));
     }
     None
@@ -601,11 +605,16 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     sorted.sort_by_key(|t| t.order);
     let mut video_clips: Vec<(usize, &Clip)> = Vec::new();
     let mut audio_clips: Vec<&Clip> = Vec::new();
+    let mut max_timeline_out: f64 = 0.0;
     for t in &sorted {
         for c in &t.clips {
             if t.track_type == "audio" { audio_clips.push(c); }
             else { video_clips.push((t.order as usize, c)); }
+            if c.timeline_out > max_timeline_out { max_timeline_out = c.timeline_out; }
         }
+    }
+    if max_timeline_out > 0.001 {
+        cmd.duration = Some(max_timeline_out);
     }
     let mut asset_to_idx: HashMap<String, usize> = HashMap::new();
     let mut inputs: Vec<InputSpec> = Vec::new();
@@ -675,7 +684,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     };
     let mut vout_label = String::new();
     if !video_tracks.is_empty() {
-        nodes.push(format!("color=c=black:s={}x{}[base]", w, h));
+        // 底色流时长 = 工程时间轴长度，使最终输出严格对齐到 timeline_out 最大值，
+        // 避免视频比音轨短导致末尾定格（卡顿）。
+        let timeline_dur = cmd.duration.unwrap_or(1e9).max(0.1);
+        nodes.push(format!("color=c=black:s={}x{}:d={}[base]", w, h, fmt(timeline_dur)));
         let mut acc = "base".to_string();
         let mut vci = 0usize;
         for (track_order, clips) in &video_tracks {
@@ -683,12 +695,14 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             if clips.len() == 1 {
                 let c = clips[0];
                 let src = format!("vs{}", vci);
-                let Some(input) = resolve_clip_input(c, vci, &asset_to_idx, w, h, &mut nodes, 1e9) else { vci += 1; continue; };
+                let Some(input) = resolve_clip_input(c, vci, &asset_to_idx, w, h, project.canvas.fps, &mut nodes, 1e9) else { vci += 1; continue; };
                 let chain = build_video_chain(c, &input, w, h, &src, project.canvas.fps, &matte_map, &bg_map);
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
-                nodes.push(format!("[{}][{}]overlay=x={}:y={}:shortest=1[{}]", acc, src, ox, oy, next_acc));
+                // 不再 shortest=1：底色已固定为工程时长，输出时长由底色决定，
+                // 较短的视频/文字轨会被冻结最后一帧填充，确保与音轨同长。
+                nodes.push(format!("[{}][{}]overlay=x={}:y={}[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
                 let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
@@ -748,8 +762,9 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     }
                 }
                 let next_acc = format!("va{}", vci + 1);
-                // base 必须被消费：单轨（主轨直接产出）也必须 overlay 到 base，否则 color 滤镜输出孤立导致 filtergraph 绑定失败
-                nodes.push(format!("[{}][{}]overlay=x=0:y=0:shortest=1[{}]", acc, track_acc, next_acc));
+                // base 必须被消费：单轨（主轨直接产出）也必须 overlay 到 base，否则 color 滤镜输出孤立导致 filtergraph 绑定失败。
+                // 底色时长 = 工程时间轴长度，输出时长由底色决定，避免音轨 outlast 视频。
+                nodes.push(format!("[{}][{}]overlay=x=0:y=0[{}]", acc, track_acc, next_acc));
                 acc = next_acc;
             }
         }

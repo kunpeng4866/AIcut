@@ -53,6 +53,9 @@ pub struct RenderCommand {
     pub resolution: (u32, u32),
     pub fps: u32,
     pub bitrate: f64,
+    /// 输出时长限制（秒）。取所有片段 timeline_out 的最大值，
+    /// 强制音视频同长，避免音频 outlast 视频导致末尾定格卡顿。
+    pub duration: Option<f64>,
 }
 
 impl Default for RenderCommand {
@@ -66,6 +69,7 @@ impl Default for RenderCommand {
             resolution: (1920, 1080),
             fps: crate::project::DEFAULT_FPS,
             bitrate: DEFAULT_BITRATE_MBPS,
+            duration: None,
         }
     }
 }
@@ -135,6 +139,14 @@ impl RenderCommand {
             "-pix_fmt".to_string(),
             "yuv420p".to_string(),
         ]);
+        // 统一输出时长：当存在工程时间轴长度时，强制音视频都截断/填充到同一时刻，
+        // 避免视频已结束而音轨仍继续导致的末尾定格（"卡顿"）。
+        if let Some(d) = self.duration {
+            if d > 0.001 {
+                args.push("-t".to_string());
+                args.push(format!("{:.4}", d));
+            }
+        }
         args
     }
 
