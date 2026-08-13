@@ -6,7 +6,8 @@ use crate::ffmpeg::InputSpec;
 use crate::project::{Clip, Project, Track};
 use crate::subtitle;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::process::Command;
 
 // ════════════════════ 曲线变速 ════════════════════
 
@@ -563,6 +564,32 @@ impl FilterGraphBuilder {
     pub fn build(project: &Project) -> ffmpeg::RenderCommand { build_render_command(project) }
 }
 
+/// 探测输入文件是否含有音轨。
+///
+/// 用于音频回退：无音轨的视频片段（如 AI 口播生成的静音 speech 视频）不应被当作音源，
+/// 否则会生成 `[idx:a]` 指向不存在的流，导致 ffmpeg 报
+/// "Stream specifier 'N:a' matches no streams" → 导出失败。
+///
+/// 探测失败（ffprobe 缺失 / 路径异常 / 非本地文件）时保守返回 `true`，
+/// 保持原行为（不跳过），避免误删本应有音频的素材。
+fn input_has_audio(path: &str) -> bool {
+    if let Ok(out) = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            path,
+        ])
+        .output()
+    {
+        if out.status.success() {
+            return !String::from_utf8_lossy(&out.stdout).trim().is_empty();
+        }
+    }
+    true
+}
+
 /// 核心：构建 RenderCommand
 pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     let mut cmd = ffmpeg::RenderCommand::default();
@@ -593,6 +620,11 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         }
     }
     cmd.inputs = inputs;
+    // 预探测每个输入文件是否含音轨，供下方音频节点构建时跳过无音轨素材。
+    // 修复：无音轨视频（如静音 speech 叠加）被回退当音源 → `[idx:a]` 指向不存在的流 → 导出失败。
+    let audio_input_idx: HashSet<usize> = (0..cmd.inputs.len())
+        .filter(|&i| input_has_audio(&cmd.inputs[i].path))
+        .collect();
     // 智能/手动抠像(smart/manual)的 matte 素材：作为额外输入加入本次导出（独立 -i），
     // 记录其全局输入索引供 build_video_chain 引用 [idx:v]。两者共用同一条 alphamerge 路径。
     let mut matte_map: HashMap<String, usize> = HashMap::new();
@@ -742,6 +774,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             let trk = project.tracks.iter().find(|t| t.clips.iter().any(|cc| cc.id == c.id));
             let track_vol = trk.map(|t| t.volume).unwrap_or(1.0);
             let idx = match asset_to_idx.get(&c.asset_id) { Some(i) => *i, None => continue };
+            // 跳过无音轨的输入：避免为无声视频（如 speech 叠加）生成 `[idx:a]` 指向不存在的流。
+            if !audio_input_idx.contains(&idx) { continue; }
             let label = format!("a{}", audio_labels.len());
             let envelopes = audio_transition_envelopes(c, trk);
             audio_nodes.push(build_clip_audio_node(c, idx, track_vol, &label, &envelopes));

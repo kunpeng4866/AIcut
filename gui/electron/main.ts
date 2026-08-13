@@ -24,6 +24,7 @@ try {
     || 'C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe';
   process.env.AICUT_SPEECH_BRIDGE = join(__dirname, '../../python/speech_edit/bridge.py');
   process.env.AICUT_KEYING_BRIDGE = join(__dirname, '../../python/keying/bridge.py');
+  process.env.AICUT_SR_BRIDGE = join(__dirname, '../../python/sr/bridge.py');
 } catch { /* dev 兜底 */ }
 
 // ── 路径常量 ──
@@ -73,6 +74,13 @@ function callEngine(...args: string[]): Promise<string> {
   });
 }
 
+function getWindowIconPath(): string {
+  if (app.isPackaged) {
+    return join(__dirname, '..', 'dist', 'icon.ico');
+  }
+  return join(__dirname, '..', 'public', 'icon.ico');
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440, height: 900,
@@ -84,6 +92,7 @@ function createWindow() {
     },
     title: 'AIcut - Video Editor',
     backgroundColor: '#1a1a2e',
+    icon: getWindowIconPath(),
   });
   // 生产模式：加载构建产物；开发模式：连 Vite dev server
   const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -568,7 +577,8 @@ ipcMain.handle('asset:ensureProxy', async (_e, params: { path: string; width: nu
     const proxyDir = join(app.getPath('userData'), 'proxies');
     await mkdir(proxyDir, { recursive: true });
     const stem = basename(path).replace(/\.[^.]+$/, '');
-    const proxyPath = join(proxyDir, `${stem}_proxy.mp4`);
+    // 文件名带 _a 标记：历史代理用 -an 剥离了音轨（预览静音），改名使旧静音代理失效、重新生成含音轨版本
+    const proxyPath = join(proxyDir, `${stem}_proxy_a.mp4`);
     // 代理已存在且不旧于源，直接复用
     try {
       const ps = await stat(proxyPath);
@@ -576,7 +586,8 @@ ipcMain.handle('asset:ensureProxy', async (_e, params: { path: string; width: nu
       if (ps.mtime.getTime() >= ss.mtime.getTime()) return proxyPath;
     } catch { /* 需重新生成 */ }
     await new Promise<void>((resolve) => {
-      const p = spawn('ffmpeg', ['-y', '-i', path, '-vf', 'scale=-2:720', '-an', '-c:v', 'libx264', '-preset', 'veryfast', proxyPath]);
+      // 保留音轨（预览需出声）：原 -an 会剥离音频导致预览静音，改为转码为 AAC 拷贝进代理
+      const p = spawn('ffmpeg', ['-y', '-i', path, '-vf', 'scale=-2:720', '-c:a', 'aac', '-b:a', '160k', '-c:v', 'libx264', '-preset', 'veryfast', proxyPath]);
       p.on('close', () => resolve());
       p.on('error', () => resolve());
     });
@@ -635,7 +646,7 @@ function getDefaultConfig() {
   return {
     version: '1.0',
     ai: { provider: 'none', apiKey: '', endpoint: '', model: '' },
-    asr: { provider: 'whisper-cpp', enginePath: 'E:\\codex\\codex-tools\\whisper\\whisper-cli.exe', modelPath: 'E:\\codex\\codex-tools\\whisper\\ggml-base.bin', ffmpegPath: 'E:\\codex\\codex-tools\\bin\\ffmpeg.exe', apiKey: '', endpoint: '', model: '' },
+    asr: { provider: 'bailian', enginePath: '', modelPath: '', ffmpegPath: '', apiKey: '', endpoint: '', model: 'paraformer-realtime-v2' },
     tts: { provider: 'none', appId: '', accessToken: '', endpoint: '', defaultVoice: '' },
     render: { ffmpegPath: '', defaultResolution: '1080p', defaultFps: 30, defaultBitrate: 8 },
     plugins: { vfxDirectory: '', enabledPlugins: [] },
