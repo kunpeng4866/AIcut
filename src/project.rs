@@ -218,7 +218,9 @@ pub struct Clip {
     #[serde(default)]
     pub keying: Option<crate::types::KeyingConfig>,
     /// 视频超清增强（导出级后处理，不参与时间轴合成）
-    #[serde(default)]
+    /// 序列化键统一为 `superResolution`，与前端的 ClipConfig.superResolution 对齐，
+    /// 否则重载工程时该字段反序列化为 None，超分参数与对比预览丢失。
+    #[serde(default, rename = "superResolution")]
     pub super_resolution: Option<crate::types::SRConfig>,
     #[serde(default)]
     pub filters: Vec<crate::types::FilterInstance>,

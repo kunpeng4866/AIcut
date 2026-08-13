@@ -32,11 +32,24 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
-SCENE_CATEGORIES = ("portrait", "landscape", "urban", "text_ui")
+VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".ogv")
+# 定稿 6 类训练场景（采纳 DeepSeek 分类建议）：人像/风景/UI/老电影/低光/高速运动。
+SCENE_CATEGORIES = ("portrait", "landscape", "text_ui", "old_film", "low_light", "high_motion")
+# 城市建筑(urban) 不并入上述 6 类；但其几何直线 / 强边缘纹理价值单独保留：
+# 训练时仍纳入扫描作为补充几何线条来源（与 UI 的硬边缘互补，强化直线/透视建模）。
+PRESERVED_SCENES = ("urban",)
+# Windows 下隐藏每个 ffmpeg/ffprobe 子进程的控制台窗口，减少子进程创建开销。
+_SUBPROCESS_KWARGS = {}
+if hasattr(subprocess, "CREATE_NO_WINDOW"):
+    _SUBPROCESS_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW}
+# 进程内共享的 ffprobe 元数据缓存：同一 worker 里多个 Dataset/多次采样不重复探测。
+_PROBE_CACHE = {}
 
 # 单个样本最多重试次数（换视频/换时间点）。视频损坏、太短、分辨率不足时触发。
 _MAX_SAMPLE_RETRY = 8
+# 子进程硬超时（秒）：防止个别坏素材导致 ffprobe/ffmpeg 长时间挂起。
+_FFPROBE_TIMEOUT_SECONDS = 10
+_FFMPEG_TIMEOUT_SECONDS = 25
 
 
 class _SampleError(RuntimeError):
@@ -63,7 +76,11 @@ def _probe_video(path: str) -> dict:
         "-of", "json", path,
     ]
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=_FFPROBE_TIMEOUT_SECONDS,
+                           **_SUBPROCESS_KWARGS)
+    except subprocess.TimeoutExpired:
+        raise _SampleError("ffprobe 超时 %s（>%ds）" % (path, _FFPROBE_TIMEOUT_SECONDS))
     except OSError as e:
         raise _SampleError("ffprobe 无法启动(%s): %s" % (_ffprobe_exe(), e))
     if p.returncode != 0:
@@ -125,7 +142,11 @@ def _read_frames_rgb(path, start_sec, num_frames, crop):
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ]
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=_FFMPEG_TIMEOUT_SECONDS,
+                           **_SUBPROCESS_KWARGS)
+    except subprocess.TimeoutExpired:
+        raise _SampleError("ffmpeg 解码超时 %s（>%ds）" % (path, _FFMPEG_TIMEOUT_SECONDS))
     except OSError as e:
         raise _SampleError("ffmpeg 无法启动(%s): %s" % (_ffmpeg_exe(), e))
     if p.returncode != 0:
@@ -174,6 +195,39 @@ def _scan_videos(video_dir, scene_categories):
     return items
 
 
+def _load_split_videos(split_json, split, scene_categories):
+    """从 split JSON 的 videos[scene][split] 加载视频。
+
+    返回 (items, used_scenes)。未显式传 scene_categories 时使用 JSON 中的
+    categories 列表；显式传入时按该列表过滤，并保留 PRESERVED_SCENES。
+    """
+    with open(split_json, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or not isinstance(data.get("videos"), dict):
+        raise ValueError("split_json 缺少 videos 字段: %s" % split_json)
+    videos_data = data["videos"]
+
+    if scene_categories:
+        used_scenes = list(scene_categories)
+        for p in PRESERVED_SCENES:
+            if p not in used_scenes:
+                used_scenes.append(p)
+    else:
+        used_scenes = list(data.get("categories") or videos_data.keys())
+
+    items = []
+    for scene in used_scenes:
+        split_map = videos_data.get(scene)
+        if not isinstance(split_map, dict):
+            continue
+        paths = split_map.get(split)
+        if not paths:
+            continue
+        for path in paths:
+            items.append((path, scene))
+    return items, tuple(used_scenes)
+
+
 # ───────────────────────── 退化器接入 ─────────────────────────
 
 def _build_default_degradation():
@@ -204,11 +258,13 @@ class SRVideoDataset(Dataset):
         degradation: DegradationPipeline 实例；None 则构造默认实例。
         num_samples: 虚拟样本数，即一个 epoch 的采样次数（数据集本身是随机采样的）。
         lr_scale: 退化倍率，默认 2。
+        split_json: split_v2.json 路径；存在时只加载对应 split 的视频。
+        split: split_json 中的子集名，默认 train。
     """
 
     def __init__(self, video_dir, scene_categories=None, patch_size=256,
                  temporal_frames=3, degradation=None, num_samples=1000,
-                 lr_scale=2):
+                 lr_scale=2, split_json=None, split="train"):
         if temporal_frames != 3:
             raise ValueError("temporal_frames 固定为 3（prev/curr/next），收到 %r"
                              % temporal_frames)
@@ -217,26 +273,42 @@ class SRVideoDataset(Dataset):
                              "收到 %r" % (2 * lr_scale, patch_size))
 
         self.video_dir = video_dir
-        self.scene_categories = tuple(scene_categories or SCENE_CATEGORIES)
+        self.split_json = split_json
+        self.split = split
         self.patch_size = int(patch_size)
         self.temporal_frames = 3
         self.lr_scale = int(lr_scale)
         self.lr_size = self.patch_size // self.lr_scale
         self._num_samples = int(num_samples)
+        self._bad_paths = set()
+        self._current_path = None
 
-        self.videos = _scan_videos(video_dir, self.scene_categories)
+        if split_json and os.path.isfile(split_json):
+            self.videos, used_scenes = _load_split_videos(
+                split_json, split, scene_categories)
+            self.scene_categories = tuple(used_scenes)
+        else:
+            # 基础场景（用户指定或默认 6 类），始终补入 PRESERVED_SCENES（urban 等），
+            # 使其几何线条价值在训练中保留，不被 6 类划分丢弃。
+            base = list(scene_categories or SCENE_CATEGORIES)
+            for p in PRESERVED_SCENES:
+                if p not in base:
+                    base.append(p)
+            self.scene_categories = tuple(base)
+            self.videos = _scan_videos(video_dir, self.scene_categories)
         if not self.videos:
             raise FileNotFoundError(
                 "在 %s 下未找到任何视频（支持 %s）" % (video_dir, ", ".join(VIDEO_EXTS)))
 
+        self.videos_by_scene = {}
+        for path, scene in self.videos:
+            self.videos_by_scene.setdefault(scene, []).append((path, scene))
         self._degradation = degradation if degradation is not None \
             else _build_default_degradation()
-        self._probe_cache = {}
-
         scenes = sorted({s for _p, s in self.videos})
-        sys.stderr.write("[dataset] 视频=%d 场景=%s patch=%d lr=%d samples/epoch=%d\n"
+        sys.stderr.write("[dataset] 视频=%d 场景=%s split=%s patch=%d lr=%d samples/epoch=%d\n"
                          % (len(self.videos), ",".join(scenes),
-                            self.patch_size, self.lr_size, self._num_samples))
+                            self.split, self.patch_size, self.lr_size, self._num_samples))
 
     def __len__(self):
         return self._num_samples
@@ -252,10 +324,10 @@ class SRVideoDataset(Dataset):
         return np.random.Generator(np.random.PCG64(seed))
 
     def _probe(self, path):
-        info = self._probe_cache.get(path)
+        info = _PROBE_CACHE.get(path)
         if info is None:
             info = _probe_video(path)
-            self._probe_cache[path] = info
+            _PROBE_CACHE[path] = info
         return info
 
     def _degrade_sequence(self, hr_frames, seed):
@@ -299,8 +371,26 @@ class SRVideoDataset(Dataset):
             frames = np.rot90(frames, k=k, axes=(1, 2))  # 90° * k
         return np.ascontiguousarray(frames)
 
+    def _pick_video(self, rng):
+        available = {}
+        for scene, videos in self.videos_by_scene.items():
+            good = [v for v in videos if v[0] not in self._bad_paths]
+            if good:
+                available[scene] = good
+        if not available:
+            available = self.videos_by_scene
+
+        scenes = list(available.keys())
+        scene = scenes[int(rng.integers(0, len(scenes)))]
+        candidates = available[scene]
+        path, _scene = candidates[int(rng.integers(0, len(candidates)))]
+        if path in self._bad_paths:
+            raise _SampleError("视频已标记为坏样本: %s" % path)
+        return path, scene
+
     def _sample_once(self, rng):
-        path, _scene = self.videos[int(rng.integers(0, len(self.videos)))]
+        path, _scene = self._pick_video(rng)
+        self._current_path = path
         info = self._probe(path)
         w, h, fps, dur = info["width"], info["height"], info["fps"], info["duration"]
 
@@ -319,6 +409,8 @@ class SRVideoDataset(Dataset):
 
         hr_frames = _read_frames_rgb(path, start, 3, (ps, ps, cx, cy))
         hr_frames = self._augment(hr_frames, rng)
+        if not np.isfinite(hr_frames).all():
+            raise _SampleError("HR 帧含非有限值: %s" % path)
 
         seed = int(rng.integers(0, 2 ** 31 - 1))
         lr_frames = self._degrade_sequence(hr_frames, seed)
@@ -330,10 +422,16 @@ class SRVideoDataset(Dataset):
                 raise RuntimeError(
                     "degrade_to_lr 返回形状 %s，期望 %s（patch_size=%d, lr_scale=%d，第 %d 帧）"
                     % (tuple(np.shape(lr)), expect, self.patch_size, self.lr_scale, i))
+            if not np.isfinite(lr).all():
+                raise _SampleError("LR 第 %d 帧含非有限值: %s" % (i, path))
 
         lr_seq = np.concatenate(lr_frames, axis=2)              # (h, w, 9)
         lr_seq = np.ascontiguousarray(lr_seq.transpose(2, 0, 1))  # (9, h, w)
         hr_cur = np.ascontiguousarray(hr_frames[1].transpose(2, 0, 1))  # (3, H, W)
+        if not np.isfinite(lr_seq).all():
+            raise _SampleError("最终 LR 序列含非有限值: %s" % path)
+        if not np.isfinite(hr_cur).all():
+            raise _SampleError("最终 HR 当前帧含非有限值: %s" % path)
 
         lr_t = torch.from_numpy(lr_seq).float().div_(255.0)
         hr_t = torch.from_numpy(hr_cur).float().div_(255.0)
@@ -343,10 +441,14 @@ class SRVideoDataset(Dataset):
         rng = self._rng_for(idx)
         last = None
         for _ in range(_MAX_SAMPLE_RETRY):
+            self._current_path = None
             try:
                 return self._sample_once(rng)
             except _SampleError as e:
-                last = e  # 换一个视频/时间点再试
+                last = e
+                if self._current_path is not None:
+                    self._bad_paths.add(self._current_path)
+                # 换一个视频/时间点再试
         raise RuntimeError(
             "连续 %d 次采样失败，疑似素材库或 ffmpeg 配置问题。最后一次错误: %s"
             % (_MAX_SAMPLE_RETRY, last))

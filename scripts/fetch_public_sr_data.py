@@ -14,8 +14,10 @@
     - 本脚本:            联网，从公开源批量抓取**高质量**素材补足缺口，输出到同一目录结构。
     两者产出可以共存于同一 data/sr_train 树下；本脚本产出的素材额外带署名清单。
 
-数据规格（来自 SR 设计文档，即脚本默认值）:
-    - 4 类场景各需 150 段: portrait / landscape / urban / text_ui
+数据规格:
+    - 6 个核心场景各 150 段: portrait / landscape / text_ui / old_film / low_light / high_motion
+    - 补充类: food / animal / art / screen_recording
+    - urban 几何直线纹理作为保留类单独保留
     - 每段 >= 100 帧、源分辨率 >= 1920x1080
     - 默认 MIN_WIDTH=1920, MIN_HEIGHT=1080, MIN_DURATION=8.0s（约 >=192 帧 @24fps）
 
@@ -48,7 +50,9 @@ from datetime import datetime, timezone
 
 # ───────────────────────── 常量 ─────────────────────────
 
-CATEGORIES = ("portrait", "landscape", "urban", "text_ui")
+CORE_CATEGORIES = ("portrait", "landscape", "text_ui", "old_film", "low_light", "high_motion")
+SUPPLEMENT_CATEGORIES = ("food", "animal", "art", "screen_recording")
+CATEGORIES = CORE_CATEGORIES + SUPPLEMENT_CATEGORIES
 
 # 每类目标段数（设计文档要求），仅作提示，实际上限由 --limit 控制
 TARGET_PER_CATEGORY = 150
@@ -86,10 +90,31 @@ CATEGORY_QUERIES = {
     "portrait": ["portrait face", "human face close-up", "people portrait"],
     "landscape": ["landscape nature", "mountain forest", "ocean sea waves",
                   "forest aerial"],
-    "urban": ["city building architecture", "urban street", "skyscraper",
-              "bridge city"],
+    "urban": ["modern building facade grid", "glass curtain wall architecture",
+              "skyscraper geometric pattern", "bridge steel structure",
+              "street perspective lines", "concrete geometric architecture"],
     "text_ui": ["computer screen text", "document text", "smartphone screen",
                 "night city low light"],
+    "old_film": ["old film footage", "vintage film 1950s", "black and white movie",
+                 "archive film reel", "retro film grain"],
+    "low_light": ["night city low light", "candlelight indoor", "starry night sky",
+                  "dark room ambient", "night street neon"],
+    "high_motion": ["fast car driving", "sport action slow motion", "waterfall rapid",
+                    "roller coaster ride", "wildlife running", "waves crashing"],
+    "food": ["food close up 4k", "cooking ingredients macro", "dessert food video",
+             "fresh vegetables fruit", "street food cooking", "restaurant dish"],
+    "animal": ["wildlife animal 4k", "animal close up fur", "pet animal video",
+               "bird feathers", "horse running", "animal fur texture"],
+    "art": ["digital art animation", "painting art video", "abstract art animation",
+            "pixel art animation", "ink art motion", "colorful illustration video"],
+    "screen_recording": ["computer screen recording", "screen capture video",
+                         "software ui screen", "code editor screen", "browser screen",
+                         "desktop screen recording"],
+}
+
+# screen_recording 放入 text_ui 子目录，保持文字/UI 作为同一个训练场景。
+CATEGORY_DEST = {
+    "screen_recording": os.path.join("text_ui", "screen_recording"),
 }
 
 
@@ -384,7 +409,7 @@ def search_pexels(query, limit, api_key=None, delay=DEFAULT_DELAY):
             "title": item.get("url") or "pexels-%s" % item.get("id"),
             "url": link,
             "page_url": item.get("url") or "",
-            "mime": (link or "").rpartition(".")[2].lower() or "video/mp4",
+            "mime": "video/mp4",
             "width": int(best.get("width") or 0),
             "height": int(best.get("height") or 0),
             "author": (item.get("user") or {}).get("name", ""),
@@ -707,20 +732,23 @@ def candidate_source_url(candidate):
 # ───────────────────────── 主流程 ─────────────────────────
 
 def gather_candidates(source, queries, max_candidates, delay, keys):
-    """按查询词依次检索并按 URL 去重，返回合并后的候选列表。"""
+    """按查询词依次检索并按 URL 去重，返回合并后的候选列表。
+    source 支持逗号分隔多源，如 "pexels,pixabay,commons" 。"""
+    sources = [s.strip() for s in source.split(",") if s.strip()]
     merged = []
     seen = set()
-    for q in queries:
-        log("  检索 [%s] \"%s\" (<=%d 条)" % (source, q, max_candidates))
-        found = search_source(source, q, max_candidates, delay=delay, keys=keys)
-        log("    返回 %d 条" % len(found))
-        for cand in found:
-            key = cand.get("url")
-            if key and key not in seen:
-                seen.add(key)
-                merged.append(cand)
-        if delay > 0:
-            time.sleep(delay)
+    for src in sources:
+        for q in queries:
+            log("  检索 [%s] \"%s\" (<=%d 条)" % (src, q, max_candidates))
+            found = search_source(src, q, max_candidates, delay=delay, keys=keys)
+            log("    返回 %d 条" % len(found))
+            for cand in found:
+                key = cand.get("url")
+                if key and key not in seen:
+                    seen.add(key)
+                    merged.append(cand)
+            if delay > 0:
+                time.sleep(delay)
     return merged
 
 
@@ -751,7 +779,8 @@ def process_category(category, args, keys):
     if args.add_query:
         queries += list(args.add_query)
 
-    dest_dir = os.path.join(args.dest_root, category)
+    dest_rel = CATEGORY_DEST.get(category, category)
+    dest_dir = os.path.join(args.dest_root, dest_rel)
     csv_path = attribution_path(dest_dir)
     if not args.dry_run:
         os.makedirs(dest_dir, exist_ok=True)
@@ -770,6 +799,15 @@ def process_category(category, args, keys):
     stats = {"scanned": 0, "accepted": 0, "license": 0, "format": 0,
              "resolution": 0, "duration": 0, "bitrate": 0, "dup": 0, "failed": 0}
     consecutive_rl = 0   # 连续限流计数，达到阈值则终止本类，避免持续冲击服务器
+
+    # 将目录中已有的视频计入已接受数，使 --limit 表示「目录总上限」而非「单次运行下载数」
+    if os.path.isdir(dest_dir):
+        _existing = [f for f in os.listdir(dest_dir)
+                     if f.lower().endswith((".mp4", ".webm", ".ogv", ".mov", ".mkv", ".avi"))]
+        stats["accepted"] = len(_existing)
+        if args.limit and stats["accepted"] >= args.limit:
+            log("目录已有 %d 个视频，已达 --limit=%d，跳过本类" % (stats["accepted"], args.limit))
+            return stats
 
     for cand in candidates:
         if args.limit and stats["accepted"] >= args.limit:
@@ -857,11 +895,10 @@ def build_parser():
         description="批量抓取公开高质量视频素材（SR 训练集用），以分辨率/时长/帧数/(可选)码率"
                     "为质量闸门。模型权重仍须自研，绝不加载第三方预训练权重。")
     ap.add_argument("--category", default="all",
-                    choices=CATEGORIES + ("all",),
+                    choices=CATEGORIES + ("all", "urban"),
                     help="场景类别（默认 all）")
     ap.add_argument("--source", default="commons",
-                    choices=("commons", "pexels", "pixabay"),
-                    help="数据源（默认 commons；pexels/pixabay 需配置对应 API Key）")
+                    help="数据源（默认 commons；支持逗号分隔多源如 pexels,pixabay,commons；pexels/pixabay 需配置对应 API Key）")
     ap.add_argument("--dest-root", default=DEST_ROOT,
                     help="输出根目录（默认 <repo>/data/sr_train）")
     ap.add_argument("--limit", type=int, default=0,

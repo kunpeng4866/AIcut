@@ -1,19 +1,26 @@
 {
   "description": "AIcut 视频超清增强自研训练数据收集清单",
   "requirement": {
-    "total_target": 600,
-    "per_category": 150,
+    "total_target": 1165,
+    "core_per_category": 150,
     "min_resolution": "1920x1080",
     "min_duration_sec": 10,
-    "format": ["mp4", "mov", "mkv", "avi"],
+    "format": ["mp4", "mov", "mkv", "avi", "webm", "ogv"],
     "license": "自有拍摄或已获授权的素材；禁止含第三方版权内容/水印/logo",
     "degradation_augment": 20
   },
   "categories": {
-    "portrait":  {"target": 150, "collected": 0, "dir": "portrait"},
-    "landscape": {"target": 150, "collected": 0, "dir": "landscape"},
-    "urban":     {"target": 150, "collected": 0, "dir": "urban"},
-    "text_ui":   {"target": 150, "collected": 0, "dir": "text_ui"}
+    "portrait":         {"target": 150, "collected": 150, "dir": "portrait"},
+    "landscape":        {"target": 150, "collected": 150, "dir": "landscape"},
+    "urban":            {"target": 35,  "collected": 35,  "dir": "urban"},
+    "text_ui":          {"target": 150, "collected": 200, "dir": "text_ui"},
+    "old_film":         {"target": 150, "collected": 150, "dir": "old_film"},
+    "low_light":        {"target": 150, "collected": 150, "dir": "low_light"},
+    "high_motion":      {"target": 150, "collected": 150, "dir": "high_motion"},
+    "food":             {"target": 60,  "collected": 60,  "dir": "food"},
+    "animal":           {"target": 60,  "collected": 61,  "dir": "animal"},
+    "art":              {"target": 60,  "collected": 60,  "dir": "art"},
+    "screen_recording": {"target": 50,  "collected": 50,  "dir": "text_ui/screen_recording"}
   },
-  "notes": "将视频直接放入对应场景子目录即可被 python/sr/dataset.py 扫描。训练时每段经 20x 退化增强。"
+  "notes": "各 category 的 collected 为递归统计；text_ui 的 collected 已包含 text_ui/screen_recording，screen_recording 同时单独列出。"
 }

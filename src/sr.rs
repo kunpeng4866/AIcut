@@ -12,8 +12,11 @@
 //! 错误统一用 `crate::AppError::Render(String)` 返回，保持与 `keying_generate` 一致的风格。
 
 use serde_json::Value;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use crate::AppError;
 
@@ -45,7 +48,10 @@ fn resolve_sr_bridge() -> Result<PathBuf, AppError> {
 /// `opts_json` 是一个紧凑的 JSON 字符串（无空格），作为**单个参数**传给 Python。
 /// 支持字段：`output_path` / `scale` / `tile_size` / `tile_overlap` / `provider`
 /// / `encoder` / `crf` / `bitrate` / `preset` / `strength` / `model_path`。
-/// 桥只向 stdout 输出一行 JSON，故可直接 `serde_json::from_str(stdout.trim())`。
+///
+/// 桥的进度以 JSON 行写入 stderr（`{"stage","frame","total","fps","eta_sec"}`）：
+/// 本函数把进度行以 `SRPROG:` 前缀转发到本进程 stderr，供上层（main.ts）解析后
+/// 向渲染层推送 `sr:progress` 事件；最终那一行结果 JSON 仍走 stdout，由调用方解析。
 pub fn sr_generate(input: &str, opts_json: &str) -> Result<Value, AppError> {
     let py = std::env::var("AICUT_PYTHON_BIN").unwrap_or_else(|_| MANAGED_PYTHON.to_string());
     let bridge = resolve_sr_bridge()?;
@@ -62,7 +68,7 @@ pub fn sr_generate(input: &str, opts_json: &str) -> Result<Value, AppError> {
         .unwrap_or(false);
     let omp_threads = if is_cpu { "8" } else { "4" };
 
-    let output = Command::new(&py)
+    let mut child = Command::new(&py)
         .env("PYTHONIOENCODING", "utf-8") // Windows 下管道 stdout 默认按本地 codepage，中文会乱码/解析失败
         .env("PYTHONUTF8", "1")
         .env("OMP_NUM_THREADS", omp_threads)
@@ -70,19 +76,61 @@ pub fn sr_generate(input: &str, opts_json: &str) -> Result<Value, AppError> {
         .arg(bridge_str)
         .arg(input)
         .arg(opts_json)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| AppError::Render(format!("无法启动 Python ({})：{}", py, e)))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // 后台线程读 bridge.py stderr：进度 JSON 行（含 stage 或 frame+total）加 SRPROG: 前缀
+    // 转发到本进程 stderr；其余日志行（含错误回溯）收集进 err_buf 供失败时上报。
+    let stderr_child = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Render("无法获取 Python stderr 管道".into()))?;
+    let err_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let err_buf_fwd = Arc::clone(&err_buf);
+    let forwarder = thread::spawn(move || {
+        let reader = std::io::BufReader::new(stderr_child);
+        for line in reader.lines().flatten() {
+            let trimmed = line.trim();
+            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                // 进度行：带 stage 字段，或同时含 frame/total（与 bridge.py 约定对齐）
+                if v.get("stage").is_some()
+                    || (v.get("frame").is_some() && v.get("total").is_some())
+                {
+                    eprintln!("SRPROG:{}", trimmed);
+                    continue;
+                }
+            }
+            // 非进度行：保留为错误上下文
+            if let Ok(mut g) = err_buf_fwd.lock() {
+                g.push_str(&line);
+                g.push('\n');
+            }
+        }
+    });
+
+    // 主线程读最终 JSON 结果（stdout）
+    let mut stdout_buf = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut stdout_buf)
+            .map_err(|e| AppError::Render(format!("读取 Python 输出失败: {}", e)))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| AppError::Render(format!("等待 Python 进程失败: {}", e)))?;
+    let _ = forwarder.join();
+
+    if !status.success() {
+        let err_ctx = err_buf.lock().map(|g| g.clone()).unwrap_or_default();
         return Err(AppError::Render(format!(
             "sr generate 失败 (退出码 {:?}): {}",
-            output.status.code(),
-            stderr.chars().take(1000).collect::<String>()
+            status.code(),
+            err_ctx.chars().take(1500).collect::<String>()
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout_buf;
     let v: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
         AppError::Render(format!(
             "sr generate 输出不是合法 JSON: {} (原始前 200 字符: {})",

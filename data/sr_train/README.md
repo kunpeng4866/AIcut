@@ -16,20 +16,29 @@
 
 ## 数据要求
 
-四类场景，每类 150 段，合计 **600 段**：
+当前按 11 个统计类别组织；`text_ui/screen_recording` 是 `text_ui` 的子目录，单独统计，但 `text_ui` 的当前数量包含该子目录。统计时间：2026-08-06。
 
-| 目录 | 场景 | 说明 |
-| --- | --- | --- |
-| `portrait/` | 人像 | 皮肤、头发细节，GAN 最容易出 artifact 的场景 |
-| `landscape/` | 风景 | 天空、树木、水面，纹理规律性强 |
-| `urban/` | 城市 / 建筑 | 几何线条多，对锐化过冲敏感 |
-| `text_ui/` | 文字 / UI | 需要边缘保真，而不是生成纹理 |
+| 目录 | 目标 | 当前 |
+| --- | ---: | ---: |
+| `portrait/` | 150 | 150 |
+| `landscape/` | 150 | 150 |
+| `urban/` | 35 | 35 |
+| `text_ui/` | 150 | 200 |
+| `text_ui/screen_recording/` | 50 | 50 |
+| `old_film/` | 150 | 150 |
+| `low_light/` | 150 | 150 |
+| `high_motion/` | 150 | 150 |
+| `food/` | 60 | 60 |
+| `animal/` | 60 | 61 |
+| `art/` | 60 | 60 |
+
+其中 `text_ui/` 根目录（不含 `screen_recording`）当前 150 段，`screen_recording/` 当前 50 段，因此 `text_ui/` 总数 200 段。规划合计 **1165 段**，当前唯一视频总数 **1166 段**（`text_ui` 已含 `screen_recording`）。
 
 单段素材要求：
 
 - 分辨率 **≥ 1920×1080**，推荐 4K；
 - 时长 **≥ 10 秒**；
-- 格式 `.mp4` / `.mov` / `.mkv` / `.avi`；
+- 格式 `.mp4` / `.mov` / `.mkv` / `.avi` / `.webm` / `.ogv`；
 - 画面干净：无水印、无 logo、无重压缩痕迹（源素材越干净越好）。
 
 ## 怎么放文件
@@ -38,14 +47,22 @@
 
 ```
 data/sr_train/
-├── portrait/    ← 人像视频丢这里
+├── portrait/
 ├── landscape/
 ├── urban/
-└── text_ui/
+├── text_ui/
+│   └── screen_recording/
+├── old_film/
+├── low_light/
+├── high_motion/
+├── food/
+├── animal/
+└── art/
 ```
 
-`python/sr/dataset.py` 的 `SRVideoDataset` 会自动扫描这四个子目录（递归）下所有
-支持的扩展名。训练时指定 `--data_dir` 到 `data/sr_train` 即可：
+`python/sr/dataset.py` 的 `SRVideoDataset` 会递归扫描 `data/sr_train` 下所有支持
+的扩展名。`text_ui/screen_recording` 作为子目录会被 `text_ui` 总数包含。训练时
+指定 `--data_dir` 到 `data/sr_train` 即可：
 
 ```bash
 python python/sr/train.py --data_dir data/sr_train --output_dir python/sr/checkpoints
@@ -85,14 +102,16 @@ ffprobe 路径取环境变量 `AICUT_FFPROBE`，未设置时回落到
 
 ## 进度追踪
 
-`MANIFEST.json` 记录目标与当前进度。每收一批就更新对应类别的 `collected`：
+`MANIFEST.json` 记录目标与当前进度。每收一批就更新对应类别的 `collected`；
+`text_ui` 的 `collected` 包含 `screen_recording`：
 
 ```json
-"portrait": {"target": 150, "collected": 37, "dir": "portrait"}
+"text_ui": {"target": 150, "collected": 200, "dir": "text_ui"},
+"screen_recording": {"target": 50, "collected": 50, "dir": "text_ui/screen_recording"}
 ```
 
 统计当前实际文件数（PowerShell）：
 
 ```powershell
-Get-ChildItem data/sr_train/portrait -Include *.mp4,*.mov,*.mkv,*.avi -Recurse | Measure-Object
+Get-ChildItem data/sr_train -File -Recurse | Where-Object { $_.Extension -in '.mp4','.mov','.mkv','.avi','.webm','.ogv' } | Measure-Object
 ```

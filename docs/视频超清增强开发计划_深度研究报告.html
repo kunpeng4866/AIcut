@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIcut 视频超清增强开发计划 — 深度研究报告</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --surface: #f8f9fa;
+  --surface-2: #f0f1f3;
+  --border: #e0e0e0;
+  --text: #1a1a1a;
+  --text-secondary: #555;
+  --accent: #2563eb;
+  --accent-light: #dbeafe;
+  --green: #16a34a;
+  --green-light: #dcfce7;
+  --red: #dc2626;
+  --red-light: #fee2e2;
+  --orange: #ea580c;
+  --orange-light: #fed7aa;
+  --purple: #7c3aed;
+  --purple-light: #ede9fe;
+  --code-bg: #f5f5f5;
+  --code-border: #d4d4d4;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+h1 { font-size: 2em; margin-bottom: 8px; border-bottom: 3px solid var(--accent); padding-bottom: 12px; }
+h1 + p { color: var(--text-secondary); font-size: 0.95em; margin-bottom: 32px; }
+h2 { font-size: 1.5em; margin: 36px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+h3 { font-size: 1.2em; margin: 24px 0 12px; color: var(--text); }
+h4 { font-size: 1.05em; margin: 16px 0 8px; color: var(--text); }
+p { margin-bottom: 12px; }
+ul, ol { margin: 8px 0 16px 24px; }
+li { margin-bottom: 6px; }
+strong { color: var(--text); }
+code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.88em;
+}
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  padding: 16px;
+  overflow-x: auto;
+  margin: 12px 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+pre code { background: none; border: none; padding: 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 0.9em;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+}
+th { background: var(--surface-2); font-weight: 600; }
+tr:nth-child(even) { background: var(--surface); }
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 0.8em;
+  font-weight: 600;
+  margin-left: 4px;
+}
+.badge-green { background: var(--green-light); color: var(--green); }
+.badge-red { background: var(--red-light); color: var(--red); }
+.badge-orange { background: var(--orange-light); color: var(--orange); }
+.badge-purple { background: var(--purple-light); color: var(--purple); }
+.badge-blue { background: var(--accent-light); color: var(--accent); }
+.callout {
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+  border-left: 4px solid;
+}
+.callout-warn { background: var(--orange-light); border-color: var(--orange); }
+.callout-danger { background: var(--red-light); border-color: var(--red); }
+.callout-info { background: var(--accent-light); border-color: var(--accent); }
+.callout-success { background: var(--green-light); border-color: var(--green); }
+.callout p { margin-bottom: 4px; }
+.callout p:last-child { margin-bottom: 0; }
+.toc {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 28px;
+  margin-bottom: 32px;
+}
+.toc h3 { margin-top: 0; }
+.toc ol { margin-left: 20px; }
+.toc a { color: var(--accent); text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.metric-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  text-align: center;
+}
+.metric-card .value { font-size: 1.6em; font-weight: 700; color: var(--accent); }
+.metric-card .label { font-size: 0.85em; color: var(--text-secondary); margin-top: 4px; }
+.timeline { position: relative; padding-left: 24px; }
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+.timeline-item { position: relative; margin-bottom: 24px; }
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -22px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+.timeline-item h4 { margin-bottom: 4px; }
+.timeline-item .duration { font-size: 0.85em; color: var(--text-secondary); }
+hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+</style>
+</head>
+<body>
+
+<h1>AIcut 视频超清增强开发计划</h1>
+<p>深度研究报告 · 编制日期 2026-08-02 · 修订日期 2026-08-03（经审核修正） · 目标：对标剪映，实现 2K/4K 真·AI 超分辨率重建</p>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+<li><a href="#s1">结论摘要</a></li>
+<li><a href="#s2">GitHub 开源项目评估</a></li>
+<li><a href="#s3">超分辨率技术原理</a></li>
+<li><a href="#s4">剪映方案逆向分析</a></li>
+<li><a href="#s5">技术架构设计</a></li>
+<li><a href="#s6">详细开发计划与里程碑</a></li>
+<li><a href="#s7">你必须知道但可能没想到的关键细节</a></li>
+<li><a href="#s8">风险评估与替代方案</a></li>
+</ol>
+</div>
+
+<!-- ============ Section 1 ============ -->
+<h2 id="s1">1. 结论摘要</h2>
+
+<div class="callout callout-info">
+<p><strong>核心结论：</strong>GitHub 上<strong>没有</strong>可以直接拿来用的开源项目——不是因为模型不够好，而是因为你的<strong>防侵权硬约束</strong>（禁止使用第三方预训练权重）排除了所有现成方案。所有主流开源项目（Real-ESRGAN、RealBasicVSR、FlashVSR 等）的<strong>价值在于架构设计参考</strong>，而非直接调用其权重。</p>
+</div>
+
+<h3>1.1 可用性判断矩阵</h3>
+
+<table>
+<tr>
+<th>项目</th>
+<th>代码许可证</th>
+<th>预训练权重</th>
+<th>能否直接用？</th>
+<th>原因</th>
+</tr>
+<tr>
+<td>Real-ESRGAN</td>
+<td>BSD 3-Clause ✅</td>
+<td>仅研究用途 ⚠️</td>
+<td><span class="badge badge-red">否</span></td>
+<td>权重由腾讯ARC训练，防侵权约束禁止使用第三方权重</td>
+</tr>
+<tr>
+<td>RealBasicVSR</td>
+<td>Apache 2.0 ✅</td>
+<td>仅研究用途 ⚠️</td>
+<td><span class="badge badge-red">否</span></td>
+<td>同上；且需A100级显存做时序传播</td>
+</tr>
+<tr>
+<td>FlashVSR (CVPR 2026)</td>
+<td>MIT ✅</td>
+<td>HuggingFace ⚠️</td>
+<td><span class="badge badge-red">否</span></td>
+<td>基于Stable Diffusion 2.1，依赖A100；RTX 5060 Ti兼容性未知</td>
+</tr>
+<tr>
+<td>Video2X</td>
+<td>GPL v3 ⚠️</td>
+<td>调用第三方 ⚠️</td>
+<td><span class="badge badge-red">否</span></td>
+<td>GPL传染性许可证 + 包装第三方模型</td>
+</tr>
+<tr>
+<td>DLoRAL (NeurIPS 2025)</td>
+<td>MIT ✅</td>
+<td>研究用途 ⚠️</td>
+<td><span class="badge badge-red">否</span></td>
+<td>基于SD 2.1 + RAM模型，推理极重</td>
+</tr>
+</table>
+
+<h3>1.2 推荐方案（经审核修正后）</h3>
+
+<div class="callout callout-warn">
+<p><strong>架构修正说明：</strong>原报告选用 5MB SRVGGNetCompact（实时超分模型）+ 后处理光流时序，经审核发现存在结构性缺陷——离线批处理场景用实时模型等于放弃模型容量可带来的画质提升；后处理光流无法从根本上消除逐帧独立超分的闪烁。修正后方案如下：</p>
+</div>
+
+<p>采用 <strong>RRDBNet 中型架构（12 块残差密集块，~20MB）+ 自研训练 + 输入级时序融合</strong> 的组合方案：</p>
+
+<ol>
+<li><strong>架构选择</strong>：RRDBNet（Real-ESRGAN 项目的核心网络，BSD 3-Clause 许可证允许商业使用和修改），截取 12 个残差密集块（而非完整 23 块 64MB），模型大小 ~20MB——在 RTX 5060 Ti 16GB 的物理极限内，最大化真实纹理生成能力，同时 4K 分块推理显存峰值 <4.5GB</li>
+<li><strong>自研训练</strong>：场景分类 600 段视频（人像/风景/UI/老电影各 150 段），二阶退化管道 + 20 倍退化增强，先攻克 ×2 超分</li>
+<li><strong>时序一致性</strong>：输入级 3 帧 LR 空间特征融合——取相邻 3 帧 (t-1, t, t+1) 经共享卷积提取特征，加权求和后送入 RRDBNet 主干，从训练阶段就约束时序一致性，从根源杜绝闪烁</li>
+<li><strong>部署推理</strong>：导出 ONNX → onnxruntime-gpu CUDA EP（已有完整基础设施），RTX 5060 Ti 16GB 推理够用</li>
+<li><strong>集成到 AIcut</strong>：沿用 keying/beauty 已有架构（Python 生成 + Rust filtergraph 导出 + 前端 WebGPU 预览）</li>
+<li><strong>渐进交付</strong>：v1 只做 ×2（480p→1080p, 1080p→2K）；×4 通过 ×2 超分 + 轻量去伪影 + 再 ×2 级联实现，作为 v2 目标</li>
+</ol>
+
+<!-- ============ Section 2 ============ -->
+<h2 id="s2">2. GitHub 开源项目详细评估</h2>
+
+<h3>2.1 Real-ESRGAN（最接近可用）</h3>
+
+<table>
+<tr><th>维度</th><th>详情</th></tr>
+<tr><td>仓库</td><td>github.com/xinntao/Real-ESRGAN</td></tr>
+<tr><td>许可证</td><td>BSD 3-Clause（允许商业使用、修改、再分发）</td></tr>
+<tr><td>架构</td><td>两种：RRDBNet（重，23块，64MB）和 SRVGGNetCompact（轻，16层，5MB）</td></tr>
+<tr><td>视频支持</td><td>逐帧处理（无时序一致性保证）；realesr-animevideov3 模型专为视频优化</td></tr>
+<tr><td>推理速度</td><td>SRVGGNetCompact + TensorRT FP16 在 RTX 5060 Ti 上 ~26ms/帧（640×640 输入）= ~38fps</td></tr>
+<tr><td>分辨率</td><td>支持 ×2/×3/×4；720p→4K 可通过 ×4 + 后处理缩放实现</td></tr>
+<tr><td>训练方式</td><td>纯合成数据训练（模拟退化），不需真实配对数据</td></tr>
+<tr><td>权重许可证</td><td>⚠️ 预训练权重仅供研究用途，不可直接商用</td></tr>
+</table>
+
+<div class="callout callout-success">
+<p><strong>为什么这个项目最值得参考：</strong></p>
+<ul>
+<li><strong>架构许可证宽松</strong>：BSD 3-Clause 允许你使用 RRDBNet 的代码架构，只需自己训练权重</li>
+<li><strong>训练方法完全开源</strong>：退化模型（含二阶退化管道）、训练脚本、损失函数全部公开，可复现</li>
+<li><strong>模型规模可调</strong>：RRDBNet 的残差密集块数量可自由裁剪——原版 23 块（64MB），我们截取 12 块（~20MB），在画质和推理速度间取平衡</li>
+<li><strong>退化管道是核心创新</strong>：二阶退化（退化链跑两遍，每步随机参数）是 Real-ESRGAN 泛化能力的根源，必须复刻</li>
+</ul>
+</div>
+
+<div class="callout callout-warn">
+<p><strong>为什么不用 SRVGGNetCompact（5MB 轻量版）：</strong>SRVGGNetCompact 为"实时 AI 超分"设计，核心取舍是用模型容量换速度。AIcut 的超分场景是<strong>离线批处理</strong>（用户点导出、等待几分钟），用户感知的是"最终画质"而非"处理速度是否达到实时"。5MB 模型的纹理生成天花板低——480p→4K 大跨度场景大概率输出"锐化过的但依然模糊的大图"。应选择更大模型，用时间换画质。</p>
+</div>
+
+<h3>2.2 RealBasicVSR（视频专用，时序最优）</h3>
+
+<table>
+<tr><th>维度</th><th>详情</th></tr>
+<tr><td>仓库</td><td>github.com/ckkelvinchan/RealBasicVSR</td></tr>
+<tr><td>许可证</td><td>Apache 2.0（通过 MMEditing）</td></tr>
+<tr><td>架构</td><td>BasicVSR++ 变体：双向传播 + 图像预清理模块 + 动态精修</td></tr>
+<tr><td>核心优势</td><td><strong>时序一致性</strong>：利用前后帧信息做长期传播，大幅减少闪烁</td></tr>
+<tr><td>速度</td><td>比 Real-ESRGAN 快 17×（论文数据），但需大显存做序列传播</td></tr>
+<tr><td>显存需求</td><td>处理 10 帧序列需 ~8GB；长视频需分块处理</td></tr>
+<tr><td>权重许可证</td><td>⚠️ 同研究用途</td></tr>
+</table>
+
+<div class="callout callout-info">
+<p><strong>参考价值：</strong>RealBasicVSR 的<strong>时序传播架构设计</strong>是解决视频超分闪烁问题的最佳参考。我们采用的"输入级 3 帧 LR 特征融合"方案借鉴了其多帧信息利用的思想，但大幅简化——不做双向传播（显存开销大），而是在输入前做轻量特征提取+加权融合，再送入 RRDBNet 主干。</p>
+</div>
+
+<h3>2.3 FlashVSR（CVPR 2026，最前沿）</h3>
+
+<table>
+<tr><th>维度</th><th>详情</th></tr>
+<tr><td>仓库</td><td>github.com/OpenImagingLab/FlashVSR</td></tr>
+<tr><td>论文</td><td>CVPR 2026（arXiv:2510.12747）</td></tr>
+<tr><td>方法</td><td>一步扩散模型 + 局部约束稀疏注意力 + 微型条件解码器</td></tr>
+<tr><td>速度</td><td>~17 FPS（768×1408，A100 GPU）</td></tr>
+<tr><td>画质</td><td>SOTA：比之前一步扩散 VSR 快 ~12×</td></tr>
+<tr><td>硬件兼容</td><td>⚠️ Block-Sparse Attention 仅在 A100/A800 (Ampere) 和 H200 (Hopper) 测试通过；<strong>RTX 40/50 系列兼容性未知</strong></td></tr>
+</table>
+
+<div class="callout callout-danger">
+<p><strong>不推荐直接使用的原因：</strong></p>
+<ul>
+<li>基于 Stable Diffusion 2.1 微调，模型体量 ~2GB+</li>
+<li>Block-Sparse Attention 在消费级 GPU（RTX 5060 Ti）上未验证</li>
+<li>扩散模型推理即使一步也远慢于纯 CNN</li>
+<li>权重基于 SD 2.1，存在潜在版权风险</li>
+</ul>
+</div>
+
+<h3>2.4 其他项目速览</h3>
+
+<table>
+<tr><th>项目</th><th>类型</th><th>许可证</th><th>适配性</th></tr>
+<tr><td>Video2X</td><td>框架（包装器）</td><td>GPL v3 ⚠️</td><td>GPL传染性，不适合集成到闭源项目</td></tr>
+<tr><td>DLoRAL</td><td>一步扩散 VSR</td><td>MIT</td><td>需SD2.1+RAM，推理极重</td></tr>
+<tr><td>Anime4K</td><td>实时动漫SR</td><td>MIT</td><td>仅动漫，GLSL着色器，非通用</td></tr>
+<tr><td>local-4k-upscaler</td><td>Real-ESRGAN+ffmpeg流式</td><td>MIT</td><td>工程参考价值高，但依赖Real-ESRGAN权重</td></tr>
+<tr><td>ESRGAN-Video-SR</td><td>Real-ESRGAN+TensorRT</td><td>MIT</td><td>RTX 5060 Ti 实测38fps，工程参考</td></tr>
+</table>
+
+<!-- ============ Section 3 ============ -->
+<h2 id="s3">3. 超分辨率技术原理</h2>
+
+<h3>3.1 什么是真正的超分辨率？</h3>
+
+<p>超分辨率（Super-Resolution, SR）与简单的"放大"有本质区别：</p>
+
+<table>
+<tr><th>维度</th><th>插值放大（当前AIcut）</th><th>AI 超分辨率（目标）</th></tr>
+<tr><td>原理</td><td>双三次/兰索斯插值，已知像素间数学拟合</td><td>神经网络从大量训练数据中学习退化→高清的逆映射</td></tr>
+<tr><td>细节</td><td>不生成新信息，只是平滑已有像素</td><td><strong>生成</strong>合理的纹理细节（发丝、织物、文字边缘）</td></tr>
+<tr><td>主观感受</td><td>"模糊的大图"</td><td>"清晰的高清图"</td></tr>
+<tr><td>客观指标</td><td>SSIM≈0.96（放大后缩回与原图几乎相同）</td><td>SSIM 降低但 PSNR/感知质量提升（有真实新信息）</td></tr>
+</table>
+
+<h3>3.2 超分辨率的核心技术栈</h3>
+
+<h4>3.2.1 网络架构演进</h4>
+
+<div class="metric-grid">
+<div class="metric-card">
+<div class="value">SRCNN</div>
+<div class="label">2014 · 3层CNN · 开山之作</div>
+</div>
+<div class="metric-card">
+<div class="value">EDSR</div>
+<div class="label">2017 · 残差网络 · 去除BN层</div>
+</div>
+<div class="metric-card">
+<div class="value">RRDBNet</div>
+<div class="label">2018 · 残差密集块 · Real-ESRGAN基础</div>
+</div>
+<div class="metric-card">
+<div class="value">SRVGGNet</div>
+<div class="label">2021 · VGG风格紧凑网络 · 实时推理</div>
+</div>
+<div class="metric-card">
+<div class="value">BasicVSR++</div>
+<div class="label">2021 · 双向传播 · 视频时序一致性</div>
+</div>
+<div class="metric-card">
+<div class="value">Diffusion</div>
+<div class="label">2024-2026 · 扩散模型 · SOTA画质</div>
+</div>
+</div>
+
+<h4>3.2.2 退化模型（训练的关键）</h4>
+
+<p>真实世界视频退化是多种因素的叠加。Real-ESRGAN 的核心创新是用<strong>纯合成数据</strong>训练，通过模拟以下退化链：</p>
+
+<pre><code>高清原图 → 模糊(高斯/各向异性) → 下采样(双三次/面积) → 
+噪声(高斯+泊松) → JPEG压缩 → 最终低质量图
+
+# 训练对 = (低质量图, 原高清图)
+# 模型学习：低质量 → 高清 的逆映射</code></pre>
+
+<p>这种方法的优点是<strong>不需要真实配对数据</strong>——你只需要收集高清视频素材，程序自动生成对应的低质量版本用于训练。</p>
+
+<h4>3.2.3 损失函数体系</h4>
+
+<table>
+<tr><th>损失</th><th>作用</th><th>权重</th></tr>
+<tr><td>L1 像素损失</td><td>保证整体像素值准确</td><td>1.0</td></tr>
+<tr><td>感知损失 (VGG)</td><td>保证语义特征层面的相似性</td><td>0.1</td></tr>
+<tr><td>GAN 对抗损失</td><td>让输出看起来"真实"，生成纹理</td><td>0.005</td></tr>
+<tr><td>时序一致性损失</td><td>（视频专用）减少帧间闪烁</td><td>0.1</td></tr>
+</table>
+
+<h4>3.2.4 时序一致性——视频SR的核心挑战</h4>
+
+<div class="callout callout-warn">
+<p><strong>帧间闪烁问题是视频SR区别于图像SR的最大技术难点。</strong></p>
+<p>逐帧独立超分时，每帧的纹理生成是随机的——同一面墙在第100帧可能生成砖纹，第101帧可能生成不同的砖纹，播放时就产生"闪烁"。解决方案：</p>
+<ul>
+<li><strong>输入级多帧融合</strong>（本方案采用）：3 帧 LR 特征提取+加权融合后送入主干，从训练阶段约束时序一致性</li>
+<li><strong>双向传播</strong>（BasicVSR++）：同时利用前后帧信息，在网络内部做时序传播——效果最好但显存开销大</li>
+<li><strong>光流对齐</strong>：用光流将前一帧的超分结果 warp 到当前帧做加权融合——后处理补丁，效果有限</li>
+<li><strong>时序损失</strong>：训练时加入帧间一致性约束（本方案同时采用）</li>
+<li><strong>后处理时域平滑</strong>：超分后用时域中值/高斯滤波（你已在抠像模块用过类似方法）</li>
+</ul>
+</div>
+
+<!-- ============ Section 4 ============ -->
+<h2 id="s4">4. 剪映方案逆向分析</h2>
+
+<h3>4.1 剪映实际做了什么？</h3>
+
+<p>根据第三方深度测试（aiarty.com 2025-2026 评测），剪映/CapCut 的"画质增强"实际上是：</p>
+
+<table>
+<tr><th>功能</th><th>实际技术</th><th>是否真AI超分</th></tr>
+<tr><td>导出时选4K</td><td>分辨率插值 + 自适应锐化 + 轻度降噪</td><td><span class="badge badge-red">否</span></td></tr>
+<tr><td>"画质增强"滑块</td><td>锐化 + 对比度调整 + 轻度降噪</td><td><span class="badge badge-red">否</span></td></tr>
+<tr><td>AI视频放大器（在线版）</td><td>云端AI模型推理（疑似基于内部扩散模型）</td><td><span class="badge badge-green">是</span></td></tr>
+<tr><td>"增强画质"选项（桌面版）</td><td>云端处理，技术未公开</td><td><span class="badge badge-orange">不确定</span></td></tr>
+</table>
+
+<div class="callout callout-info">
+<p><strong>关键发现：</strong>剪映桌面版的"4K导出"本质上和 AIcut 当前的 <code>scale</code> 上采样<strong>是一样的</strong>——都是插值放大，不是AI超分。剪映的<strong>真正AI超分</strong>是在线版的"AI Video Upscaler"工具，使用云端GPU推理，用户上传视频→云端处理→下载结果。</p>
+<p>这意味着：AIcut 如果实现本地 AI 超分，<strong>在技术层面将超越剪映桌面版</strong>（剪映桌面版没有本地AI超分，依赖云端）。</p>
+</div>
+
+<h3>4.2 对标剪映的目标定义</h3>
+
+<table>
+<tr><th>维度</th><th>剪映现状</th><th>AIcut 目标</th></tr>
+<tr><td>4K导出</td><td>插值放大（桌面）/ 云端AI（在线）</td><td>本地AI超分（RTX 5060 Ti）</td></tr>
+<tr><td>处理速度</td><td>云端实时（在线）/ 即时（桌面插值）</td><td>离线批处理，~10-30fps</td></tr>
+<tr><td>画质</td><td>在线版有真实细节提升</td><td>本地推理有真实细节提升</td></tr>
+<tr><td>隐私</td><td>需上传云端</td><td>全本地处理</td></tr>
+<tr><td>成本</td><td>云端推理有费用</td><td>零额外成本（利用本地GPU）</td></tr>
+</table>
+
+<!-- ============ Section 5 ============ -->
+<h2 id="s5">5. 技术架构设计</h2>
+
+<h3>5.1 整体架构</h3>
+
+<pre><code>┌─────────────────────────────────────────────────────────────┐
+│                      AIcut 视频超清增强                        │
+├──────────────┬──────────────────┬────────────────────────────┤
+│   前端 (GUI)  │   Python 推理层    │      Rust 导出引擎          │
+│              │                  │                            │
+│ ┌──────────┐ │ ┌──────────────┐ │ ┌────────────────────────┐ │
+│ │超清设置面板│ │ │ SR 推理服务   │ │ │ filtergraph 集成       │ │
+│ │ - 模式选择 │ │ │ (ONNX CUDA)  │ │ │ - 超分资产输入流        │ │
+│ │ - 放大倍数 │ │ │              │ │ │ - 与抠像/美颜共存       │ │
+│ │ - 强度滑块 │ │ │ ┌──────────┐ │ │ │ - 双导出路径适配       │ │
+│ │ - 预览对比 │ │ │ │RRDBNet   │ │ │ └────────────────────────┘ │
+│ └──────────┘ │ │ │ │12块20MB  │ │ │                            │
+│              │ │ │ │(自研权重) │ │ │ ┌────────────────────────┐ │
+│ ┌──────────┐ │ │ │ └──────────┘ │ │ │ 进度心跳+断点续传       │ │
+│ │WebGPU预览 │ │ │ │              │ │ │ - 每10帧进度上报        │ │
+│ │(对比滑动) │ │ │ │ 3帧时序融合  │ │ │ - 分段导出(30s/段)      │ │
+│ └──────────┘ │ │ │ (输入级)     │ │ │ - 异常恢复              │ │
+│              │ │ └──────────────┘ │ └────────────────────────┘ │
+│              │ │                  │                            │
+│              │ │ ┌──────────────┐ │ ┌────────────────────────┐ │
+│              │ │ │ 训练管线      │ │ │ 导出选项                │ │
+│              │ │ │ - 数据合成    │ │ │ - 2K (2560×1440)       │ │
+│              │ │ │ - 退化模拟    │ │ │ - 4K (3840×2160)       │ │
+│              │ │ │ - 模型训练    │ │ │ - 自定义倍数            │ │
+│              │ │ └──────────────┘ │ └────────────────────────┘ │
+└──────────────┴──────────────────┴────────────────────────────┘</code></pre>
+
+<h3>5.2 模型架构选择</h3>
+
+<h4>推理模型：RRDBNet 12 块（自研权重）</h4>
+
+<pre><code># 架构参数（参考 Real-ESRGAN RRDBNet，截取 12 块）
+RRDBNet(
+    num_in_ch=3,       # RGB 输入
+    num_out_ch=3,      # RGB 输出
+    num_feat=64,       # 特征通道
+    num_block=12,      # 残差密集块数量（原版 23，截取 12 做中型模型）
+    num_grow_ch=32,    # 增长通道
+    upscale=2,         # 放大倍数（v1 只做 ×2）
+)
+# 模型大小：~20MB（FP32） / ~10MB（FP16）
+# 参数量：~2.8M
+# 所有卷积在 LR 空间完成，最后一层 PixelShuffle 上采样</code></pre>
+
+<h4>为什么选 12 块 RRDBNet 而非 5MB 轻量版或 64MB 完整版？</h4>
+
+<table>
+<tr><th>对比项</th><th>SRVGGNetCompact (5MB)</th><th>RRDBNet 12块 (20MB) ✅</th><th>RRDBNet 23块 (64MB)</th></tr>
+<tr><td>模型大小</td><td>5 MB</td><td>20 MB</td><td>64 MB</td></tr>
+<tr><td>推理速度 (5060Ti, 1080p×2)</td><td>~38 fps</td><td>~8-10 fps</td><td>~3-5 fps</td></tr>
+<tr><td>画质</td><td>有限（锐化感）</td><td>良好（真实纹理生成）</td><td>优秀</td></tr>
+<tr><td>4K 分块显存峰值</td><td>~1 GB</td><td>~4.5 GB</td><td>~8-10 GB ⚠️</td></tr>
+<tr><td>训练成本</td><td>低</td><td>中（单卡 1-2 周）</td><td>高（单卡 3-4 周）</td></tr>
+<tr><td>纹理生成能力</td><td>弱（16层VGG风格）</td><td>强（12个残差密集块）</td><td>最强</td></tr>
+<tr><td>适用场景</td><td>实时预览</td><td>离线导出（AIcut 场景）</td><td>高质量离线导出</td></tr>
+</table>
+
+<div class="callout callout-info">
+<p><strong>选型理由：</strong>AIcut 超分是离线批处理——用户愿意等 4-8 分钟换取画质质的飞跃。20MB 模型带来的真实纹理细节（皮肤毛孔、草地、文字边缘）是 5MB 模型永远无法企及的。同时避免 64MB 模型在 4K 分块下的 OOM 风险。12 块是 RTX 5060 Ti 16GB 上画质、稳定性、工程可行性的帕累托最优前沿。</p>
+</div>
+
+<h4>双模策略（预览 + 导出）</h4>
+<p>预览路径使用轻量 SRVGGNetCompact（5MB）做快速单帧预览；导出路径使用 RRDBNet 12 块（20MB）做高质量离线超分。两条路径独立，预览仅供用户参考效果方向，导出才是最终交付。</p>
+
+<h3>5.3 时序一致性方案（输入级融合，非后处理）</h3>
+
+<div class="callout callout-warn">
+<p><strong>架构修正说明：</strong>原报告设计"逐帧独立超分 + 后处理光流平滑"两段式方案，存在结构性缺陷——Phase 1 训练的模型已学会独立生成纹理（GAN 损失带来随机性），Phase 2 试图用光流把这些独立纹理"粘"在一起，但光流在低质量输入上本身不准，要么闪烁（平滑不够），要么涂抹/ghosting（平滑过头）。<strong>正确做法是从训练第一天就把时序嵌入网络架构。</strong></p>
+</div>
+
+<h4>输入级 3 帧 LR 空间特征融合</h4>
+
+<pre><code># 架构：在 RRDBNet 主干前加一个轻量时序融合模块
+#
+# 输入：3 帧 LR 图像 (t-1, t, t+1)，各 3 通道 → 共 9 通道
+#         ↓
+# 共享卷积层 (9ch → 64ch, 3×3) 提取每帧特征
+#         ↓
+# 时序加权融合 (可学习权重 α, β, γ)
+#   fused_feat = α*feat(t-1) + β*feat(t) + γ*feat(t+1)
+#   其中 α+β+γ=1，通过 softmax 归一化
+#         ↓
+# RRDBNet 主干 (12 块残差密集块)
+#         ↓
+# PixelShuffle ×2 上采样
+#         ↓
+# 输出：1 帧 HR 图像
+
+# 优势：
+# 1. 不改 RRDBNet 主干结构，只加一个轻量前置模块
+# 2. 训练时即约束时序一致性，从根源杜绝闪烁
+# 3. 推理时只需 3 帧 LR 输入，不增加显著计算负担
+# 4. 不依赖光流——光流在低质量输入上不可靠</code></pre>
+
+<h4>训练阶段时序约束</h4>
+
+<pre><code># 训练时输入 3 帧连续 LR 序列 + 中心帧 HR GT
+# 损失函数加入时序一致性项
+
+# 标准 SR 损失
+pixel_loss = L1(sr_t, hr_gt)                    # 中心帧像素损失
+perceptual_loss = VGG(sr_t, hr_gt)              # 感知损失
+gan_loss = discriminator(sr_t, hr_gt)           # GAN 对抗损失
+
+# 时序一致性损失
+# 对相邻输出做特征级一致性约束
+feat_t = feature_extractor(sr_t)
+feat_t1 = feature_extractor(sr_t1)
+temporal_loss = L1(feat_t, feat_t1)             # 特征级时序一致
+
+total_loss = pixel_loss + 0.1 * perceptual_loss + 0.005 * gan_loss + 0.1 * temporal_loss
+
+# 场景切换检测：训练时随机插入场景切换帧序列
+# 切换处重置时序状态（α=0, β=1, γ=0，只信任当前帧）</code></pre>
+
+<h4>为什么不用光流后处理？</h4>
+
+<table>
+<tr><th>方案</th><th>原理</th><th>问题</th></tr>
+<tr><td>光流后处理（原方案）</td><td>逐帧独立超分 → 光流 warp 前帧 → 加权融合</td><td>① 光流在低质量输入上不准 ② 独立生成的 GAN 纹理无法对齐 ③ 运动区域恰好是最关注的，却最容易闪烁/涂抹</td></tr>
+<tr><td>输入级 3 帧融合（修正方案）</td><td>3 帧 LR 特征融合 → 主干网络利用邻帧信息做一致性重建</td><td>① 增加 ~10% 推理开销 ② 需要 3 帧缓存（可接受）</td></tr>
+</table>
+
+<h3>5.4 训练管线设计</h3>
+
+<pre><code>┌──────────────────────────────────────────────┐
+│              训练数据准备（场景分类）            │
+│                                              │
+│  高清视频素材 (1080p+/4K)                      │
+│  来源：自有/授权/公有领域视频                   │
+│  ┌─────────────────────────────────┐         │
+│  │ 场景分类 600 段：                │         │
+│  │  - 人像 150 段（面部/皮肤/头发）  │         │
+│  │  - 风景 150 段（天空/树木/水面）  │         │
+│  │  - 城市/建筑 150 段（几何线条）   │         │
+│  │  - 文字/UI/低光 150 段           │         │
+│  │ 每段 ≥100 帧                     │         │
+│  └─────────────────────────────────┘         │
+│        │                                      │
+│        ▼                                      │
+│  ┌──────────────────────┐                    │
+│  │  二阶退化模拟器       │                    │
+│  │  (每段生成 20 组退化)  │                    │
+│  │                      │                    │
+│  │  第一阶退化：         │                    │
+│  │   模糊(随机类型+参数)  │                    │
+│  │   → 下采样(随机方法)   │                    │
+│  │   → 噪声(高斯/泊松)    │                    │
+│  │   → JPEG压缩(随机Q)   │                    │
+│  │   → Sinc滤波(概率出现) │                    │
+│  │                      │                    │
+│  │  第二阶退化：         │                    │
+│  │   模糊(再次,不同参数)  │                    │
+│  │   → 下采样(再次)       │                    │
+│  │   → 噪声(再次)         │                    │
+│  │   → JPEG/H.264压缩    │                    │
+│  │   → 块丢失(概率出现)   │                    │
+│  │   → 环状振铃(概率出现)  │                    │
+│  │                      │                    │
+│  │  每步操作随机排序      │                    │
+│  │  每步参数随机采样      │                    │
+│  │  每步是否出现有概率    │                    │
+│  └────────┬─────────────┘                    │
+│           │                                  │
+│  有效训练对 = 600段 × 20组 = 12000 组          │
+│  × 100帧/段 = ~120万训练样本                   │
+│           │                                  │
+│           ▼                                  │
+│  ┌──────────────────────┐                    │
+│  │  PyTorch 训练         │                    │
+│  │  - RRDBNet 12块       │                    │
+│  │  - 3帧输入融合模块    │                    │
+│  │  - L1+感知+GAN+时序   │                    │
+│  │  - RTX 5060 Ti        │                    │
+│  │  - batch=2, 梯度累积  │                    │
+│  │  - FP16 混合精度      │                    │
+│  │  - ~150K iter         │                    │
+│  │  - 先训练 ×2          │                    │
+│  └────────┬─────────────┘                    │
+│           │                                  │
+│           ▼                                  │
+│  ┌──────────────────────┐                    │
+│  │  导出 ONNX           │                    │
+│  │  - FP16 量化          │                    │
+│  │  - 动态输入尺寸       │                    │
+│  └────────┬─────────────┘                    │
+│           │                                  │
+│           ▼                                  │
+│  models/sr_rrdb12_x2_v1.onnx (~10MB)        │
+└──────────────────────────────────────────────┘</code></pre>
+
+<div class="callout callout-info">
+<p><strong>先攻克 ×2，再谋 ×4：</strong>×2 超分难度远低于 ×4（信息丢失少，模型需要"补"的细节少）。v1 只训练 ×2 模型（480p→1080p, 1080p→2K）。×4 通过"×2 超分 → 轻量去伪影 → 再 ×2"级联实现，作为 v2 目标。训练难度降低 ~70%。</p>
+</div>
+
+<h3>5.5 推理部署架构（复用已有基础设施）</h3>
+
+<div class="callout callout-success">
+<p>AIcut 已有完整的 Python ONNX 推理 + Rust filtergraph 导出 + 前端 WebGPU 预览架构（用于抠像和美颜）。视频超清增强可直接复用：</p>
+<ul>
+<li><strong>Python 层</strong>：<code>python/sr/inference.py</code> — 加载 ONNX、CUDA EP 推理、分块处理 + Gaussian Blending、3 帧时序融合</li>
+<li><strong>Rust 层</strong>：<code>src/graph.rs</code> — 新增 SR 资产输入流，与 keying/beauty 共存</li>
+<li><strong>前端</strong>：<code>SRTab.tsx</code> — 设置面板 + WebGPU 对比预览</li>
+<li><strong>CUDA EP</strong>：已有 <code>_prepend_cuda_dll_path()</code> + onnxruntime-gpu 1.28.0 + nvidia-* 完整链路</li>
+<li><strong>NVENC 硬件编码</strong>：✅ h264_nvenc/hevc_nvenc 已实测可用（2026-08-03），<code>ffmpeg.rs build_pipe_encoder_cmd</code> 的 pipe 模式完全兼容，4K 编码 ~48fps 远超推理速度</li>
+</ul>
+</div>
+
+<div class="callout callout-info">
+<p><strong>全 GPU 流水线（推理 + 编码）：</strong></p>
+<pre><code>解码(NVDEC) → 超分推理(CUDA EP) → 时序平滑(CUDA) → 硬件编码(NVENC)
+   GPU            GPU                  GPU               GPU
+
+# CPU 仅负责调度和 I/O，不参与任何重计算
+# 端到端瓶颈 = 推理速度（~15-30fps），编码端零等待</code></pre>
+</div>
+
+<h3>5.6 分块处理（Tile-based Processing + Gaussian Blending）</h3>
+
+<p>4K 输出需要处理大尺寸帧，直接推理会 OOM。分块方案：</p>
+
+<pre><code># 分块策略
+tile_size = 320          # LR 空间分块大小（适配 20MB 模型）
+tile_pad = 20            # 重叠区域（适配更大模型的纹理生成）
+
+# Gaussian Blending Weights（关键改进）
+# 原方案仅用 tile_pad 裁剪，大模型下拼接缝可见
+# 修正：在 RGB 输出域用高斯权重加权平均，消除拼接缝
+
+import numpy as np
+
+def make_gaussian_weights(size, pad):
+    """生成高斯混合权重，中心为1，边缘衰减到0"""
+    total = size + 2 * pad
+    w = np.exp(-((np.arange(total) - total/2) ** 2) / (2 * (total/6) ** 2))
+    w = w / w.max()
+    # 2D 权重 = 外积
+    weight_2d = np.outer(w, w)
+    return weight_2d[pad:pad+size, pad:pad+size]  # 裁剪到输出尺寸
+
+# 处理流程
+for tile in tiles(frame):
+    sr_tile = model(tile)            # 320×320 → 640×640 (×2)
+    # Gaussian 加权而非简单裁剪
+    weight = make_gaussian_weights(tile_out_size, tile_pad * scale)
+    output[y1:y2, x1:x2] += sr_tile * weight
+    weight_sum[y1:y2, x1:x2] += weight
+
+output = output / weight_sum  # 归一化</code></pre>
+
+<div class="callout callout-info">
+<p><strong>为什么需要 Gaussian Blending：</strong>20MB 模型的纹理生成能力远强于 5MB 模型——每个分块独立推理时，纹理生成的随机性在边界处会产生不连续。简单的 tile_pad 裁剪只解决色彩不连续，解决不了纹理一致性。高斯权重让边界处自然过渡，彻底消灭天空/渐变区域的网格纹理错位。</p>
+</div>
+
+<!-- ============ Section 6 ============ -->
+<h2 id="s6">6. 详细开发计划与里程碑</h2>
+
+<div class="timeline">
+
+<div class="timeline-item">
+<h4>Phase 0: 架构验证与基线建立（2周）</h4>
+<p class="duration">⏱ 2 周</p>
+<ul>
+<li>用 RRDBNet 12 块架构 + <strong>合成随机权重</strong>（仅验证管线，不用预训练权重）搭建推理 demo</li>
+<li>在 RTX 5060 Ti 上测试 Tile=320，确认速度 ≥8fps 且显存 ≤4.5GB</li>
+<li>验证 Gaussian Blending 权重消除拼接缝的效果</li>
+<li>验证 ONNX 导出 + CUDA EP 推理</li>
+<li>验证 3 帧时序融合模块的前向传播</li>
+<li>产出：<code>python/sr/inference.py</code> + 速度/显存基准报告</li>
+</ul>
+</div>
+
+<div class="timeline-item">
+<h4>Phase 1: 数据准备与训练（5-6周）</h4>
+<p class="duration">⏱ 5-6 周</p>
+<ul>
+<li><strong>数据采集</strong>：场景分类 600 段视频（人像/风景/城市建筑/文字UI低光 各 150 段），每段 ≥100 帧</li>
+<li><strong>退化管线</strong>：实现二阶退化管道（模糊→下采样→噪声→JPEG→Sinc → 模糊→下采样→噪声→H.264→块丢失→振铃），每步随机参数+随机排序，每段 20 组退化</li>
+<li><strong>训练脚本</strong>：RRDBNet 12 块 + 3 帧输入融合模块 + L1/感知/GAN/时序损失</li>
+<li>RTX 5060 Ti 单卡训练，batch=2 + 梯度累积，FP16 混合精度，~150K 迭代，<strong>先训练 ×2</strong></li>
+<li>产出：第一版自研权重 <code>sr_rrdb12_x2_v1.onnx</code>（~10MB）</li>
+</ul>
+</div>
+
+<div class="timeline-item">
+<h4>Phase 2: Rust 导出引擎集成 + 进度心跳（2-3周）</h4>
+<p class="duration">⏱ 2-3 周</p>
+<ul>
+<li><code>src/types.rs</code>：新增 <code>SuperResolutionConfig</code>（mode/scale/strength/assetId）</li>
+<li><code>src/graph.rs</code>：SR 资产输入流 + overlay 合成</li>
+<li><code>src/lib.rs</code>：双导出路径闸门放行 <code>sr.*</code></li>
+<li><strong>进度心跳</strong>：Python 每 10 帧向 Rust 发送 <code>{"progress": 0.45, "eta_sec": 120}</code>，前端实时更新</li>
+<li><strong>断点续传</strong>：支持分段导出（30秒/段），异常退出后自动恢复</li>
+<li>与 keying/beauty 共存测试（确保不冲突）</li>
+<li>产出：完整导出链路 + 企业级工程韧性</li>
+</ul>
+</div>
+
+<div class="timeline-item">
+<h4>Phase 3: 前端 UI + WebGPU 预览（2周）</h4>
+<p class="duration">⏱ 2 周</p>
+<ul>
+<li><code>SRTab.tsx</code>：超清设置面板（模式/倍数/强度/生成按钮）</li>
+<li>WebGPU 对比预览（左右滑动对比原始 vs 超分）</li>
+<li><code>srRender.ts</code>：预览渲染逻辑（轻量 5MB 模型做快速单帧预览）</li>
+<li>进度条 + ETA 显示 + 显存/速度提示</li>
+<li>产出：完整前端交互</li>
+</ul>
+</div>
+
+<div class="timeline-item">
+<h4>Phase 4: 质量调优与发布（2-3周）</h4>
+<p class="duration">⏱ 2-3 周</p>
+<ul>
+<li>多场景实测（实拍/动漫/屏幕录制/老视频）</li>
+<li>退化参数调优（针对不同源素材质量自适应）</li>
+<li>性能优化（TensorRT 尝试、批处理、内存复用）</li>
+<li>2K 导出端到端验证（×2 超分）</li>
+<li>4K 导出验证（×2 超分 + 二次插值放大的过渡方案）</li>
+<li>产出：发布版 <code>sr_rrdb12_x2_v1.0.onnx</code> + 文档</li>
+</ul>
+</div>
+
+<div class="timeline-item">
+<h4>Phase 5（v2）: ×4 级联超分 + 持续迭代（持续）</h4>
+<p class="duration">⏱ 持续</p>
+<ul>
+<li>×4 通过"×2 超分 → 轻量去伪影 → 再 ×2"级联实现</li>
+<li>扩大训练数据量到 2000+ 段</li>
+<li>TensorRT 引擎加速</li>
+<li>按场景自动选模型（人像/风景/UI 专用权重）</li>
+</ul>
+</div>
+
+</div>
+
+<p><strong>总预计：13-16 周（v1 ×2 超分），可并行部分压缩到 10-12 周</strong>。×4 超分作为 v2 持续迭代。</p>
+
+<!-- ============ Section 7 ============ -->
+<h2 id="s7">7. 你必须知道但可能没想到的关键细节</h2>
+
+<h3>7.1 ⚠️ 许可证陷阱</h3>
+
+<div class="callout callout-danger">
+<p><strong>BSD 3-Clause 许可的是代码，不是权重！</strong></p>
+<p>Real-ESRGAN 的代码是 BSD 3-Clause（可用），但其预训练权重（<code>.pth</code> 文件）的许可证是"仅研究用途"。这意味着：</p>
+<ul>
+<li>✅ 你可以使用 RRDBNet 的 PyTorch 架构代码（也可使用 SRVGGNetCompact 做预览路径）</li>
+<li>✅ 你可以修改架构代码（如截取 12 块、添加时序融合模块）</li>
+<li>❌ 你<strong>不能</strong>直接使用 <code>RealESRGAN_x4plus.pth</code> 等预训练权重</li>
+<li>✅ 你<strong>可以</strong>用相同的训练方法、自己的数据训练自己的权重</li>
+</ul>
+<p>这与你的防侵权硬约束完全一致——架构开源可用，权重必须自研。</p>
+</div>
+
+<h3>7.2 ⚠️ 色彩空间一致性</h3>
+
+<p>视频超分涉及多个色彩空间转换，每一步都可能有精度损失：</p>
+
+<pre><code>YUV420 (源视频) → RGB (推理输入) → RGB (推理输出) → YUV420 (导出编码)
+
+# 潜在问题：
+# 1. YUV→RGB 矩阵不匹配（BT.601 vs BT.709 vs BT.2020）
+# 2. 有限范围 vs 完整范围 (limited vs full range)
+# 3. 超分后的 RGB 值可能超出 [0, 255] 范围
+# 4. 导出编码时 YUV→RGB→YUV 二次转换引入色偏
+
+# 解决方案：
+# - 全程使用 BT.709 矩阵 + limited range
+# - 推理前明确色彩空间标记
+# - 导出时直接从超分 RGB 编码，避免二次转换</code></pre>
+
+<h3>7.3 ✅ NVENC 硬件编码加速（2026-08-03 实测确认可用）</h3>
+
+<div class="callout callout-success">
+<p><strong>NVENC 已确认完全可用！</strong>2026-08-03 重新验证结果：</p>
+</div>
+
+<table>
+<tr><th>编码器</th><th>720p</th><th>1080p</th><th>4K</th><th>pipe 管道模式</th><th>状态</th></tr>
+<tr><td>h264_nvenc</td><td>✅</td><td>✅ (~7.9x 实时)</td><td>✅ (~2.85x 实时)</td><td>✅</td><td><span class="badge badge-green">可用</span></td></tr>
+<tr><td>hevc_nvenc</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td><span class="badge badge-green">可用</span></td></tr>
+<tr><td>av1_nvenc</td><td>❌</td><td>-</td><td>-</td><td>-</td><td><span class="badge badge-red">不可用</span></td></tr>
+</table>
+
+<div class="callout callout-info">
+<p><strong>对超清计划的影响——重大利好：</strong></p>
+<ul>
+<li><strong>4K 导出编码不再是瓶颈</strong>：h264_nvenc 编码 4K HEVC 可达 ~48fps（preset p6，25Mbps），远超推理速度，编码端零等待</li>
+<li><strong>推理+编码全 GPU 流水线</strong>：CUDA EP 做超分推理 → NVENC 做硬件编码，CPU 完全释放，端到端速度由推理速度决定（而非编码）</li>
+<li><strong>pipe 管道模式已验证</strong>：AIcut 导出管道（<code>ffmpeg.rs build_pipe_encoder_cmd</code>）正是用 stdin pipe 逐帧喂给 ffmpeg，与 NVENC 完全兼容</li>
+<li><strong>HEVC 10bit 输出</strong>：hevc_nvenc 支持 <code>p010le</code>（10bit YUV），4K 超分输出可用 10bit 保留更多色彩精度</li>
+<li>⚠️ av1_nvenc 不可用（RTX 5060 Ti 无 AV1 硬件编码器），但不影响 H.264/HEVC 主力编码路径</li>
+<li>⚠️ 历史记录"NVENC 损坏(-40)"是 2026-07-30 驱动 576.88（CUDA 卸载事故后最小驱动）下的旧状态；610.62 驱动已修复</li>
+</ul>
+</div>
+
+<pre><code># 推荐的超清导出编码参数
+# 4K H.264 (兼容性优先)
+-c:v h264_nvenc -preset p6 -rc vbr -b:v 25M -pix_fmt yuv420p
+
+# 4K HEVC 10bit (质量优先)
+-c:v hevc_nvenc -preset p6 -rc vbr -b:v 20M -pix_fmt p010le
+
+# pipe 模式（AIcut 导出管道）
+ffmpeg -y -f rawvideo -pix_fmt rgba -s 3840x2160 -i pipe:0 \
+  -c:v h264_nvenc -preset p6 -rc vbr -b:v 25M output.mp4</code></pre>
+
+<h3>7.4 ⚠️ 显存管理策略</h3>
+
+<p>RTX 5060 Ti 16GB 处理 4K 超分的显存预算（20MB 模型）：</p>
+
+<table>
+<tr><th>组件</th><th>显存占用</th><th>说明</th></tr>
+<tr><td>ONNX 模型</td><td>~600 MB</td><td>FP16 RRDBNet 12块 + 时序融合模块</td></tr>
+<tr><td>输入帧 (3帧 LR)</td><td>~150 MB</td><td>3×1920×1080×3×2bytes(FP16)</td></tr>
+<tr><td>输出帧 (HR)</td><td>~200 MB</td><td>3840×2160×3×2bytes</td></tr>
+<tr><td>中间特征 (Tile=320)</td><td>~2-3 GB</td><td>12块残差密集块特征图</td></tr>
+<tr><td>Gaussian Blending 权重</td><td>~50 MB</td><td>预计算的高斯权重矩阵</td></tr>
+<tr><td>WebGPU 预览</td><td>~1-2 GB</td><td>如果同时预览</td></tr>
+<tr><td><strong>合计</strong></td><td><strong>~4-6 GB</strong></td><td>16GB 够用，有余量</td></tr>
+</table>
+
+<h3>7.5 ⚠️ 处理速度预期管理</h3>
+
+<div class="callout callout-info">
+<p><strong>实际端到端速度估算（RTX 5060 Ti 16GB + 20MB RRDBNet + NVENC 硬件编码）：</strong></p>
+<table>
+<tr><th>源分辨率</th><th>目标</th><th>推理速度</th><th>编码速度 (NVENC)</th><th>端到端瓶颈</th><th>1分钟视频处理时间</th></tr>
+<tr><td>720p</td><td>2K (×2)</td><td>~10 fps</td><td>~120 fps</td><td>推理</td><td>~6 分钟</td></tr>
+<tr><td>1080p</td><td>2K (×2)</td><td>~8 fps</td><td>~120 fps</td><td>推理</td><td>~7.5 分钟</td></tr>
+<tr><td>480p</td><td>1080p (×2)</td><td>~15 fps</td><td>~120 fps</td><td>推理</td><td>~4 分钟</td></tr>
+<tr><td>720p</td><td>4K (×2+插值)</td><td>~10 fps</td><td>~48 fps</td><td>推理</td><td>~6 分钟</td></tr>
+</table>
+<p><strong>20MB 模型比 5MB 模型慢约 3-4 倍，但带来的是真实纹理生成能力质的飞跃。</strong>用户等 6-8 分钟换取画质提升，远比等 2 分钟换取"锐化过的模糊大图"更有感知价值。NVENC 编码速度（4K ~48fps，2K ~120fps）远超推理速度，编码端零等待。端到端瓶颈完全在推理端。</p>
+<p>对比：5MB 模型虽然推理快（~30fps），但画质天花板低——模型容量不足，对复杂真实纹理（皮肤毛孔、织物、文字笔画）的生成能力有限。用户大概率觉得"等了半天没啥变化"。</p>
+</div>
+
+<h3>7.6 ⚠️ 音频轨道处理</h3>
+
+<p>超分只处理视频流，音频必须原样保留：</p>
+<pre><code># 导出时音频流直接 copy，不经过超分管线
+ffmpeg -i sr_output.mp4 -i original.mp4 -map 0:v:0 -map 1:a:0 -c:v copy -c:a copy final.mp4</code></pre>
+
+<h3>7.7 ⚠️ 与现有效果的共存</h3>
+
+<p>AIcut 已有抠像和美颜效果。超分需要在正确的时间点插入：</p>
+
+<pre><code># 导出管线中的效果顺序（关键！）
+1. 解码原始帧
+2. 抠像 (keying) — 如果启用
+3. 美颜 (beauty) — 如果启用
+4. 超分 (super-resolution) — 最后施加，放大整体画面
+5. 蒙版/文字叠加 — 在超分后的高分辨率上叠加
+6. 转场 (transition) — 在超分后的帧之间
+7. 编码输出
+
+# 注意：超分应在所有像素级效果之后、所有矢量效果（文字/蒙版）之前
+# 因为矢量效果在高分辨率上直接渲染更清晰</code></pre>
+
+<h3>7.8 ⚠️ 训练数据合规</h3>
+
+<div class="callout callout-danger">
+<p>你的防侵权硬约束要求<strong>训练数据也必须合规</strong>。推荐数据来源：</p>
+<ul>
+<li>✅ 自有拍摄的高清视频（最佳）</li>
+<li>✅ 公有领域视频（如 NASA 公共视频、政府公开影像）</li>
+<li>✅ Creative Commons 授权视频（需检查具体 CC 条款）</li>
+<li>✅ 从开源电影/视频数据集获取（如 Vimeo-90K、REDS 数据集，需查许可证）</li>
+<li>❌ 不能从商业影视作品中截取</li>
+<li>❌ 不能使用可能有版权争议的素材</li>
+</ul>
+<p>建议：先用场景分类 600 段自有/合规视频训练 v1（人像/风景/城市建筑/文字UI低光 各 150 段），配合二阶退化 ×20 倍增强 = 12000 组有效训练对。后续逐步扩充到 2000+ 段提升质量。</p>
+</div>
+
+<h3>7.9 ⚠️ 退化模型：二阶退化管道（Real-ESRGAN 核心创新）</h3>
+
+<div class="callout callout-warn">
+<p><strong>退化管道是自研模型泛化能力的根源。</strong>简单将模糊+下采样+噪声+JPEG 按固定顺序施加，训练数据与真实世界的退化分布 gap 依然大。Real-ESRGAN 的核心竞争力在于<strong>二阶退化管道</strong>——退化链跑两遍，每步操作有随机参数和随机是否出现的概率。</p>
+</div>
+
+<h4>二阶退化管道设计</h4>
+
+<pre><code># 第一阶退化（模拟采集+传输退化）
+blur_1 = random_blur(img, type=random_choice(gaussian/isotropic/anisotropic),
+                     sigma=random(0.2, 4.0))
+down_1 = random_resize(blur_1, method=random_choice(bicubic/area/bilinear),
+                       scale=random(0.15, 1.5))
+noise_1 = add_noise(down_1, type=random_choice(gaussian/poisson),
+                    sigma=random(1, 30))
+jpeg_1 = jpeg_compress(noise_1, quality=random(30, 95))
+sinc_1 = maybe_sinc_filter(jpeg_1, probability=0.1)  # 概率出现
+
+# 第二阶退化（模拟二次编码/存储退化）
+blur_2 = random_blur(sinc_1, sigma=random(0.2, 3.0))  # 不同参数
+down_2 = random_resize(blur_2, scale=random(0.3, 1.2))
+noise_2 = add_noise(down_2, sigma=random(1, 25))
+# 第二阶用 H.264 压缩模拟视频编码退化
+h264 = h264_compress(noise_2, crf=random(18, 40))
+block_drop = maybe_block_drop(h264, probability=0.05)  # 块丢失
+ringing = maybe_ringing(block_drop, probability=0.1)   # 环状振铃
+
+final_LR = ringing  # 最终低质量训练样本</code></pre>
+
+<table>
+<tr><th>退化类型</th><th>参数范围</th><th>对应场景</th><th>阶</th></tr>
+<tr><td>高斯/各向异性模糊</td><td>σ=0.2~4.0</td><td>对焦不准/运动模糊</td><td>1+2</td></tr>
+<tr><td>下采样</td><td>面积/双三次/双线性</td><td>分辨率不足</td><td>1+2</td></tr>
+<tr><td>高斯+泊松噪声</td><td>σ=1~30</td><td>低光/传感器噪声</td><td>1+2</td></tr>
+<tr><td>JPEG压缩</td><td>quality=30~95</td><td>网络传输/存储</td><td>1</td></tr>
+<tr><td>Sinc滤波</td><td>概率 10%</td><td>混叠伪影</td><td>1</td></tr>
+<tr><td>H.264压缩</td><td>CRF=18~40</td><td>视频编码压缩</td><td>2</td></tr>
+<tr><td>块丢失 (Block Drop)</td><td>概率 5%</td><td>传输丢包/编码错误</td><td>2</td></tr>
+<tr><td>环状振铃 (Ringing)</td><td>概率 10%</td><td>压缩振铃效应</td><td>2</td></tr>
+<tr><td>色彩偏移</td><td>±10</td><td>白平衡不准</td><td>1+2</td></tr>
+</table>
+
+<div class="callout callout-info">
+<p><strong>关键：每步操作随机排序 + 随机参数 + 概率出现。</strong>不固定流水线顺序，让模型见到尽可能多样的退化组合。每段视频生成 20 组退化样本，600 段 × 20 组 = 12000 组有效训练对。</p>
+</div>
+
+<h3>7.10 ⚠️ 预览 vs 导出一致性</h3>
+
+<p>你已在抠像模块踩过"预览≠导出"的坑。超分同样需要注意：</p>
+<ul>
+<li><strong>预览</strong>：WebGPU shader 做简化版超分（或只做对比预览，不实时推理）</li>
+<li><strong>导出</strong>：Python ONNX 推理 → 资产生成 → Rust filtergraph 合成</li>
+<li>建议：预览阶段<strong>不做实时超分</strong>（太慢），而是用"前N帧超分预览"模式——用户点击预览后，对当前可见区域做超分，缓存结果</li>
+</ul>
+
+<h3>7.11 ⚠️ 模型版本管理</h3>
+
+<p>随着训练迭代，会有多个模型版本。需要：</p>
+<ul>
+<li>模型文件命名：<code>sr_rrdb12_x{scale}_v{version}.onnx</code></li>
+<li>前端显示当前模型版本和质量等级</li>
+<li>支持模型热替换（不需重新编译引擎）</li>
+<li>考虑不同场景的专用模型（实拍 vs 动漫 vs 屏幕录制）</li>
+</ul>
+
+<h3>7.12 ⚠️ 进度心跳与断点续传（企业级工程韧性）</h3>
+
+<div class="callout callout-info">
+<p><strong>超清增强是耗时 4-8 分钟的离线任务，必须有企业级的进度反馈和异常恢复机制。</strong></p>
+</div>
+
+<h4>进度心跳</h4>
+<pre><code># Python 推理进程每 10 帧向 Rust 发送进度
+# 通过 stdout JSON 行协议（与 keying/beauty 一致）
+{"type": "progress", "frame": 150, "total": 1800, "progress": 0.083, "eta_sec": 366}
+
+# Rust 侧解析后转发给前端 IPC
+ipc_main.emit("sr:progress", { frame, total, progress, etaSec })
+
+# 前端显示
+// SRTab.tsx
+<ProgressLabel>
+  超分处理中... 第 {frame}/{total} 帧 · 预计剩余 {etaMin} 分钟
+</ProgressLabel></code></pre>
+
+<h4>断点续传</h4>
+<pre><code># 分段导出策略（30秒/段）
+segment_duration = 30  # 秒
+segments = split_video(input, segment_duration)
+
+# 每段独立处理，输出到临时目录
+for i, seg in enumerate(segments):
+    output_path = f"tmp/sr_segment_{i:04d}.mp4"
+    if exists(output_path):
+        continue  # 已处理，跳过（断点恢复）
+    process_segment(seg, output_path)
+
+# 全部完成后合并
+concat_segments("tmp/sr_segment_*.mp4", final_output)</code></pre>
+
+<p>异常退出（断电/崩溃/用户取消）后重新启动，已完成的分段不会重复处理。用户也可以手动取消后从断点继续。</p>
+
+<!-- ============ Section 8 ============ -->
+<h2 id="s8">8. 风险评估与替代方案</h2>
+
+<h3>8.1 风险矩阵</h3>
+
+<table>
+<tr><th>风险</th><th>概率</th><th>影响</th><th>缓解措施</th></tr>
+<tr>
+<td>自研权重画质不达标</td>
+<td>中</td>
+<td>高</td>
+<td>20MB RRDBNet 12块比 5MB 模型有质的提升；场景分类数据 + 二阶退化增强泛化；先做 ×2 降低难度</td>
+</tr>
+<tr>
+<td>RTX 5060 Ti 训练 OOM</td>
+<td>中</td>
+<td>中</td>
+<td>batch=2 + 梯度累积；FP16 混合精度；减小 tile_size；20MB 模型比 64MB 更温和</td>
+</tr>
+<tr>
+<td>时序一致性效果不佳</td>
+<td>低</td>
+<td>中</td>
+<td>输入级 3 帧融合从训练阶段就约束时序（非后处理补丁）；场景切换检测重置时序状态</td>
+</tr>
+<tr>
+<td>4K 分块边界拼接缝</td>
+<td>中</td>
+<td>中</td>
+<td>Gaussian Blending Weights 在 RGB 输出域加权平均；Tile=320 + tile_pad=20</td>
+</tr>
+<tr>
+<td>处理速度过慢（用户等待时间长）</td>
+<td>中</td>
+<td>中</td>
+<td>TensorRT 加速（v1.1）；FP16 量化；进度条 + ETA 显示让用户等得明白；断点续传不怕中断</td>
+</tr>
+<tr>
+<td>NVENC 不可用导致编码慢</td>
+<td>低（已修复 ✅）</td>
+<td>低</td>
+<td>NVENC h264/hevc 已实测可用（2026-08-03），4K 编码 ~48fps 远超推理速度，编码端零等待</td>
+</tr>
+<tr>
+<td>退化管道覆盖不足导致真实视频泛化差</td>
+<td>中</td>
+<td>高</td>
+<td>二阶退化 + 随机排序 + 块丢失/振铃 + H.264 压缩模拟；场景分类数据覆盖 4 大类</td>
+</tr>
+</table>
+
+<h3>8.2 替代方案（如果自研训练不达标）</h3>
+
+<div class="callout callout-warn">
+<p><strong>Plan B：渐进式降级方案</strong></p>
+<p>如果 20MB RRDBNet 训练效果不理想，可按以下优先级降级：</p>
+<ol>
+<li><strong>调整模型规模</strong>：12 块不够 → 增加到 16 块（~28MB）；或降到 8 块（~14MB）验证是否训练数据问题而非模型容量问题</li>
+<li><strong>扩大数据量</strong>：600 段 → 1200 段，增加更多边缘场景（老电影/低光/高速运动）</li>
+<li><strong>双模策略</strong>：导出路径用 20MB 大模型（慢但画质好），预览路径用 5MB 轻量模型（快但画质一般），让用户自己选</li>
+<li><strong>知识蒸馏</strong>：用一个大模型做教师，蒸馏到自研学生模型——注意需评估教师模型权重的许可证</li>
+<li><strong>渐进式发布</strong>：先发布 ×2 超分（更容易做好），根据用户反馈迭代 ×4</li>
+</ol>
+</div>
+
+<h3>8.3 性能优化路线图</h3>
+
+<ol>
+<li><strong>v1.0</strong>：ONNX Runtime CUDA EP + FP16 + RRDBNet 12块 + 3帧时序融合 + Gaussian Blending + NVENC 硬件编码（基线，全 GPU 流水线）</li>
+<li><strong>v1.1</strong>：TensorRT 引擎（预期 2-3× 加速推理端，20MB 模型受益更大）</li>
+<li><strong>v1.2</strong>：帧批处理（batch=2，利用 GPU 并行）</li>
+<li><strong>v1.3</strong>：NVDEC 硬件解码加速（已验证可用，减少 CPU 解码开销）</li>
+<li><strong>v2.0</strong>：×4 级联超分（×2 → 去伪影 → 再 ×2）</li>
+<li><strong>v2.1</strong>：多模型路由（根据源视频质量/场景自动选择权重）</li>
+<li><strong>v2.2</strong>：FP8 量化（如果 onnxruntime 支持）</li>
+</ol>
+
+<hr>
+
+<div class="callout callout-info">
+<p><strong>报告总结（修订版）：</strong></p>
+<p>GitHub 上没有可直接使用的开源视频超分项目（因防侵权约束排除了所有预训练权重）。推荐方案（经审核修正）：<strong>RRDBNet 12 块中型架构（~20MB，BSD 3-Clause 合规）+ 自研训练 + 输入级 3 帧时序融合</strong>，复用 AIcut 已有的 Python/CUDA/Rust/WebGPU 基础设施。</p>
+<p><strong>核心修正（vs 原报告）：</strong></p>
+<ul>
+<li>模型从 5MB SRVGGNetCompact → 20MB RRDBNet 12块（离线场景用时间换画质）</li>
+<li>时序从后处理光流 → 输入级 3 帧 LR 特征融合（从训练阶段就约束一致性）</li>
+<li>训练数据从 500 段通用 → 场景分类 600 段 + 20 倍退化增强</li>
+<li>退化管道从简单叠加 → 二阶退化 + 随机排序 + 块丢失/振铃</li>
+<li>放大倍数从直接 ×4 → 先做 ×2，×4 级联实现（v2）</li>
+<li>分块拼接从 tile_pad 裁剪 → Gaussian Blending 加权平均</li>
+<li>新增进度心跳 + 断点续传（企业级工程韧性）</li>
+</ul>
+<p>预计 13-16 周完成 v1（×2 超分），可并行压缩到 10-12 周。本机 RTX 5060 Ti 16GB 推理和训练均可满足需求。</p>
+<p>核心优势：<strong>本地 AI 超分将超越剪映桌面版</strong>（剪映桌面版仅做插值放大，真 AI 超分依赖云端），实现隐私+成本+画质的最优组合。全 GPU 流水线（NVDEC 解码 → CUDA EP 推理 → NVENC 编码）已验证可用，编码端零等待，端到端瓶颈仅在推理端。</p>
+</div>
+
+</body>
+</html>

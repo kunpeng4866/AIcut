@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审核意见：视频超清增强开发计划</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --surface: #f8f9fa;
+  --surface-2: #f0f1f3;
+  --border: #e0e0e0;
+  --text: #1a1a1a;
+  --text-secondary: #555;
+  --accent: #2563eb;
+  --accent-light: #dbeafe;
+  --green: #16a34a;
+  --green-light: #dcfce7;
+  --red: #dc2626;
+  --red-light: #fee2e2;
+  --orange: #ea580c;
+  --orange-light: #fed7aa;
+  --purple: #7c3aed;
+  --purple-light: #ede9fe;
+  --code-bg: #f5f5f5;
+  --code-border: #d4d4d4;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+h1 { font-size: 2em; margin-bottom: 8px; border-bottom: 3px solid var(--accent); padding-bottom: 12px; }
+h1 + p { color: var(--text-secondary); font-size: 0.95em; margin-bottom: 32px; }
+h2 { font-size: 1.5em; margin: 36px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+h3 { font-size: 1.2em; margin: 24px 0 12px; }
+h4 { font-size: 1.05em; margin: 16px 0 8px; color: var(--text); }
+p { margin-bottom: 12px; }
+ul, ol { margin: 8px 0 16px 24px; }
+li { margin-bottom: 6px; }
+strong { color: var(--text); }
+code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.88em;
+}
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  padding: 16px;
+  overflow-x: auto;
+  margin: 12px 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+pre code { background: none; border: none; padding: 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 0.9em;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+}
+th { background: var(--surface-2); font-weight: 600; }
+tr:nth-child(even) { background: var(--surface); }
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 0.8em;
+  font-weight: 600;
+  margin-left: 4px;
+}
+.badge-red { background: var(--red-light); color: var(--red); }
+.badge-green { background: var(--green-light); color: var(--green); }
+.callout {
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+  border-left: 4px solid;
+}
+.callout-danger { background: var(--red-light); border-color: var(--red); }
+.callout-info { background: var(--accent-light); border-color: var(--accent); }
+.callout-warn { background: var(--orange-light); border-color: var(--orange); }
+.callout-success { background: var(--green-light); border-color: var(--green); }
+.callout p { margin-bottom: 4px; }
+.callout p:last-child { margin-bottom: 0; }
+.finding {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+}
+.finding h4 { margin-top: 0; }
+hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+</style>
+</head>
+<body>
+
+<h1>审核意见：视频超清增强开发计划</h1>
+<p>对《AIcut 视频超清增强开发计划 — 深度研究报告》的审核 · 编制日期 2026-08-03</p>
+
+<div class="callout callout-info">
+<p><strong>一句话总结：</strong>报告的方向（自研训练 + 合规权重）是对的，但架构选型（5MB 实时模型 + 后补时序）从第一性原理来看是错位的——它把一个离线画质任务当成了实时任务来设计。调整架构选型后，这是一个可以交付的方案。</p>
+</div>
+
+<!-- ============ Section 1 ============ -->
+<h2>一、用户视角：效果能满意吗？</h2>
+
+<div class="callout callout-warn">
+<p><strong>结论：有上限，难以达到"惊艳"水平。</strong></p>
+</div>
+
+<p>报告选用的 <strong>SRVGGNetCompact</strong> 是一个 5MB 的轻量 CNN，设计目标是在消费级 GPU 上跑实时推理。它的核心取舍是用模型容量换速度——这对实时预览有意义，但对于离线导出场景（用户愿意等待几分钟处理一个视频），取舍方向是<strong>反的</strong>。用户期望的是"等几分钟换来画质质的飞跃"，不是"很快就处理完但和双三次放大差别不大"。</p>
+
+<div class="finding">
+<h4>5MB 模型能做的事很有限</h4>
+<p>它本质上学习退化→高清的逆映射，模型容量直接影响能记住多少纹理模式。SRVGGNetCompact 仅 16 层 VGG 风格卷积，对复杂真实纹理（皮肤毛孔、织物纹理、文字笔画），"生成能力"天花板低。用户传一段 480p 老视频到 4K，看到的大概率是"锐化过的但依然模糊的大图"而非"真正变清晰"。</p>
+</div>
+
+<div class="finding">
+<h4>500 段训练数据不够</h4>
+<p>Real-ESRGAN 基于 DF2K（3450 张高清图像）+ OST + 更多数据集训练，且图像超分比视频超分简单（无时序约束）。500 段视频上用合成退化训练，退化分布覆盖会很窄，遇到退化模式稍有差异的真实视频就会翻车。</p>
+</div>
+
+<div class="finding">
+<h4>时序方案是后处理补丁，不是架构级解法</h4>
+<p>用户会注意到闪烁。光流 warp + 加权融合无法从根本消除逐帧独立超分造成的纹理不一致。静止背景区效果尚可，运动区域——恰好是用户最关注的——闪烁和涂抹会同时出现。</p>
+</div>
+
+<div class="finding">
+<h4>确实优于纯插值放大，但幅度有限</h4>
+<p>报告对剪映桌面版"只做插值"的分析是对的。AIcut 超分在"有没有纹理生成"维度上确实提供了插值没有的东西。但 v1 版本大概率只能让 1080p→2K 场景感受到一定提升（主要是锐度），480p→4K 这类大跨度场景会让用户失望。</p>
+</div>
+
+<!-- ============ Section 2 ============ -->
+<h2>二、设计工程师视角：是否"自带 bug"？</h2>
+
+<div class="callout callout-danger">
+<p><strong>结论：存在 5 个结构性隐患，不是实现细节的问题，是方案选择层面的。</strong></p>
+</div>
+
+<div class="finding">
+<h4>Bug 1：逐帧独立超分 + 后处理时序平滑是矛盾的设计</h4>
+<p>Phase 1 先做纯图像超分，Phase 2 再"追加"时序一致性。但 Phase 1 训练出的模型<strong>已学会独立生成纹理</strong>——每帧纹理生成带有随机性（来自 GAN 损失与随机输入交互）。Phase 2 试图用光流把这些结果"粘"在一起，但光流在低质量输入上本身就不准，warp 误差几帧内快速积累。结果：要么时序平滑不够（依然闪烁），要么过强（产生涂抹/ghosting）。</p>
+<p><strong>正确做法：训练时就引入时序约束</strong>——多帧输入（3~5 帧通道拼接），或在训练损失中加入时序一致性项。这是基本设计决策，不应放到 Phase 2 去"追加"。</p>
+</div>
+
+<div class="finding">
+<h4>Bug 2：分块处理 + 时序平滑的边界问题被严重低估</h4>
+<p>报告 5.6 节只用一句话带过："tile 边界需要跨块光流，需特殊处理"。这不是"特殊处理"能解决的——是本已脆弱的光流方案又加了一个维度。tile 边界处每块独立推理的纹理差异 + 光流在边界的不连续 = 显式缝合痕迹或闪烁边界。Real-ESRGAN 的分块重叠（tile_pad）只解决色彩不连续，解决不了纹理一致性。</p>
+</div>
+
+<div class="finding">
+<h4>Bug 3：训练数据规模和多样性不足以支撑"通用视频超清"</h4>
+<p>即使 5000 段，不做场景细分（室内/室外/夜景/运动/人像/文字/屏幕录制），模型只会学到退化到高清的<strong>统计平均映射</strong>——所有场景输出"平均高清"结果，而非真正的细节重建。Real-ESRGAN 的成功很大程度来自退化模型精心设计（二阶退化、Sinc 滤波器），但即使那样也会在某些真实场景翻车。自研轻量模型更难幸免。</p>
+</div>
+
+<div class="finding">
+<h4>Bug 4：模型选择与使用场景不匹配</h4>
+<p>SRVGGNetCompact 为"实时 AI 超分"设计。AIcut 的超分场景是<strong>离线批处理</strong>（用户点导出、等待 2-4 分钟）。用户愿意用时间换画质，用 5MB 实时模型做离线导出等于放弃所有模型容量可带来的画质提升。应选择更大模型——如 RRDBNet（64MB，23 RRDB block），在 RTX 5060 Ti 上全帧 1080p→4K 约 200-300ms/帧，切块后更慢但画质有保障。</p>
+</div>
+
+<div class="finding">
+<h4>Bug 5：退化模型的参数空间未被充分设计</h4>
+<p>报告 7.9 节列出退化类型，但未说明如何组合。Real-ESRGAN 核心竞争力在于<strong>二阶退化管道</strong>和高阶退化增强。简单将模糊+下采样+噪声+JPEG 按固定顺序施加，训练数据与真实世界的退化分布 gap 依然大。不把退化参数随机组合和排序策略做细，自研模型在真实视频上泛化会很差。</p>
+</div>
+
+<!-- ============ Section 3 ============ -->
+<h2>三、如果我来设计</h2>
+
+<p>从第一性原理出发：目标是让低分辨率/低质量视频变成清晰的高分辨率视频。</p>
+
+<h3>1. 架构：用足够大的模型</h3>
+<p>使用 <strong>RRDBNet</strong>（~64MB）或自定义类似规模的残差密集网络，而非 SRVGGNetCompact（5MB）。用户感知的是"最终画质"而非"处理速度是否达到实时"。可在导出路径用大模型、预览路径用轻量模型做双模策略。</p>
+
+<h3>2. 时序方案：多帧输入通道拼接，不做后处理</h3>
+<p>放弃"逐帧超分 + 光流后处理"二段式。改为：</p>
+<ul>
+<li><strong>3 帧通道拼接</strong>：相邻 3 帧 RGB 拼接为 9 通道输入，网络自己学习利用邻帧信息做一致性重建</li>
+<li><strong>或滑动窗口轻量时序网络</strong>：极简 RNNDB（残差循环块）在特征空间做时序传播，不需要光流。比 BasicVSR++ 复杂度低一个数量级，但比后处理光流方案原理上正确得多</li>
+</ul>
+<p>放弃 Phase 2 的"追加时序"思路，从第一天就把时序嵌入网络架构。</p>
+
+<h3>3. 数据：质大于量，多样性大于规模</h3>
+<p>按场景分类收集，而非单纯凑数量：</p>
+<ul>
+<li>200 段自然风光（天空、树木、水面——纹理规律）</li>
+<li>200 段人物（面部、皮肤、头发——GAN 最易出 artifact 的区域）</li>
+<li>100 段城市/建筑（几何线条——对锐化最敏感的测试集）</li>
+<li>100 段文字/UI（需边缘保真而非纹理生成）</li>
+<li>100 段低光/噪声场景（降噪能力要求高）</li>
+</ul>
+<p>每段视频从多个退化配置生成低质版本（每种退化参数随机采样 3-5 次），翻倍有效数据量。</p>
+<p><strong>先只做 ×2 超分。</strong>×2 难度远低于 ×4，更容易训练好。×4 可级联两次 ×2 实现（中间插轻量去伪影），或作为 v2 目标。</p>
+
+<h3>4. 退化管道：认真做二阶退化</h3>
+<p>在每个训练样本退化链中<strong>随机排序和组合不同退化操作</strong>：</p>
+<pre><code>模糊(随机类型+随机参数) → 下采样 → 噪声 → JPEG压缩
+  → 模糊(再次) → 下采样 → 噪声 → JPEG压缩(再次)</code></pre>
+<p>每个操作有随机强度和随机是否出现的概率。</p>
+
+<h3>5. 导出策略</h3>
+<ul>
+<li>第一遍：全视频解码并分析每帧质量（噪声水平、运动量、场景切换检测）</li>
+<li>第二遍：每帧 SR（多帧输入，分块处理）</li>
+<li>第三遍：编码输出（NVENC）</li>
+</ul>
+<p>场景切换处重置时序状态，高运动帧降低时序融合权重，低噪声帧降低去噪强度保留更多原始细节。</p>
+
+<h3>6. 效果顺序</h3>
+<p>SR 在所有像素级效果之后、矢量效果之前——<strong>报告这一点是正确的</strong>。</p>
+
+<h3>7. 渐进交付</h3>
+<table>
+<tr><th>版本</th><th>目标</th><th>工期</th></tr>
+<tr><td>v0（验证）</td><td>随机权重跑通全管线，确认 Python→ONNX→Rust 集成可行</td><td>2 周</td></tr>
+<tr><td>v1（可用上线）</td><td>×2 超分、多帧输入、场景分类数据处理、50-80MB 模型</td><td>12-16 周</td></tr>
+<tr><td>v2（画质迭代）</td><td>扩大数据量、二阶退化、×4 超分、TensorRT 加速</td><td>持续</td></tr>
+<tr><td>v3（体验优化）</td><td>分级输出质量、预估时间显示、按场景自动选模型</td><td>持续</td></tr>
+</table>
+
+<!-- ============ Section 4 ============ -->
+<h2>四、总结建议</h2>
+
+<table>
+<tr><th>#</th><th>问题</th><th>建议</th></tr>
+<tr>
+<td>1</td>
+<td>SRVGGNetCompact 太轻</td>
+<td>换 RRDBNet 或自定义中等规模网络，牺牲速度换画质</td>
+</tr>
+<tr>
+<td>2</td>
+<td>逐帧 SR + 后处理时序是错误的两段式</td>
+<td>改多帧输入通道拼接，从训练阶段就嵌入时序</td>
+</tr>
+<tr>
+<td>3</td>
+<td>500 段训练数据不足</td>
+<td>按场景分类收集，退化增强翻倍有效数据量，先只做 ×2</td>
+</tr>
+<tr>
+<td>4</td>
+<td>退化管道过于简单</td>
+<td>实现二阶退化管道，随机组合退化操作</td>
+</tr>
+<tr>
+<td>5</td>
+<td>分块 + 时序的边界问题未解决</td>
+<td>提前在 Phase 0 验证阶段就测试，不要留到后期</td>
+</tr>
+</table>
+
+<hr>
+
+<div class="callout callout-success">
+<p><strong>报告中应保留、做得好的部分：</strong></p>
+<ul>
+<li>Python bridge → JSON stdout → Rust <code>Command::new</code> 的集成模式（与 keying/beauty 保持一致）</li>
+<li>ONNX + onnxruntime-gpu CUDA EP 的部署路径</li>
+<li>NVENC 硬编码释放 CPU 的思路</li>
+<li>效果管线顺序（SR 放在像素效果之后、矢量效果之前）</li>
+<li>预览不做实时 SR，改做当前帧/区域的预览</li>
+<li>模型版本管理和热替换的设计</li>
+</ul>
+</div>
+
+</body>
+</html>

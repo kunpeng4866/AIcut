@@ -58,6 +58,11 @@ export function renderSRCompare(
 
   const origVideo = mkVideo(originalPath);   // 主时钟
   const srVideo = mkVideo(srPath);           // 从时钟
+  // 对比预览的音频策略：超分视频与原图共用同一份（从源复制的）音轨，
+  // 若两者都出声会相位叠加、发闷。故只让主时钟（原图）出声，超分侧保持静音——
+  // 用户拖动分割线时听到的就是这条音轨，与「看到超分画面」一一对应。
+  origVideo.muted = false;
+  srVideo.muted = true;
 
   // 超分层包一层容器：clip-path 作用在容器上，避免影响 video 自身的 object-fit 计算
   const srLayer = document.createElement('div');

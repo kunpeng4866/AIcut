@@ -7,7 +7,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { uid } from '../../utils/clipFactories';
-import type { ClipConfig, SRConfig } from '../../types';
+import type { ClipConfig, SRConfig, SRProgress } from '../../types';
 import { renderSRCompare } from '../../utils/srRender';
 
 // 复用面板配色（深色 #16213e / #0f3460 边框 / #e94560 强调）
@@ -121,9 +121,38 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
 
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 实时进度（由 sr:progress 事件驱动）：阶段 / 帧 / 总帧 / 速度 / 预计剩余
+  const [progress, setProgress] = useState<SRProgress | null>(null);
   // 本次生成的产物信息（用于展示耗时/分辨率等，生成后才有）
   const [lastResult, setLastResult] = useState<{ width?: number; height?: number; frames?: number; elapsedSec?: number; provider?: string; encoder?: string } | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
+
+  // 订阅超清进度事件（与 ExportDialog 同范式：挂载时注册，组件生命周期内持续生效）
+  useEffect(() => {
+    window.aicut.sr.onProgress((p: SRProgress) => setProgress(p));
+    window.aicut.sr.onError((err: string) => { setError(err); });
+  }, []);
+
+  // 阶段中文标签
+  const STAGE_LABEL: Record<string, string> = {
+    load: '模型加载中', probe: '读取视频信息', infer: '逐帧超分推理中', done: '完成',
+  };
+  const stageLabel = (s?: string) => (s && STAGE_LABEL[s]) || '处理中';
+  const fmtEta = (sec?: number) => {
+    if (!sec || sec <= 0) return '';
+    const s = Math.round(sec);
+    const m = Math.floor(s / 60);
+    return m > 0 ? `预计剩余 ${m} 分 ${s % 60} 秒` : `预计剩余 ${s} 秒`;
+  };
+  // 进度百分比：total 未知时为「不确定」（返回 -1，UI 渲染条纹动画）
+  const progressPct = (p: SRProgress | null): number => {
+    if (!p) return 0;
+    if (p.done) return 100;
+    if (p.total && p.total > 0 && typeof p.frame === 'number') {
+      return Math.min(100, Math.round((p.frame / p.total) * 100));
+    }
+    return -1;
+  };
 
   const originalPath = srcAsset?.path ?? '';
   const srPath = srAsset?.path ?? '';
@@ -172,6 +201,7 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
     const strength = sr.strength ?? 1.0;
     const output = srOutputPath(assetPath);    // 绝对路径 <stem>_sr.mp4
     setError(null);
+    setProgress(null);
     setProcessing(true);
     try {
       // 结构变更：先压一次历史快照（生成会 addAsset + updateClip，二者内部亦各压快照）
@@ -179,7 +209,7 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
       // 与 keying:* 一致的 IPC 契约：handler 返回 { success, data, error } 对象，
       // 不可对返回值再做 JSON.parse（否则会得到 "[object Object]" is not valid JSON）。
       // opts 字段名用 snake_case，与 python/sr/bridge.py 的 opts 约定对齐。
-      const res = await (window as unknown as { aicut: { sr: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.sr.generate(
+      const res = await window.aicut.sr.generate(
         assetPath,
         JSON.stringify({
           scale,
@@ -191,11 +221,7 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
       );
       if (!res?.success) throw new Error(res?.error || '超清增强失败');
       // bridge.py 返回：{ ok, output_path, frames, width, height, fps, duration, scale, provider, encoder, elapsed_sec, ... }
-      const result = (res.data ?? {}) as {
-        ok?: boolean; error?: string; output_path?: string;
-        frames?: number; width?: number; height?: number; fps?: number; duration?: number;
-        provider?: string; encoder?: string; elapsed_sec?: number;
-      };
+      const result = res.data ?? {};
       if (result.error) throw new Error(result.error);
       const outPath = result.output_path || output;
       const assetId = uid('asset');
@@ -222,6 +248,8 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
 
   return (
     <div>
+      {/* 超清不确定进度条的条纹动画 keyframe（本面板内联，避免依赖全局 CSS） */}
+      <style>{`@keyframes srStripe { from { background-position: 0 0; } to { background-position: 28px 0; } }`}</style>
       <div style={S.row}>
         <span style={S.label}>启用</span>
         <ToggleBtn active={sr.enabled} onClick={toggleEnabled}>{sr.enabled ? '已开启' : '已关闭'}</ToggleBtn>
@@ -266,8 +294,39 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
       </GenerateButton>
 
       {processing && (
-        <div style={{ color: '#8895b3', fontSize: 10, marginTop: 6, lineHeight: 1.4 }}>
-          逐帧推理耗时较长（与时长、倍数、显卡相关），请勿关闭窗口。
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#8895b3', fontSize: 10, marginBottom: 4 }}>
+            <span>
+              {stageLabel(progress?.stage)}
+              {typeof progress?.frame === 'number'
+                ? ` · ${progress.frame}${progress.total && progress.total > 0 ? '/' + progress.total : ''} 帧`
+                : ''}
+            </span>
+            <span>
+              {progressPct(progress) >= 0 ? `${progressPct(progress)}%` : ''}
+              {progressPct(progress) < 0 && progress?.stage === 'infer' ? '计算中…' : ''}
+              {progressPct(progress) >= 0 && progress?.stage === 'infer' ? ` · ${fmtEta(progress.eta_sec)}` : ''}
+            </span>
+          </div>
+          <div style={{
+            height: 6, background: '#0f3460', borderRadius: 3, overflow: 'hidden',
+          }}>
+            <div style={{
+              height: '100%',
+              width: progressPct(progress) >= 0 ? `${progressPct(progress)}%` : '100%',
+              background: progressPct(progress) >= 0
+                ? 'linear-gradient(90deg, #e94560, #ff7a8a)'
+                : 'repeating-linear-gradient(45deg, #e94560 0 10px, #0f3460 10px 20px)',
+              backgroundSize: progressPct(progress) >= 0 ? '100% 100%' : '28px 28px',
+              animation: progressPct(progress) < 0 ? 'srStripe 0.7s linear infinite' : 'none',
+              transition: 'width 0.25s ease',
+            }} />
+          </div>
+          {progressPct(progress) < 0 && (
+            <div style={{ color: '#6b7794', fontSize: 10, marginTop: 4 }}>
+              逐帧推理耗时较长（与时长、倍数、显卡相关），请勿关闭窗口。
+            </div>
+          )}
         </div>
       )}
 

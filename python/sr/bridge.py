@@ -37,6 +37,15 @@ def _default_output_path(input_path: str) -> str:
     return stem + "_sr_output.mp4"
 
 
+def _report_progress(d: dict) -> None:
+    """把进度字典以 JSON 行写入真实 stderr，供上层（Rust / Electron）解析并推送前端。"""
+    try:
+        sys.stderr.write(json.dumps(d, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main(argv) -> int:
     if len(argv) < 2:
         sys.stderr.write("usage: bridge.py <input_path> <opts_json_string>\n")
@@ -67,8 +76,9 @@ def main(argv) -> int:
             tile_size=int(opts.get("tile_size", 256)),
             tile_overlap=int(opts.get("tile_overlap", 32)),
             provider=opts.get("provider", "cuda"),
+            progress_callback=_report_progress,
         )
-        result = sr.process_video(input_path, output_path, opts)
+        result = sr.process_video(input_path, output_path, opts, progress_callback=_report_progress)
         result["ok"] = True
         result["model_path"] = os.path.abspath(model_path)
     except Exception as e:  # noqa: BLE001

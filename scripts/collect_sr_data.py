@@ -29,7 +29,13 @@ import argparse
 import subprocess
 
 VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
-CATEGORIES = ("portrait", "landscape", "urban", "text_ui")
+CATEGORIES = ("portrait", "landscape", "urban", "text_ui",
+              "old_film", "low_light", "high_motion",
+              "food", "animal", "art", "screen_recording")
+
+CATEGORY_DEST = {
+    "screen_recording": os.path.join("text_ui", "screen_recording"),
+}
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -145,7 +151,8 @@ def main(argv=None):
                     help="本次最多归集多少段（0 表示不限）")
     args = ap.parse_args(argv)
 
-    dest_dir = os.path.join(args.dest_root, args.category)
+    dest_rel = CATEGORY_DEST.get(args.category, args.category)
+    dest_dir = os.path.join(args.dest_root, dest_rel)
     if not args.dry_run:
         os.makedirs(dest_dir, exist_ok=True)
 

@@ -205,7 +205,8 @@ class SuperResolver:
     """ONNX 超分推理器：3 帧时序输入 + LR 空间分块 + Gaussian Blending 合并。"""
 
     def __init__(self, model_path: str = None, scale: int = 2, tile_size: int = 256,
-                 tile_overlap: int = 32, provider: str = "cuda", log=None):
+                 tile_overlap: int = 32, provider: str = "cuda", log=None,
+                 progress_callback=None):
         self.log = log or (lambda m: (sys.stderr.write("[sr] " + str(m) + "\n"),
                                       sys.stderr.flush()))
         self.scale = int(scale)
@@ -254,9 +255,16 @@ class SuperResolver:
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
         self._weight_cache = {}
+        self.progress_cb = progress_callback
         self.log("模型加载成功: {} (EP={}, scale={}x, tile={}/{})".format(
             os.path.basename(self.model_path), self.provider,
             self.scale, self.tile_size, self.tile_overlap))
+        # 进度：模型加载完成（最慢的首步），上报 load 阶段，前端据此显示「模型加载中」
+        if self.progress_cb is not None:
+            try:
+                self.progress_cb({"stage": "load", "frame": 0, "total": 0})
+            except Exception:  # noqa: BLE001
+                pass
 
     # ── 单帧推理 ──
 
@@ -351,6 +359,15 @@ class SuperResolver:
         total = probe["nb_frames"]
         out_w, out_h = w * self.scale, h * self.scale
 
+        # 进度回调：优先用入参，回退到 __init__ 注入的；都为空则丢弃。
+        cb = progress_callback or self.progress_cb
+        # 阶段一：读取视频信息完成，进入逐帧推理前先上报 probe（此时 total 已知，进度条有分母）
+        if cb is not None:
+            try:
+                cb({"stage": "probe", "frame": 0, "total": total, "fps": 0, "eta_sec": 0})
+            except Exception:  # noqa: BLE001
+                pass
+
         out_dir = os.path.dirname(os.path.abspath(output_path))
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
@@ -383,13 +400,16 @@ class SuperResolver:
         wcmd = [ff, "-v", "error", "-y",
                 "-f", "rawvideo", "-pix_fmt", "rgb24",
                 "-s", "{}x{}".format(out_w, out_h),
-                "-r", "{:.6f}".format(fps), "-i", "pipe:0"]
-        if probe["has_audio"]:
-            wcmd += ["-i", input_path,
-                     "-map", "0:v:0", "-map", "1:a:0",
-                     "-c:a", "aac", "-b:a", "192k", "-shortest"]
-        else:
-            wcmd += ["-an"]
+                "-r", "{:.6f}".format(fps), "-i", "pipe:0",
+                "-i", input_path]
+        # 音轨：二次打开源文件取音频流，与超分视频（输入 0，来自 pipe 的逐帧结果）合并输出。
+        # 关键点：用「可选映射」 1:a:0? ——
+        #   · 源真有音频 → 必定带上，不再依赖 ffprobe 的 has_audio 判断（避免误判导致整段丢音轨）；
+        #   · 源无音频 → ffmpeg 自动跳过该映射、不报错。
+        # 音频统一重编码为 aac（对任意源音频编码都安全，避免 -c:a copy 在不兼容容器/编码时报错）。
+        # 这样无论 ffprobe 的 has_audio 是否误判，只要源有声音，超清视频就一定有声音。
+        wcmd += ["-map", "0:v:0", "-map", "1:a:0?",
+                 "-c:a", "aac", "-b:a", "192k", "-shortest"]
         wcmd += venc + ["-pix_fmt", "yuv420p", "-movflags", "+faststart", output_path]
         writer = subprocess.Popen(wcmd, stdin=subprocess.PIPE)
 
@@ -412,16 +432,15 @@ class SuperResolver:
             done += 1
             el = time.time() - t0
             speed = done / el if el > 0 else 0.0
-            if progress_callback is not None:
-                progress_callback(done, total, speed)
-            # 每 10 帧（及首帧）向 stderr 输出一行进度 JSON，供上层解析。
-            if done == 1 or done % 10 == 0:
+            # 逐帧上报推理进度（阶段 infer）。SR 帧率较低（~0.5fps），逐帧上报即可保证
+            # 进度条平滑、不长时间冻结；上层（Rust/main.ts）会按 JSON 解析并推送前端。
+            if cb is not None:
                 eta = (total - done) / speed if (total and speed > 0) else 0.0
-                sys.stderr.write(json.dumps({
-                    "frame": done, "total": total,
-                    "fps": round(speed, 3), "eta_sec": round(eta, 1),
-                }) + "\n")
-                sys.stderr.flush()
+                try:
+                    cb({"stage": "infer", "frame": done, "total": total,
+                        "fps": round(speed, 3), "eta_sec": round(eta, 1)})
+                except Exception:  # noqa: BLE001
+                    pass
 
         try:
             curr = _read_frame()
@@ -451,6 +470,15 @@ class SuperResolver:
 
         if writer.returncode != 0:
             raise RuntimeError("ffmpeg 编码失败（退出码 {}）".format(writer.returncode))
+
+        # 阶段四：全部帧推理完毕，上报 done（进度 100%）。total 可能为 0，用 done 兜底。
+        if cb is not None:
+            try:
+                cb({"stage": "done", "frame": done, "total": total or done,
+                    "fps": round(done / elapsed, 3) if elapsed > 0 else 0.0,
+                    "eta_sec": 0})
+            except Exception:  # noqa: BLE001
+                pass
 
         elapsed = time.time() - t0
         log("完成：{} 帧，用时 {:.2f}s（{:.2f} fps）".format(
