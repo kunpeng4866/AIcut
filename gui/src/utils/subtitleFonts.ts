@@ -1,17 +1,17 @@
 // 视频字幕 / 文字常用字体目录 + 字幕样式预设
-// 说明：已按需求剔除商用需授权的字体（微软雅黑、苹方）。
-// 所选字体要么随操作系统免费提供（楷体/黑体/仿宋），要么为开源/厂商永久免费商用
-// （思源系列、阿里巴巴普惠体、鸿蒙、站酷系），要么为平台原生（抖音美好体），要么为英文开源（Impact/Bebas）。
+// 原则：只保留“本机/随包确实有完整字形文件”的字体，避免下拉菜单出现无法正确导出的字体。
 //
-// 内置字体：思源/阿里普惠/鸿蒙/站酷 已随安装包内置到 gui/public/fonts（打包后位于
-// process.resourcesPath/fonts）。渲染器通过 @font-face 加载 /fonts/*.woff2(ttf)，
-// 导出时由 Rust 引擎按 BUNDLED_FONT_FILES 拼 fontfile= 路径，保证预览/导出字体一致。
+// 系统字体（楷体/黑体/仿宋）与 Impact：从 Windows 系统字体目录复制到 gui/public/fonts，
+// 随安装包分发。注意这些字体带有微软/方正授权，仅供本产品在授权环境下使用。
 //
-// ⚠️ 关键兜底：仓库里的 *.woff2 字体文件经实测为子集/不含完整中文字形，ffmpeg drawtext
-// 与浏览器 @font-face 加载后都会渲染成白色方框（tofu）。因此所有 CJK 字体统一兜底到
-// 已验证完整包含中文的 TTF（HarmonyOS-SansSC-Regular.ttf）。预览/导出的实际字形一致，
-// 仅字重/风格可能略有差异；后续如替换为完整 Source Han Sans / 阿里巴巴普惠体 TTF，
-// 可恢复标签对应的原始字体外观。
+// 思源黑体：从系统 NotoSansSC-VF.ttf 抽取 Regular/Bold 静态实例，生成 NotoSansSC-*.ttf，
+// 解决仓库原有 .woff2 子集缺失中文、ffmpeg drawtext 渲染为白色方框（tofu）的问题。
+//
+// 站酷快乐体 / 站酷酷黑 / Bebas Neue：已有完整 TTF，直接随包。
+//
+// 导出时 Rust 引擎按 BUNDLED_FONT_FILES 将字体 id 解析为 fontfile= 路径；若随包目录缺失，
+// 还会回退到系统字体库（C:/Windows/Fonts 等），最后再使用全局兜底字体。保证预览与导出
+// 尽量一致，不再强制把所有中文回退到单一字体。
 
 export interface SubtitleFont {
   id: string;            // 稳定标识（存进工程）
@@ -26,25 +26,18 @@ export interface SubtitleFont {
 export const SUBTITLE_FONT_GROUPS = ['系统字体', '开源·免费商用', '平台·品牌字体', '英文标题'] as const;
 
 export const SUBTITLE_FONTS: SubtitleFont[] = [
-  // ── 系统字体（随 OS 免费提供，个人/商用都无授权风险） ──
-  { id: 'kaiti', label: '楷体', group: '系统字体', css: "KaiTi, STKaiti, 'Kaiti SC', serif", note: '系统自带' },
-  { id: 'simhei', label: '黑体', group: '系统字体', css: "SimHei, Heiti SC, 'Microsoft YaHei', sans-serif", note: '系统自带' },
-  { id: 'fangsong', label: '仿宋', group: '系统字体', css: "FangSong, STFangsong, serif", note: '系统自带' },
+  // ── 系统字体（已打包进安装包，同时导出也会回退到系统字体库） ──
+  { id: 'kaiti', label: '楷体', group: '系统字体', bundled: 'KaiTi.ttf', css: "KaiTi, STKaiti, 'Kaiti SC', serif", note: '系统字体·已打包' },
+  { id: 'simhei', label: '黑体', group: '系统字体', bundled: 'SimHei.ttf', css: "SimHei, Heiti SC, 'Microsoft YaHei', sans-serif", note: '系统字体·已打包' },
+  { id: 'fangsong', label: '仿宋', group: '系统字体', bundled: 'FangSong.ttf', css: "FangSong, STFangsong, serif", note: '系统字体·已打包' },
 
-  // ── 开源 / 厂商永久免费商用（随安装包内置） ──
-  // 注：woff2 文件实测缺失中文字形，统一兜底到 HarmonyOS-SansSC-Regular.ttf。
-  { id: 'source-han-sans', label: '思源黑体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'Source Han Sans SC', 'Noto Sans SC', 'NotoSansSC', 'Source Han Sans', sans-serif" },
-  { id: 'alipuhui', label: '阿里巴巴普惠体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'Alibaba PuHuiTi', 'AlibabaPuHuiTi', 'Alibaba Sans', sans-serif" },
-  { id: 'source-han-serif', label: '思源宋体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'Source Han Serif SC', 'Noto Serif SC', 'NotoSerifSC', 'Source Han Serif', serif" },
-  { id: 'harmonyos', label: '鸿蒙字体', group: '开源·免费商用', bundled: 'HarmonyOS-SansSC-Regular.ttf', css: "'HarmonyOS Sans SC', 'HarmonyOS Sans', sans-serif" },
+  // ── 开源 / 免费商用（随安装包内置） ──
+  { id: 'source-han-sans', label: '思源黑体', group: '开源·免费商用', bundled: 'NotoSansSC-Regular.ttf', css: "'Source Han Sans SC', 'Noto Sans SC', 'NotoSansSC', 'Source Han Sans', sans-serif" },
   { id: 'zcool-kuaile', label: '站酷快乐体', group: '开源·免费商用', bundled: 'ZCOOLKuaiLe-Regular.ttf', css: "'ZCOOL KuaiLe', sans-serif" },
   { id: 'zcool-hei', label: '站酷酷黑', group: '开源·免费商用', bundled: 'ZCOOLQingKeHuangYou-Regular.ttf', css: "'ZCOOL QingKe HuangYou', sans-serif" },
 
-  // ── 平台 / 品牌原生字体（依赖用户系统/平台，未内置） ──
-  { id: 'douyin', label: '抖音美好体', group: '平台·品牌字体', css: "'Douyin Sans', '字节跳动字体', sans-serif" },
-
-  // ── 英文标题（开源；Bebas Neue 已内置，Impact 通常系统自带） ──
-  { id: 'impact', label: 'Impact', group: '英文标题', css: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" },
+  // ── 英文标题（Impact 已打包，Bebas Neue 已内置） ──
+  { id: 'impact', label: 'Impact', group: '英文标题', bundled: 'Impact.ttf', css: "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" },
   { id: 'bebas', label: 'Bebas Neue', group: '英文标题', bundled: 'BebasNeue-Regular.ttf', css: "'Bebas Neue', Impact, sans-serif" },
 ];
 
@@ -57,34 +50,38 @@ export function findFontCss(id?: string): string {
 }
 
 // 默认字体（新建文字/字幕片段时使用）
-// 使用已验证完整包含中文的 TTF，避免默认出现白色方框。
-export const DEFAULT_FONT_ID = 'harmonyos';
+// 使用已验证完整包含中文的随包 TTF。
+export const DEFAULT_FONT_ID = 'source-han-sans';
 
-// 字体 id → 实际随包字体文件名（供 Rust 引擎将 family 名解析为 fontfile 路径时使用）。
-// 由于 woff2 子集缺失中文，所有 CJK 字体 id 统一映射到完整 TTF 兜底文件。
+// 字体 id / 字体文件名 → 实际随包字体文件名（供 Rust 引擎将 family 名解析为 fontfile 路径时使用）。
+// 注：旧工程/导入工程里可能出现已被移除的 id（如 alipuhui、source-han-serif、douyin、harmonyos），
+// Rust 端会按关键字尽量解析到最接近的可用字体，避免 tofu。
 export const BUNDLED_FONT_FILES: Record<string, string> = {
-  // 思源黑体（导入工程时 family 名可能是下面任一写法）→ 兜底 TTF
-  'source-han-sans': 'HarmonyOS-SansSC-Regular.ttf',
-  'NotoSansSC-Regular.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  'NotoSansSC-Bold.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  // 思源宋体 → 兜底 TTF
-  'source-han-serif': 'HarmonyOS-SansSC-Regular.ttf',
-  'NotoSerifSC-Regular.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  'NotoSerifSC-Bold.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  // 阿里巴巴普惠体 → 兜底 TTF
-  'alipuhui': 'HarmonyOS-SansSC-Regular.ttf',
-  'AlibabaPuHuiTi-Regular.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  'AlibabaPuHuiTi-Bold.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  'AlibabaPuHuiTi-Thin.woff2': 'HarmonyOS-SansSC-Regular.ttf',
-  // 鸿蒙
-  'harmonyos': 'HarmonyOS-SansSC-Regular.ttf',
-  'HarmonyOS-SansSC-Regular.ttf': 'HarmonyOS-SansSC-Regular.ttf',
-  'HarmonyOS-SansSC-Bold.ttf': 'HarmonyOS-SansSC-Regular.ttf',
+  // 系统字体（已打包）
+  'kaiti': 'KaiTi.ttf',
+  'KaiTi': 'KaiTi.ttf',
+  'KaiTi.ttf': 'KaiTi.ttf',
+  'simhei': 'SimHei.ttf',
+  'SimHei': 'SimHei.ttf',
+  'SimHei.ttf': 'SimHei.ttf',
+  'fangsong': 'FangSong.ttf',
+  'FangSong': 'FangSong.ttf',
+  'FangSong.ttf': 'FangSong.ttf',
+  // 思源黑体（静态实例，已替换缺失中文的 woff2 子集）
+  'source-han-sans': 'NotoSansSC-Regular.ttf',
+  'NotoSansSC-Regular.ttf': 'NotoSansSC-Regular.ttf',
+  'NotoSansSC-Bold.ttf': 'NotoSansSC-Bold.ttf',
   // 站酷
   'zcool-kuaile': 'ZCOOLKuaiLe-Regular.ttf',
   'ZCOOLKuaiLe-Regular.ttf': 'ZCOOLKuaiLe-Regular.ttf',
   'zcool-hei': 'ZCOOLQingKeHuangYou-Regular.ttf',
   'ZCOOLQingKeHuangYou-Regular.ttf': 'ZCOOLQingKeHuangYou-Regular.ttf',
+  // 英文标题
+  'impact': 'Impact.ttf',
+  'Impact': 'Impact.ttf',
+  'Impact.ttf': 'Impact.ttf',
+  'bebas': 'BebasNeue-Regular.ttf',
+  'BebasNeue-Regular.ttf': 'BebasNeue-Regular.ttf',
 };
 
 // 注入 @font-face：让渲染器优先使用内置字体文件（离线与导出一致）。
@@ -144,9 +141,9 @@ export interface SubtitleStylePreset {
 // 字幕样式预设：字体 + 描边 + 配色 打包，一键应用到当前片段
 export const SUBTITLE_STYLE_PRESETS: SubtitleStylePreset[] = [
   { key: 'clear', label: '通用清晰', fontId: 'source-han-sans', color: '#ffffff', strokeColor: '#000000', strokeWidth: 2, strokeOpacity: 1, fontWeight: 'bold' },
-  { key: 'ecom', label: '电商带货', fontId: 'alipuhui', color: '#FFE135', strokeColor: '#000000', strokeWidth: 2, strokeOpacity: 1, fontWeight: 'bold' },
+  { key: 'ecom', label: '电商带货', fontId: 'simhei', color: '#FFE135', strokeColor: '#000000', strokeWidth: 2, strokeOpacity: 1, fontWeight: 'bold' },
   { key: 'guofeng', label: '古风情感', fontId: 'kaiti', color: '#F5F5F5', strokeColor: '#5C3A21', strokeWidth: 2.5, strokeOpacity: 1, fontWeight: 'normal' },
-  { key: 'tech', label: '数码科技', fontId: 'harmonyos', color: '#EAF2FF', strokeColor: '#1A3A6B', strokeWidth: 1.5, strokeOpacity: 1, fontWeight: 'bold' },
+  { key: 'tech', label: '数码科技', fontId: 'source-han-sans', color: '#EAF2FF', strokeColor: '#1A3A6B', strokeWidth: 1.5, strokeOpacity: 1, fontWeight: 'bold' },
   { key: 'title', label: '标题冲击', fontId: 'zcool-hei', color: '#ffffff', strokeColor: '#000000', strokeWidth: 3, strokeOpacity: 1, fontWeight: 'bold' },
   { key: 'news', label: '严肃新闻', fontId: 'fangsong', color: '#1A1A1A', strokeColor: '#ffffff', strokeWidth: 1, strokeOpacity: 1, fontWeight: 'normal' },
 ];

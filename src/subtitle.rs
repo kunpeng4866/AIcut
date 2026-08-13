@@ -204,107 +204,169 @@ pub fn build_drawtext_filters(track: &SubtitleTrack, width: u32, height: u32) ->
     }).collect()
 }
 
-/// 内置字体文件名（与前端 gui/public/fonts 保持一致）。导出时若 fontfile_dir 存在，
-/// 将 font_family 解析为具体字体文件路径，拼入 drawtext 的 fontfile=，保证与预览一致。
-///
-/// ⚠️ 关键兜底：仓库里的 *.woff2 字体文件经实测为子集/不含完整中文字形，ffmpeg drawtext
-/// 加载后渲染成白色方框（tofu）。因此所有 CJK 字体统一兜底到
-/// HarmonyOS-SansSC-Regular.ttf（已验证完整包含中文）。
+/// 随安装包内置的字体文件名（与前端 gui/public/fonts 保持一致）。
+/// 导出时若 fontfile_dir 存在，将 font_family 解析为具体字体文件路径，
+/// 拼入 drawtext 的 fontfile=，保证预览/导出一致。
 const BUNDLED_FONT_FILES: &[&str] = &[
-    // CJK 字体统一兜底到完整 TTF（woff2 仅作文件名兼容，实际不用于渲染）
-    "HarmonyOS-SansSC-Regular.ttf",
-    "HarmonyOS-SansSC-Bold.ttf",
+    "KaiTi.ttf",
+    "SimHei.ttf",
+    "FangSong.ttf",
+    "NotoSansSC-Regular.ttf",
+    "NotoSansSC-Bold.ttf",
     "ZCOOLKuaiLe-Regular.ttf",
     "ZCOOLQingKeHuangYou-Regular.ttf",
+    "Impact.ttf",
     "BebasNeue-Regular.ttf",
-    // 兼容旧工程/导入工程里可能出现的 woff2 文件名
-    "NotoSansSC-Regular.woff2",
-    "NotoSansSC-Bold.woff2",
-    "NotoSerifSC-Regular.woff2",
-    "NotoSerifSC-Bold.woff2",
-    "AlibabaPuHuiTi-Regular.woff2",
-    "AlibabaPuHuiTi-Bold.woff2",
-    "AlibabaPuHuiTi-Thin.woff2",
 ];
 
-/// 字体 id（前端存进工程的 font_family 值）→ 实际使用的内置文件名。
-/// 这是导出字体一致性的关键映射：渲染器写入工程的 font_family 即下方 id，
-/// 必须能精确解析到随包字体文件，否则导出会回退到系统字体，与预览不一致。
-///
-/// 由于 woff2 子集缺失中文，所有 CJK id 统一映射到 HarmonyOS-SansSC-Regular.ttf。
+/// 字体 id（前端存进工程的 font_family 值）→ 随包字体文件名。
+/// 这是导出一致性的关键映射：渲染器写入工程的 font_family 即下方 id，
+/// 必须能精确解析到随包字体文件。
 const FONT_ID_TO_FILE: &[(&str, &str)] = &[
-    ("source-han-sans", "HarmonyOS-SansSC-Regular.ttf"),
-    ("source-han-serif", "HarmonyOS-SansSC-Regular.ttf"),
-    ("alipuhui", "HarmonyOS-SansSC-Regular.ttf"),
-    ("harmonyos", "HarmonyOS-SansSC-Regular.ttf"),
+    ("kaiti", "KaiTi.ttf"),
+    ("simhei", "SimHei.ttf"),
+    ("fangsong", "FangSong.ttf"),
+    ("source-han-sans", "NotoSansSC-Regular.ttf"),
     ("zcool-kuaile", "ZCOOLKuaiLe-Regular.ttf"),
     ("zcool-hei", "ZCOOLQingKeHuangYou-Regular.ttf"),
+    ("impact", "Impact.ttf"),
     ("bebas", "BebasNeue-Regular.ttf"),
 ];
 
-/// 已知可完整渲染中文的兜底 TTF 文件。
-const CJK_FALLBACK_FILE: &str = "HarmonyOS-SansSC-Regular.ttf";
+/// 全局兜底：未知/未指定/旧工程 id 时使用，保证中文不渲染成 tofu。
+const CJK_FALLBACK_FILE: &str = "NotoSansSC-Regular.ttf";
 
-/// 返回指定字体 id/家族名对应的实际应使用的内置字体文件。
-/// 核心规则：任何会解析到 .woff2（子集缺失中文）或不存在文件的请求，
-/// 都回退到 CJK_FALLBACK_FILE，确保中文不会渲染成白色方框。
-fn effective_font_file(family_lc: &str) -> Option<&'static str> {
+/// 根据字体 id/家族名返回随包字体文件名。
+fn resolve_bundled_filename(family_lc: &str) -> Option<&'static str> {
     let family_lc = family_lc.trim();
-    // 空/未指定时统一使用兜底中文字体，避免旧工程或默认片段出现 tofu
-    if family_lc.is_empty() {
-        return Some(CJK_FALLBACK_FILE);
-    }
+    if family_lc.is_empty() { return None; }
     // 0) 按字体 id 精确匹配
     for (id, file) in FONT_ID_TO_FILE {
-        if family_lc.eq_ignore_ascii_case(id) {
-            return Some(file);
-        }
+        if family_lc.eq_ignore_ascii_case(id) { return Some(file); }
     }
     // 1) 若 font_family 已直接是内置文件名
-    if family_lc.ends_with(".woff2") || family_lc.ends_with(".ttf") || family_lc.ends_with(".otf") {
+    if family_lc.ends_with(".ttf") || family_lc.ends_with(".otf") || family_lc.ends_with(".woff2") {
         for f in BUNDLED_FONT_FILES {
-            if f.eq_ignore_ascii_case(family_lc) {
-                // woff2 子集缺失中文，必须转兜底；ttf 若是已知可用的可直接使用
-                if family_lc.ends_with(".woff2") {
-                    return Some(CJK_FALLBACK_FILE);
-                }
-                return Some(f);
-            }
+            if f.eq_ignore_ascii_case(family_lc) { return Some(f); }
         }
     }
-    // 2) 按字体家族关键字匹配（兼容手写/旧工程里的英文 family 名）
-    if family_lc.contains("bebas") {
-        return Some("BebasNeue-Regular.ttf");
+    // 2) 按字体家族关键字匹配（兼容手写/旧工程/导入工程里的 family 名）
+    if family_lc.contains("kaiti") { return Some("KaiTi.ttf"); }
+    if family_lc.contains("simhei") || family_lc.contains("heiti") { return Some("SimHei.ttf"); }
+    if family_lc.contains("fangsong") { return Some("FangSong.ttf"); }
+    if family_lc.contains("noto sans sc") || family_lc.contains("source han sans") || family_lc.contains("notosanssc") {
+        return Some("NotoSansSC-Regular.ttf");
     }
-    if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") {
-        return Some("ZCOOLKuaiLe-Regular.ttf");
+    if family_lc.contains("noto serif sc") || family_lc.contains("source han serif") || family_lc.contains("notoserifsc")
+        || family_lc.contains("alibaba") || family_lc.contains("puhuiti") || family_lc.contains("harmonyos") || family_lc.contains("harmony") {
+        // 这些字体已从安装包移除，尽量解析到思源黑体（同风格且完整）
+        return Some("NotoSansSC-Regular.ttf");
     }
-    if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") {
-        return Some("ZCOOLQingKeHuangYou-Regular.ttf");
-    }
-    // 其余全部 CJK 家族统一兜底到 HarmonyOS TTF
-    if family_lc.contains("noto") || family_lc.contains("source han") || family_lc.contains("alibaba")
-        || family_lc.contains("puhuiti") || family_lc.contains("harmonyos") || family_lc.contains("harmony")
-        || family_lc.contains("kaiti") || family_lc.contains("simhei") || family_lc.contains("fangsong")
-        || family_lc.contains("heiti") || family_lc.contains("song") || family_lc.contains("sans")
-        || family_lc.contains("serif") {
-        return Some(CJK_FALLBACK_FILE);
-    }
+    if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") { return Some("ZCOOLKuaiLe-Regular.ttf"); }
+    if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") { return Some("ZCOOLQingKeHuangYou-Regular.ttf"); }
+    if family_lc.contains("impact") { return Some("Impact.ttf"); }
+    if family_lc.contains("bebas") { return Some("BebasNeue-Regular.ttf"); }
+    if family_lc.contains("douyin") || family_lc.contains("meihao") { return Some("NotoSansSC-Regular.ttf"); }
     None
 }
 
-/// 根据 font_family 字符串解析内置字体文件绝对路径。
-/// 仅当 fontfile_dir 非空且文件存在时返回 Some；否则返回 None（交给 ffmpeg 按系统字体查找）。
-fn resolve_bundled_font(font_family: &Option<String>, fontfile_dir: &str) -> Option<String> {
+/// 返回常见系统字体目录（跨平台）。
+fn system_fonts_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if cfg!(target_os = "windows") {
+        if let Ok(windir) = std::env::var("WINDIR") {
+            dirs.push(std::path::PathBuf::from(windir).join("Fonts"));
+        }
+        dirs.push(std::path::PathBuf::from("C:/Windows/Fonts"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(std::path::PathBuf::from("/Library/Fonts"));
+        dirs.push(std::path::PathBuf::from("/System/Library/Fonts"));
+        if let Ok(home) = std::env::var("HOME") {
+            dirs.push(std::path::PathBuf::from(home).join("Library/Fonts"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        dirs.push(std::path::PathBuf::from("/usr/share/fonts"));
+        dirs.push(std::path::PathBuf::from("/usr/local/share/fonts"));
+        if let Ok(home) = std::env::var("HOME") {
+            dirs.push(std::path::PathBuf::from(home).join(".local/share/fonts"));
+        }
+    }
+    dirs
+}
+
+/// 根据字体 id/家族名返回系统字体候选文件名列表（Windows 为主）。
+fn system_font_candidates(family_lc: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if family_lc.contains("kaiti") {
+        out.extend(["simkai.ttf", "KaiTi.ttf"]);
+    }
+    if family_lc.contains("simhei") || family_lc.contains("heiti") {
+        out.extend(["simhei.ttf", "SimHei.ttf", "msyh.ttc", "msyhbd.ttc"]);
+    }
+    if family_lc.contains("fangsong") {
+        out.extend(["simfang.ttf", "FangSong.ttf"]);
+    }
+    if family_lc.contains("noto sans sc") || family_lc.contains("source han sans") || family_lc.contains("notosanssc") {
+        out.extend(["NotoSansSC-Regular.ttf", "NotoSansSC-VF.ttf"]);
+    }
+    if family_lc.contains("noto serif sc") || family_lc.contains("source han serif") || family_lc.contains("notoserifsc") {
+        out.extend(["NotoSerifSC-Regular.ttf", "NotoSerifSC-Regular.otf"]);
+    }
+    if family_lc.contains("impact") {
+        out.extend(["impact.ttf", "Impact.ttf"]);
+    }
+    if family_lc.contains("bebas") {
+        out.push("BebasNeue-Regular.ttf");
+    }
+    if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") {
+        out.push("ZCOOLKuaiLe-Regular.ttf");
+    }
+    if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") {
+        out.push("ZCOOLQingKeHuangYou-Regular.ttf");
+    }
+    if family_lc.contains("douyin") || family_lc.contains("meihao") {
+        out.extend(["DouyinSans.ttf", "DouyinMeihao.ttf", "DouyinSans-Bold.ttf"]);
+    }
+    out
+}
+
+/// 解析字体文件绝对路径。
+/// 策略：1) 随包字体目录；2) 系统字体目录；3) 全局兜底（NotoSansSC-Regular.ttf）。
+fn resolve_font(font_family: &Option<String>, fontfile_dir: &str) -> Option<String> {
     let dir = fontfile_dir.trim();
-    if dir.is_empty() { return None; }
     let family_lc = font_family.as_ref().map(|s| s.to_lowercase()).unwrap_or_default();
-    let file = effective_font_file(&family_lc).unwrap_or(CJK_FALLBACK_FILE);
-    let p = std::path::Path::new(dir).join(file);
-    if p.exists() { return Some(p.to_string_lossy().into_owned()); }
-    // 最终兜底：只要 HarmonyOS TTF 存在就返回它，绝不让中文 tofu 流出
-    let fallback = std::path::Path::new(dir).join(CJK_FALLBACK_FILE);
-    if fallback.exists() { return Some(fallback.to_string_lossy().into_owned()); }
+
+    // 1) 随包字体目录
+    if !dir.is_empty() {
+        if let Some(file) = resolve_bundled_filename(&family_lc) {
+            let p = std::path::Path::new(dir).join(file);
+            if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+        }
+    }
+
+    // 2) 系统字体目录
+    for sys_dir in system_fonts_dirs() {
+        if !sys_dir.exists() { continue; }
+        for cand in system_font_candidates(&family_lc) {
+            let p = sys_dir.join(cand);
+            if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+        }
+        // 若 family 本身已是文件名，直接尝试
+        if family_lc.ends_with(".ttf") || family_lc.ends_with(".otf") || family_lc.ends_with(".ttc") || family_lc.ends_with(".woff2") {
+            let p = sys_dir.join(&family_lc);
+            if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+        }
+    }
+
+    // 3) 最终兜底：随包目录里的全局 CJK 字体
+    if !dir.is_empty() {
+        let p = std::path::Path::new(dir).join(CJK_FALLBACK_FILE);
+        if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+    }
     None
 }
 
@@ -406,7 +468,7 @@ pub fn build_text_overlay_filter(
         }
     }
 
-    let fontfile = resolve_bundled_font(&text.font_family, fontfile_dir);
+    let fontfile = resolve_font(&text.font_family, fontfile_dir);
     Some(with_fontfile(base, &fontfile))
 }
 
@@ -433,7 +495,7 @@ pub fn build_subtitle_overlay_filters(
         _ => ((height as i64) / 2) - (fontsize as i64) / 2 + stroke_comp, // center 默认
     };
     let _ = width;
-    let fontfile = resolve_bundled_font(&sub.font_family, fontfile_dir);
+    let fontfile = resolve_font(&sub.font_family, fontfile_dir);
     sub.items.iter().filter(|i| !i.text.trim().is_empty()).map(|item| {
         let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
         let abs_start = timeline_in + item.start;
@@ -562,30 +624,41 @@ mod tests {
         assert!(fs[0].contains("bordercolor=#00ff00@0.60"), "subtitle stroke color must carry opacity, got: {}", fs[0]);
     }
 
-    // 关键回归：中文字体必须能解析到完整 TTF，不能回退到缺失中文的 woff2。
+    // 关键回归：中文字体必须能解析到完整 TTF，不能回退到缺失中文的 woff2；
+    // 系统字体在随包目录不存在时应能回退到系统字体库。
     #[test]
     fn test_cjk_font_fallback_to_ttf() {
         let fonts_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/gui/public/fonts");
-        // 默认/常用 id 应解析到 HarmonyOS TTF，而非 woff2
+        // 当前支持的字体 id 应解析到对应真实 TTF
         let cases = vec![
-            (Some("source-han-sans".into()), "HarmonyOS-SansSC-Regular.ttf"),
-            (Some("alipuhui".into()), "HarmonyOS-SansSC-Regular.ttf"),
-            (Some("source-han-serif".into()), "HarmonyOS-SansSC-Regular.ttf"),
-            (Some("harmonyos".into()), "HarmonyOS-SansSC-Regular.ttf"),
-            (Some("NotoSansSC-Regular.woff2".into()), "HarmonyOS-SansSC-Regular.ttf"),
-            (Some("AlibabaPuHuiTi-Regular.woff2".into()), "HarmonyOS-SansSC-Regular.ttf"),
-            (None, "HarmonyOS-SansSC-Regular.ttf"), // 未指定也兜底
+            (Some("source-han-sans".into()), "NotoSansSC-Regular.ttf"),
+            (Some("kaiti".into()), "KaiTi.ttf"),
+            (Some("simhei".into()), "SimHei.ttf"),
+            (Some("fangsong".into()), "FangSong.ttf"),
+            (Some("zcool-kuaile".into()), "ZCOOLKuaiLe-Regular.ttf"),
+            (Some("zcool-hei".into()), "ZCOOLQingKeHuangYou-Regular.ttf"),
+            (Some("NotoSansSC-Regular.woff2".into()), "NotoSansSC-Regular.ttf"), // 旧工程 woff2 映射到完整 TTF
+            (Some("alipuhui".into()), "NotoSansSC-Regular.ttf"),                   // 已移除 id 回退到可用 CJK
+            (Some("source-han-serif".into()), "NotoSansSC-Regular.ttf"),           // 已移除 id 回退到可用 CJK
+            (None, "NotoSansSC-Regular.ttf"),                                      // 未指定也兜底
         ];
         for (family, expected_tail) in cases {
-            let resolved = resolve_bundled_font(&family, fonts_dir);
+            let resolved = resolve_font(&family, fonts_dir);
             assert!(resolved.is_some(), "family={:?} should resolve", family);
             let path = resolved.unwrap();
             assert!(path.replace('\\', "/").ends_with(expected_tail),
                 "family={:?} expected to end with {}, got {}", family, expected_tail, path);
         }
         // 英文字体保持原样
-        let bebas = resolve_bundled_font(&Some("bebas".into()), fonts_dir);
+        let bebas = resolve_font(&Some("bebas".into()), fonts_dir);
         assert!(bebas.unwrap().replace('\\', "/").ends_with("BebasNeue-Regular.ttf"));
+
+        // 系统字体解析：给空随包目录时，应能回退到 C:/Windows/Fonts（本机测试环境）
+        let sys_kaiti = resolve_font(&Some("kaiti".into()), "");
+        if sys_kaiti.is_some() {
+            assert!(sys_kaiti.unwrap().replace('\\', "/").to_lowercase().contains("simkai"),
+                "kaiti should resolve to system simkai.ttf when bundled missing");
+        }
     }
 
     // 关键回归：描边粗细变化不应移动文字中心（导出侧 borderw 补偿）
