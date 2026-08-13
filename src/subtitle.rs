@@ -430,9 +430,11 @@ pub fn build_text_overlay_filter(
         Some("right") => format!("(w-text_w-20){}", off_str(x_off)),
         _ => format!("(w-text_w)/2{}", off_str(x_off)), // center 默认
     };
-    // y 定位：优先用 text.y（归一化 0-1，原点左下角 → 像素），否则垂直居中偏上
+    // y 定位：优先用 text.y（归一化 0-1，原点**左上角**，与前端预览 top:y*100% 一致）。
+    // 文字中心定在 y*h，故 top-left = y*h - text_h/2。
+    // ⚠️ 历史坑：曾误用 (1-y)*h（原点左下角），与预览镜像，导致多个文字上下顺序颠倒。
     let y_expr = if let Some(y) = text.y {
-        format!("((1-{})*h - text_h/2){}", y, off_str(y_off))
+        format!("({}*h - text_h/2){}", y, off_str(y_off))
     } else {
         format!("(h - {})/2{}", fontsize, off_str(y_off))
     };
@@ -594,6 +596,29 @@ mod tests {
         let text_part = f.split(":shadowx=").next().unwrap_or("");
         assert!(!text_part.contains("shadowx"), "shadow leaked into text positioning: {}", f);
         assert!(!text_part.contains("shadowy"), "shadow leaked into text positioning: {}", f);
+    }
+
+    // 关键回归：文字 y 坐标必须以「顶部」为原点（与前端预览 top:y*100% 一致），
+    // 不得再用 (1-y)*h（底部原点）造成上下镜像、多文字顺序颠倒。
+    #[test]
+    fn test_text_overlay_y_is_top_origin() {
+        // y=0.25 → 文字中心应在画面 25% 高度处 → top-left = 0.25*h - text_h/2
+        let t = TextOverlay {
+            content: "标题".into(),
+            font_size: Some(60),
+            y: Some(0.25),
+            ..Default::default()
+        };
+        let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080, "").unwrap();
+        assert!(f.contains("y=(0.25*h - text_h/2)"),
+            "y must be top-origin (y*h), got: {}", f);
+        // 反向断言：绝不能出现底部原点写法 (1-y)*h
+        assert!(!f.contains("(1-0.25)*h"),
+            "y must NOT use bottom-origin (1-y)*h, got: {}", f);
+        // y=0.5（居中）时中心应在 50% 高度
+        let mut tc = t.clone(); tc.y = Some(0.5);
+        let f2 = build_text_overlay_filter(&tc, 0.0, 5.0, 1920, 1080, "").unwrap();
+        assert!(f2.contains("(0.5*h - text_h/2)"), "center y must be 0.5*h, got: {}", f2);
     }
 
     // 描边回归：borderw/bordercolor 必须生成，且 bordercolor 带 alpha 反映 stroke_opacity

@@ -383,6 +383,9 @@ export default function PreviewCanvas() {
   // 画布框：把工程画布按 aspect ratio letterbox 到 stage 内，保证面板缩放时画幅/视频比例不变、所见即所得。
   const frameRef = useRef<HTMLDivElement>(null);
   const [frameSize, setFrameSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  // 预览舞台相对真实画布的显示缩放比：预览叠加层的字号/描边是绝对 CSS px，
+  // 必须乘它才能与导出（按真实画布像素）的视觉大小一致，否则预览字明显偏大。
+  const frameScale = frameSize.w > 0 ? frameSize.w / (project.canvas?.width || 1920) : 1;
   const [volume, setVolume] = useState(1);
 
   // 手动驱动片段（倒放/冻结/零速曲线）的预解码帧缓存：播放时按源时间直接取帧，绕开每帧 seek
@@ -582,7 +585,7 @@ export default function PreviewCanvas() {
       for (const clip of track.clips) {
         if (!(currentTime >= clip.timelineIn && currentTime < clip.timelineOut)) continue;
         if (clip.text) {
-          const parts = computeTextOverlayStyle(clip.text);
+          const parts = computeTextOverlayStyle(clip.text, frameScale);
           result.push({
             text: clip.text.content,
             kind: 'text',
@@ -608,13 +611,13 @@ export default function PreviewCanvas() {
               zIndex: 101, pointerEvents: 'none', maxWidth: '90%',
             };
             const subText: React.CSSProperties = {
-              color: s.color || '#fff', fontSize: s.fontSize || 24,
+              color: s.color || '#fff', fontSize: (s.fontSize || 24) * frameScale,
               fontFamily: findFontCss(s.fontFamily), textAlign: 'center' as any,
               textShadow: '0 0 10px rgba(0,0,0,0.8)', whiteSpace: 'pre-wrap' as any,
             };
             if (s.strokeWidth && s.strokeWidth > 0) {
               const subStrokeColor = hexToRgba(s.strokeColor || '#000', s.strokeOpacity ?? 1);
-              subText.WebkitTextStroke = `${s.strokeWidth}px ${subStrokeColor}`;
+              subText.WebkitTextStroke = `${s.strokeWidth * frameScale}px ${subStrokeColor}`;
               subText.paintOrder = 'stroke fill';
             }
             const subBgStyle: React.CSSProperties | null = isCenter ? null : {

@@ -117,6 +117,15 @@ impl RenderCommand {
             self.fps.to_string(),
             "-b:v".to_string(),
             format!("{}M", self.bitrate),
+            // 播放流畅 + 可拖拽：固定关键帧间隔（约每 2 秒一个），faststart 把 moov 前置
+            "-g".to_string(),
+            (self.fps * 2).to_string(),
+            "-keyint_min".to_string(),
+            self.fps.to_string(),
+            "-sc_threshold".to_string(),
+            "0".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
             "-s".to_string(),
             format!("{}x{}", self.resolution.0, self.resolution.1),
             "-pix_fmt".to_string(),
@@ -342,6 +351,11 @@ pub fn build_pipe_encoder_cmd(
         "-c:v".to_string(), codec.to_string(),
         "-crf".to_string(), crf.to_string(),
         "-b:v".to_string(), format!("{}M", bitrate_mbps),
+        // 播放流畅 + 可拖拽：固定关键帧间隔（约每 2 秒一个），faststart 把 moov 前置
+        "-g".to_string(), (fps * 2).to_string(),
+        "-keyint_min".to_string(), fps.to_string(),
+        "-sc_threshold".to_string(), "0".to_string(),
+        "-movflags".to_string(), "+faststart".to_string(),
         "-pix_fmt".to_string(), "yuv420p".to_string(),
         "-r".to_string(), fps.to_string(),
         output.to_string(),
@@ -495,6 +509,29 @@ mod tests {
             "含空格输入路径必须被引号包裹，实际: {}",
             s
         );
+    }
+
+    // 关键回归：导出编码器必须显式固定关键帧间隔 + faststart，避免导出视频播放卡顿
+    #[test]
+    fn test_build_output_args_has_keyframes_and_faststart() {
+        let mut cmd = RenderCommand::default();
+        cmd.fps = 30;
+        let args = cmd.build_output_args();
+        assert!(args.contains(&"-g".to_string()), "missing -g in output args");
+        assert!(args.contains(&"60".to_string()), "expected gop = 2*fps = 60");
+        assert!(args.contains(&"-keyint_min".to_string()), "missing -keyint_min");
+        assert!(args.contains(&"-movflags".to_string()), "missing -movflags");
+        assert!(args.contains(&"+faststart".to_string()), "missing +faststart");
+    }
+
+    #[test]
+    fn test_build_pipe_encoder_cmd_has_keyframes_and_faststart() {
+        let args = build_pipe_encoder_cmd("out.mp4", 1920, 1080, 30, "libx264", 18, 8.0);
+        assert!(args.contains(&"-g".to_string()), "missing -g in pipe encoder");
+        assert!(args.contains(&"60".to_string()), "expected gop = 2*fps = 60");
+        assert!(args.contains(&"-keyint_min".to_string()), "missing -keyint_min");
+        assert!(args.contains(&"-movflags".to_string()), "missing -movflags");
+        assert!(args.contains(&"+faststart".to_string()), "missing +faststart");
     }
 
     #[test]

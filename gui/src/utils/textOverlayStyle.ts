@@ -30,9 +30,12 @@ export function hexToRgba(hex: string, alpha: number): string {
  * - bgStyle：背景盒，独立一层，通过自身 transform 相对文字偏移（文字不动）
  * - textStyle：文字本体，阴影用 text-shadow（相对文字，不移动文字定位）
  */
-export function computeTextOverlayStyle(t: TextContent): TextOverlayParts {
+export function computeTextOverlayStyle(t: TextContent, scale = 1): TextOverlayParts {
   const x = t.x ?? 0.5;
   const y = t.y ?? 0.5;
+  // scale：预览舞台相对真实画布的显示缩放比（frameSize.w / canvas.width）。
+  // 预览叠加层定位用百分比（与画布等比），但 fontSize / 描边宽度是绝对 CSS px，
+  // 必须乘 scale 才能与导出（按真实画布像素）的视觉大小一致，否则预览字会偏大。
 
   // 锚点：始终在 (x, y) 居中，背景/阴影偏移不影响它
   const wrapperStyle: CssDict = {
@@ -59,7 +62,7 @@ export function computeTextOverlayStyle(t: TextContent): TextOverlayParts {
   const textStyle: CssDict = {
     position: 'relative',
     color: t.color || '#fff',
-    fontSize: t.fontSize || 48,
+    fontSize: (t.fontSize || 48) * scale,
     fontFamily: findFontCss(t.fontFamily),
     textAlign: (t.textAlign || 'center') as any,
     fontWeight: (t.fontWeight as any) || 'bold',
@@ -74,9 +77,9 @@ export function computeTextOverlayStyle(t: TextContent): TextOverlayParts {
   let stroke: StrokeSpec | null = null;
   if (t.strokeWidth && t.strokeWidth > 0) {
     const strokeColor = hexToRgba(t.strokeColor || '#000000', t.strokeOpacity ?? 1);
-    textStyle.WebkitTextStroke = `${t.strokeWidth}px ${strokeColor}`;
+    textStyle.WebkitTextStroke = `${t.strokeWidth * scale}px ${strokeColor}`;
     textStyle.paintOrder = 'stroke fill';
-    stroke = { color: strokeColor, width: t.strokeWidth };
+    stroke = { color: strokeColor, width: t.strokeWidth * scale };
   }
 
   // 背景：独立一层，相对文字偏移（绝不移动文字）
