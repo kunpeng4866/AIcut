@@ -416,11 +416,13 @@ pub fn build_mask_spec(masks: &[Mask], w: u32, h: u32, fps: u32, dur: f64) -> Op
     }
     // 文字类蒙版走 drawtext 独立流，不入 geq 并集。
     let mut text_masks: Vec<ImageMask> = Vec::new();
+    let mut ti = 0usize;
     for m in masks {
         if m.shape == "text" {
-            if let Some(im) = build_text_mask(m, w, h, fps, dur) {
+            if let Some(im) = build_text_mask(m, w, h, fps, dur, ti) {
                 text_masks.push(im);
             }
+            ti += 1;
         }
     }
     // alpha-max 并集：多蒙版取各蒙版 base alpha 的最大值（任一蒙版覆盖即可见）。
@@ -527,7 +529,7 @@ pub fn build_keying_spec(keying: &Option<KeyingConfig>, _w: u32, _h: u32) -> Opt
 
 /// 为 shape=="text" 的蒙版生成 drawtext 滤镜语句（自包含的多语句滤镜图）。
 /// 产出 RGBA 蒙版流（黑底白字，luma=字形覆盖度），供 graph.rs 用 alphamerge 合到主视频。
-pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64) -> Option<ImageMask> {
+pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64, idx: usize) -> Option<ImageMask> {
     let text = mask.text.trim();
     if text.is_empty() {
         return None;
@@ -546,9 +548,14 @@ pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64) -
     let escaped = text.replace('\\', "\\\\").replace('\'', "\\'").replace(':', "\\:");
     // 优先微软雅黑（支持中文），Windows 上 ffmpeg 接受正斜杠路径；路径中的冒号需转义。
     let fontfile = "C:/Windows/Fonts/msyh.ttc".replace(':', "\\:");
+    // 标签按文字蒙版序号(idx)唯一化：同一 clip 上多个文字蒙版时，原先硬编码的 [bgT]/[tx0]
+    // 会重复定义导致 ffmpeg "Label already exists" 崩溃。每个文字蒙版用独立标签后缀规避。
+    let bg = format!("bgT{}", idx);
+    let tx = format!("tx0{}", idx);
+    let txraw = format!("txraw{}", idx);
     let mut draw = format!(
-        "[bgT]drawtext=text='{text}':fontfile='{ff}':fontsize={fs}:fontcolor=white:x='(main_w-tw)/2+(({x})*main_w-main_w/2)':y='(main_h-th)/2+(({y})*main_h-main_h/2)'",
-        text = escaped, ff = fontfile, fs = fontsize, x = fmt(x), y = fmt(y)
+        "[{bg}]drawtext=text='{text}':fontfile='{ff}':fontsize={fs}:fontcolor=white:x='(main_w-tw)/2+(({x})*main_w-main_w/2)':y='(main_h-th)/2+(({y})*main_h-main_h/2)'",
+        bg = bg, text = escaped, ff = fontfile, fs = fontsize, x = fmt(x), y = fmt(y)
     );
     if sigma > 0.0 {
         draw.push_str(&format!(",gblur=sigma={s}", s = fmt(sigma)));
@@ -559,20 +566,20 @@ pub(crate) fn build_text_mask(mask: &Mask, w: u32, h: u32, fps: u32, dur: f64) -
         draw.push_str(",negate");
     }
     // 本机构建版本的 drawtext 不支持 rotation 选项（实测 "Option not found"），旋转改用独立
-    // rotate 滤镜实现。最终标签统一为 [tx0]（graph.rs 按 im.label 固定引用 [tx0]）；非 0 旋转时
-    // 先以临时 [txraw] 收尾 drawtext 链，再 rotate 到 [tx0]，rotate 用透明黑填充保证蒙版外为透明。
+    // rotate 滤镜实现。最终标签统一为 [tx{idx}]（graph.rs 按 im.label 动态引用）；非 0 旋转时
+    // 先以临时 [txraw{idx}] 收尾 drawtext 链，再 rotate 到 [tx{idx}]，rotate 用透明黑填充保证蒙版外为透明。
     let has_rot = rotation_rad.abs() > 1e-6;
     if has_rot {
-        draw.push_str("[txraw]");
-        draw.push_str(&format!(";[txraw]rotate=angle={a}:c=black@0[tx0]", a = fmt(rotation_rad)));
+        draw.push_str(&format!("[{txraw}]"));
+        draw.push_str(&format!(";[{txraw}]rotate=angle={a}:c=black@0[{tx}]", a = fmt(rotation_rad), txraw = txraw, tx = tx));
     } else {
-        draw.push_str("[tx0]");
+        draw.push_str(&format!("[{tx}]"));
     }
     let statement = format!(
-        "color=c=black@0:s={W}x{H}:d={DUR}:r={FPS},format=rgba[bgT];{draw}",
-        W = w, H = h, DUR = fmt(dur), FPS = fps, draw = draw
+        "color=c=black@0:s={W}x{H}:d={DUR}:r={FPS},format=rgba[{bg}];{draw}",
+        W = w, H = h, DUR = fmt(dur), FPS = fps, bg = bg, draw = draw
     );
-    Some(ImageMask { label: "tx0".into(), statement })
+    Some(ImageMask { label: tx, statement })
 }
 
 /// 返回蒙版形状在给定坐标变量下的**有符号距离**表达式（负=形状内部，0=轮廓）。

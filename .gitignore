@@ -53,3 +53,41 @@ data/sr_train/**/*.ogv
 data/sr_train/**/*.mov
 data/sr_train/**/*.mkv
 data/sr_train/**/*.avi
+
+# ===== 本地调试/构建/训练产物（非源码，严禁入库） =====
+# 临时 / 缓存目录
+.driver_temp/
+_archive/
+target-srverify/
+gui/tmp/
+
+# 构建产物（vite/electron build 输出，非源码）
+gui/build/
+
+# 训练 checkpoint（可复现、体积大，不入库；仅部署用模型权重经 LFS 入库）
+python/sr/checkpoints/
+python/models/sr_checkpoints/
+
+# 调试遗留：main.ts 的分支/备份副本（严禁与 main.ts 同时入库，避免混淆）
+gui/electron/main.ts.worktree
+gui/electron/main.ts.bailianonly
+
+# 调试遗留：原始帧 dump / probe 产物（裸 rgb/gray/avi）
+probe_*.rgb
+probe_*.gray
+p_*.rgb
+p_*.avi
+p_*.gray
+p_src.rgb
+p_out.rgb
+test_video_*.npy
+test_video_*.gray
+test_video_*_landmarks.json
+ORT.txt
+
+# 数据采集 / 训练诊断日志（非源码）
+data/sr_train/_*.log
+data/sr_train/_*.txt
+python/sr/_*.log
+python/sr/_*.txt
+python/sr/_*.py

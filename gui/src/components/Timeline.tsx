@@ -40,6 +40,17 @@ const RULER_HEIGHT = 28;
 const SNAP_THRESHOLD_CLIP = 0.5; // clip-to-clip snap threshold in seconds
 const BOUNDARY_THRESHOLD = 10; // px from track edge that triggers insert
 
+// 解析「光标落在第 trackIndex 条轨道的 yInTrack 处」应插入到轨道数组的哪个下标。
+// 首次拖入(onTrackDrop) 与 已有素材拖动(onMove2) 共用，确保「两轨之间」判定完全一致：
+//   上边界(yInTrack < BOUNDARY_THRESHOLD) → 插到该轨之前；下边界 → 插到该轨之后；
+//   轨内 → -1（不新建，直接放入已有轨道）；区外(trackIndex 越界) → trackCount（末尾追加）。
+const computeDropInsertIndex = (trackIndex: number, yInTrack: number, trackCount: number): number => {
+  if (trackIndex < 0 || trackIndex >= trackCount) return trackCount;
+  if (yInTrack < BOUNDARY_THRESHOLD) return trackIndex;
+  if (yInTrack > TRACK_HEIGHT - BOUNDARY_THRESHOLD) return trackIndex + 1;
+  return -1;
+};
+
 // Format seconds as M:SS.
 const fmt = (sec: number): string => {
   const m = Math.floor(sec / 60);
@@ -164,6 +175,7 @@ interface ClipItemProps {
   onMove: (newIn: number) => void;
   onMoveToTrack: (destTrackId: string, newIn: number) => void;
   onResize: (newIn: number, newOut: number) => void; onContext: (e: React.MouseEvent) => void;
+  setDragOver: (v: { time: number; trackIndex: number; yInTrack: number } | null) => void;
 }
 
 // Transition marker block: rendered at the right junction (timelineOut) of an
@@ -400,7 +412,7 @@ function SpeechBoundaryMarker({ x, t, orig, end, min, max, pxPerSec }: { x: numb
   );
 }
 
-function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, playhead, clipsOnTrack, sameTypeTrackIds, onSelect, onSplit, onMove, onMoveToTrack, onResize, onContext }: ClipItemProps) {
+function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, playhead, clipsOnTrack, sameTypeTrackIds, onSelect, onSplit, onMove, onMoveToTrack, onResize, onContext, setDragOver }: ClipItemProps) {
   const left = clip.timelineIn * zoom;
   const width = Math.max(4, (clip.timelineOut - clip.timelineIn) * zoom);
   const [dragTrackId, setDragTrackId] = useState<string | null>(null);
@@ -465,32 +477,80 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
     let startIn = clip.timelineIn;
     const startOut = clip.timelineOut;
     let started = false; // 首次移动才压一次历史快照（一次拖动=一次撤销），避免每帧克隆整工程
+    const originTrackId = track.id; // 记录起点轨道，拖后若变空则移除（主轨除外）
+    // 本次拖动过程中片段「曾停留过」的所有轨道（含起点），收尾时统一清理空轨（主轨与当前承载轨除外）。
+    const visitedTrackIds = new Set<string>([originTrackId]);
+    // 悬停在「两条轨道之间」时记录待建轨的下标；松手才真正建轨并把素材放入（与初次拖入一致：显示绿色线条，松手落位）。
+    let pendingInsertIdx: number | null = null;
+
+    // 把插入下标夹紧到「同类型轨道分组」范围内，确保不破坏文字/视频/音频的相对位置（需求③）。
+    const clampToGroup = (index: number, type: string): number => {
+      const tracks = useProjectStore.getState().project.tracks;
+      const groupIdxs = tracks.map((t, i) => (t.type === type ? i : -1)).filter((i) => i >= 0);
+      if (groupIdxs.length === 0) return -1; // 该类型尚无轨道：由调用方回退到按类型分组的插入
+      const lo = groupIdxs[0];
+      const hi = groupIdxs[groupIdxs.length - 1] + 1;
+      return Math.max(lo, Math.min(index, hi));
+    };
 
     const onMove2 = (ev: MouseEvent) => {
       if (!started) { useProjectStore.getState().pushHistorySnapshot(); started = true; }
       const dt = (ev.clientX - startX) / zoom;
       if (mode === 'move') {
         const newIn = Math.max(0, startIn + dt);
+        // 实时定位片段当前所在轨道（跨轨后 src 会变，不能再用闭包里的 track.id）
+        const state = useProjectStore.getState();
+        const clipTrack = state.project.tracks.find(t => t.clips.some(c => c.id === clip.id));
+        if (!clipTrack) return;
+        visitedTrackIds.add(clipTrack.id);
+
         const el = document.elementFromPoint(ev.clientX, ev.clientY);
         const trackEl = el?.closest('[data-track-id]') as HTMLElement | null;
         const hoverTrackId = trackEl?.dataset.trackId || null;
-        if (hoverTrackId && hoverTrackId !== track.id && sameTypeTrackIds.includes(hoverTrackId)) {
-          // Cross-track move to a same-type, unlocked track.
-          setDragTrackId(hoverTrackId);
-          onMoveToTrack(hoverTrackId, newIn);
-          const updated = useProjectStore.getState().project.tracks
-            .find(t => t.id === hoverTrackId)?.clips.find(c => c.id === clip.id);
-          if (updated) { startIn = updated.timelineIn; }
-          startX = ev.clientX;
-        } else {
-          // Normal move on the same track.
-          setDragTrackId(null);
-          onMove(newIn);
-          const updated = useProjectStore.getState().project.tracks
-            .find(t => t.id === track.id)?.clips.find(c => c.id === clip.id);
-          if (updated) { startIn = updated.timelineIn; }
-          startX = ev.clientX;
+
+        // 与 onTrackDrop 同源的落点判定：命中轨道的 DOM 下标 + 轨道内 Y => 「两轨之间」插入下标。
+        // 轨道在 DOM 中平铺无间隙，拖动时 elementFromPoint 永远命中某条轨道，故用 yInTrack 边界阈值识别「轨道之间」。
+        const lanes = Array.from(document.querySelectorAll('[data-track-id]')) as HTMLElement[];
+        const trackIndex = trackEl ? lanes.indexOf(trackEl) : -1;
+        let yInTrack = -1;
+        if (trackEl) {
+          const r = trackEl.getBoundingClientRect();
+          yInTrack = ev.clientY - r.top;
         }
+        const insertIdx = computeDropInsertIndex(trackIndex, yInTrack, lanes.length); // -1=轨内；否则=插入下标
+
+        // 复用初次拖入的绿色指示线：把落点写回 dragOver，轨道层据此画绿线（与 onTrackDrop 同源）。
+        setDragOver({ time: newIn, trackIndex, yInTrack });
+
+        if (insertIdx >= 0) {
+          // 悬停在「两条轨道之间」(或分组上下边缘)：显示绿色线条，不立即建轨，松手时才建轨并放入素材（与初次拖入一致）。
+          pendingInsertIdx = clampToGroup(insertIdx, clipTrack.type);
+          // 素材暂留在当前轨道、仅水平跟随光标，等待松手落位。
+          useProjectStore.getState().moveClipLive(clipTrack.id, clip.id, newIn);
+          setDragTrackId(null);
+        } else if (hoverTrackId) {
+          const ht = state.project.tracks.find(t => t.id === hoverTrackId);
+          if (ht && ht.type === clipTrack.type && !ht.locked) {
+            // 命中同类型未锁轨道内部：直接移入（保留「放到已有轨道」行为，素材跟随到该轨）
+            pendingInsertIdx = null;
+            setDragTrackId(hoverTrackId);
+            useProjectStore.getState().moveClipToTrackLive(clipTrack.id, clip.id, hoverTrackId, newIn);
+          } else {
+            // 类型不符/锁定：在同类分组边界处显示绿线，松手建轨承载（保持素材不丢失）
+            pendingInsertIdx = clampToGroup(trackIndex, clipTrack.type);
+            useProjectStore.getState().moveClipLive(clipTrack.id, clip.id, newIn);
+            setDragTrackId(null);
+          }
+        } else {
+          // 轨道区外（理论不会命中，因轨道平铺无间隙）：末尾显示绿线，松手建轨承载
+          pendingInsertIdx = clampToGroup(lanes.length, clipTrack.type);
+          useProjectStore.getState().moveClipLive(clipTrack.id, clip.id, newIn);
+          setDragTrackId(null);
+        }
+        const updated = useProjectStore.getState().project.tracks
+          .find(t => t.clips.some(c => c.id === clip.id))?.clips.find(c => c.id === clip.id);
+        if (updated) { startIn = updated.timelineIn; }
+        startX = ev.clientX;
       } else if (mode === 'left') {
         onResize(Math.min(startIn + dt, startOut - 0.1), startOut);
       } else {
@@ -502,14 +562,31 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
       window.removeEventListener('mousemove', onMove2);
       window.removeEventListener('mouseup', onUp);
       setDragTrackId(null);
+      setDragOver(null); // 清除绿色指示线
       // After a move, realign the main track / snap on the destination track.
       if (mode === 'move') {
-        const { project, realignProject } = useProjectStore.getState();
-        const clipTrack = project.tracks.find(t => t.clips.some(c => c.id === clip.id));
+        const { realignProject, removeEmptyTrack } = useProjectStore.getState();
+        const clipTrack = useProjectStore.getState().project.tracks.find(t => t.clips.some(c => c.id === clip.id));
         if (clipTrack) {
           const c = clipTrack.clips.find(c => c.id === clip.id);
           if (c) {
-            if (clipTrack.isMain) {
+            if (pendingInsertIdx !== null && pendingInsertIdx >= 0) {
+              // 延迟建轨：在松手处新建一条同类型轨道并把素材放入（与初次拖入一致：绿线 → 松手建轨）。
+              const newId = useProjectStore.getState().addTrackLiveAt(pendingInsertIdx, clipTrack.type);
+              useProjectStore.getState().moveClipToTrackLive(clipTrack.id, clip.id, newId, c.timelineIn);
+              const destTrack = useProjectStore.getState().project.tracks.find(t => t.id === newId);
+              if (destTrack) {
+                if (destTrack.isMain) {
+                  realignProject();
+                } else if (destTrack.type === 'video') {
+                  const cdur = c.timelineOut - c.timelineIn;
+                  const snapped = snapTime(c.timelineIn, cdur, destTrack.clips, clip.id, playhead, clipSnap);
+                  if (Math.abs(snapped - c.timelineIn) > 0.001) {
+                    useProjectStore.getState().updateClipLive(destTrack.id, clip.id, { timelineIn: snapped, timelineOut: snapped + cdur });
+                  }
+                }
+              }
+            } else if (clipTrack.isMain) {
               // 主轨：拖后一次性磁吸重排（拖动过程不重排，避免主轨被吸附抖动）
               realignProject();
             } else if (clipTrack.type === 'video') {
@@ -521,6 +598,13 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
               }
             }
           }
+        }
+        // 拖动收尾：清理因本次拖动而变空的轨道（起点轨 + 过程中曾停留过的轨），主视频轨与当前承载轨除外。
+        // 手动「+ 添加轨道」建的空轨不在 visitedTrackIds 内，不受影响。
+        const finalTrack = useProjectStore.getState().project.tracks.find(t => t.clips.some(c => c.id === clip.id));
+        for (const id of visitedTrackIds) {
+          if (id === finalTrack?.id) continue; // 承载片段的轨道不删
+          removeEmptyTrack(id);
         }
       }
     };
@@ -623,7 +707,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 }
 
 export default function Timeline() {
-  const { project, addTrack, insertTrackAt, addClip, removeClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
+  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
   const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, speechOverlay } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   // 左侧轨道控制列与右侧轨道区共享同一条垂直滚动：左侧自身不出现滚动条，
@@ -751,37 +835,18 @@ export default function Timeline() {
     const targetTrackType = assetToTrackType(asset.type);
     const { time, trackIndex, yInTrack } = pos;
 
-    // Near the top/bottom boundary => insert a new track above/below.
-    // Blank area (no track under cursor) => use main video track or add one.
-    const isNearTopBoundary = yInTrack < BOUNDARY_THRESHOLD;
-    const isNearBottomBoundary = yInTrack > TRACK_HEIGHT - BOUNDARY_THRESHOLD;
-    const isBlankArea = trackIndex < 0 || trackIndex >= project.tracks.length;
+    // 与已有素材拖动(onMove2)共用同一套「两轨之间」判定：computeDropInsertIndex。
+    // >=0 => 两轨之间(上/下边界)或区外末尾，需插入/追加一条新轨；-1 => 落在已有轨道内部。
+    const insertIdx = computeDropInsertIndex(trackIndex, yInTrack, project.tracks.length);
 
     let targetTrack: TrackConfig | undefined;
     let dropTime = time;
 
-    if (isBlankArea) {
-      // Outside the track stack: prefer the main video track, else add a track.
-      if (targetTrackType === 'video') {
-        const mainTrack = getMainVideoTrack();
-        if (mainTrack && !mainTrack.locked) {
-          targetTrack = mainTrack;
-          if (magneticSnap) {
-            dropTime = calcMagnetInsertTime(mainTrack.clips, time);
-          } else {
-            const clipDur = asset.duration || 5;
-            dropTime = snapTime(time, clipDur, mainTrack.clips, '', currentTime, clipSnap);
-          }
-        }
-      }
-      if (!targetTrack) {
-        const newId = addTrack(targetTrackType);
-        targetTrack = useProjectStore.getState().project.tracks.find(t => t.id === newId);
-      }
-    } else if (isNearTopBoundary || isNearBottomBoundary) {
-      // Insert a brand new track at the boundary.
-      const insertIdx = isNearTopBoundary ? trackIndex : trackIndex + 1;
-      const newId = insertTrackAt(insertIdx, targetTrackType);
+    if (insertIdx >= 0) {
+      // 两轨之间（上/下边界）或区外末尾：插入/追加一条同类型新轨承载该素材。
+      const newId = insertIdx >= project.tracks.length
+        ? addTrack(targetTrackType)
+        : insertTrackAt(insertIdx, targetTrackType);
       targetTrack = useProjectStore.getState().project.tracks.find(t => t.id === newId);
     } else {
       // Dropped inside an existing track.
@@ -791,7 +856,8 @@ export default function Timeline() {
           targetTrack = mainTrack;
           dropTime = calcMagnetInsertTime(mainTrack.clips, time);
         }
-      } else {
+      }
+      if (!targetTrack) {
         const hoverTrack = project.tracks[trackIndex];
         if (hoverTrack && hoverTrack.type === targetTrackType && !hoverTrack.locked) {
           targetTrack = hoverTrack;
@@ -1087,7 +1153,8 @@ export default function Timeline() {
                         onMove={(newIn) => moveClipLive(track.id, clip.id, newIn)}
                         onMoveToTrack={(destTrackId, newIn) => moveClipToTrackLive(track.id, clip.id, destTrackId, newIn)}
                         onResize={(newIn, newOut) => updateClipLive(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut })}
-                        onContext={(e) => onClipContext(e, track.id, clip.id)} />
+                        onContext={(e) => onClipContext(e, track.id, clip.id)}
+                        setDragOver={setDragOver} />
                       {clip.transition && (clip.transition.transitionType ?? 'none') !== 'none' && (clip.transition.duration ?? 0) > 0 && (
                         <TransitionMarker
                           clip={clip}

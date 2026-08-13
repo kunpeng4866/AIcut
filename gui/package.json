@@ -24,18 +24,36 @@
     "concurrently": "^8.2.0",
     "electron": "^31.0.0",
     "electron-builder": "^24.13.0",
+    "png-to-ico": "^3.0.2",
     "typescript": "^5.4.0",
     "vite": "^5.4.0",
-    "wait-on": "^7.2.0"
+    "wait-on": "^7.2.0",
+    "windows-shortcuts": "^0.1.6"
   },
   "build": {
     "appId": "com.aicut.desktop",
     "productName": "AIcut",
-    "files": ["dist/**/*", "dist-electron/**/*"],
-    "extraResources": [
-      { "from": "../target/release/aicut-engine.exe", "to": "engine/aicut-engine.exe" },
-      { "from": "public/fonts", "to": "fonts" }
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
     ],
-    "asarUnpack": ["fonts/**", "engine/**"]
+    "icon": "build/icon.ico",
+    "win": {
+      "icon": "build/icon.ico"
+    },
+    "extraResources": [
+      {
+        "from": "../target/release/aicut-engine.exe",
+        "to": "engine/aicut-engine.exe"
+      },
+      {
+        "from": "public/fonts",
+        "to": "fonts"
+      }
+    ],
+    "asarUnpack": [
+      "fonts/**",
+      "engine/**"
+    ]
   }
 }

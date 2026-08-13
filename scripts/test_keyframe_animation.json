@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "canvas": { "width": 1280, "height": 720, "fps": 30, "sample_rate": 48000 },
+  "assets": [
+    { "id": "a1", "type": "video", "path": "dummy.mp4", "duration": 5.0, "width": 1280, "height": 720, "codec": "h264" }
+  ],
+  "tracks": [
+    {
+      "id": "t1", "type": "video", "order": 0,
+      "clips": [
+        {
+          "id": "c1", "assetId": "a1",
+          "src_range": { "start": 0.0, "end": 5.0 },
+          "timelineIn": 0.0, "timelineOut": 5.0,
+          "volume": 1.0, "speed": 1.0,
+          "transform": { "x": 0.5, "y": 0.5, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0, "opacity": 1.0 },
+          "keyframes": {
+            "scale":   { "keyframes": [ { "time": 0.0, "value": 0.5, "easing": "Linear" }, { "time": 5.0, "value": 1.5, "easing": "Linear" } ] },
+            "rotation":{ "keyframes": [ { "time": 0.0, "value": 0.0, "easing": "Linear" }, { "time": 5.0, "value": 90.0, "easing": "Linear" } ] },
+            "opacity": { "keyframes": [ { "time": 0.0, "value": 0.2, "easing": "Linear" }, { "time": 5.0, "value": 1.0, "easing": "Linear" } ] },
+            "x":       { "keyframes": [ { "time": 0.0, "value": 0.0, "easing": "Linear" }, { "time": 5.0, "value": 1.0, "easing": "Linear" } ] },
+            "y":       { "keyframes": [ { "time": 0.0, "value": 0.0, "easing": "Linear" }, { "time": 5.0, "value": 1.0, "easing": "Linear" } ] },
+            "volume":  { "keyframes": [ { "time": 0.0, "value": 0.0, "easing": "Linear" }, { "time": 5.0, "value": 1.0, "easing": "Linear" } ] }
+          }
+        }
+      ]
+    }
+  ]
+}

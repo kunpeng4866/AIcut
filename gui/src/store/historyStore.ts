@@ -9,8 +9,8 @@ interface HistoryState {
   maxHistory: number;         // 最大历史数
 
   pushSnapshot: (snapshot: ProjectConfig) => void;
-  undo: () => ProjectConfig | null;  // 返回要恢复的状态
-  redo: () => ProjectConfig | null;
+  undo: (current: ProjectConfig) => ProjectConfig | null;  // 返回要恢复的状态
+  redo: (current: ProjectConfig) => ProjectConfig | null;
   canUndo: () => boolean;
   canRedo: () => boolean;
   clear: () => void;
@@ -21,7 +21,7 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   future: [],
   maxHistory: 50,
 
-  // 压入快照：清空 future，超过上限时丢弃最旧
+  // 压入快照：清空 future（新分支使旧重做失效），超过上限时丢弃最旧
   pushSnapshot: (snapshot) => {
     set((state) => {
       const past = [...state.past, snapshot];
@@ -30,27 +30,26 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
     });
   },
 
-  // 撤销：从 past 取出末尾，放入 future，返回上一个状态
-  undo: () => {
+  // 撤销：past 末尾是要恢复到的状态；把"当前状态"压入 future 供 redo 还原
+  // 注意：current 必须是调用时刻的实时工程状态（由 projectStore 传入）
+  undo: (current) => {
     const { past } = get();
     if (past.length === 0) return null;
-    const previous = past[past.length - 1];
+    const previous = past[past.length - 1]; // 上一次修改前的快照 = 撤销后应当恢复的状态
     set((state) => ({
       past: state.past.slice(0, -1),
-      future: [state.past[state.past.length - 1] ?? previous, ...state.future],
+      future: [current, ...state.future],
     }));
-    // 返回 past 中新的末尾（即要恢复到的状态），若空则返回 null
-    const newPast = get().past;
-    return newPast.length > 0 ? newPast[newPast.length - 1] : previous;
+    return previous;
   },
 
-  // 重做：从 future 取出头部，移回 past，返回要恢复的状态
-  redo: () => {
+  // 重做：future 头部是要恢复到的状态；把"当前状态"压回 past 供再次 undo
+  redo: (current) => {
     const { future } = get();
     if (future.length === 0) return null;
     const next = future[0];
     set((state) => ({
-      past: [...state.past, state.future[0]],
+      past: [...state.past, current],
       future: state.future.slice(1),
     }));
     return next;
