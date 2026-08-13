@@ -387,7 +387,7 @@ impl<'a> ExportPipeline<'a> {
         );
 
         // 收集文字/字幕 drawtext 滤镜
-        let mut text_filters: Vec<String> = Vec::new();
+        let mut text_filters: Vec<(f64, String)> = Vec::new(); // (clip.timeline_in, 滤镜串)
         let w = self.config.width;
         let h = self.config.height;
         // 内置字体目录（由 Electron 主进程通过 AICUT_FONTS_DIR 传入），用于导出时
@@ -398,19 +398,25 @@ impl<'a> ExportPipeline<'a> {
             for clip in &track.clips {
                 if let Some(t) = &clip.text {
                     if let Some(f) = subtitle::build_text_overlay_filter(t, clip.timeline_in, clip.timeline_out, w, h, &fontfile_dir) {
-                        text_filters.push(f);
+                        text_filters.push((clip.timeline_in, f));
                     }
                 }
                 if let Some(s) = &clip.subtitle {
-                    text_filters.extend(subtitle::build_subtitle_overlay_filters(s, clip.timeline_in, w, h, &fontfile_dir));
+                    for f in subtitle::build_subtitle_overlay_filters(s, clip.timeline_in, w, h, &fontfile_dir) {
+                        text_filters.push((clip.timeline_in, f));
+                    }
                 }
             }
         }
 
+        // 修复①顺序对齐：按 clip 起始时间(timeline_in)升序排序后再 join，
+        // 使导出滤镜链顺序与预览（轨道→clip 数组序 / 时序）一致。相同 timeline_in 保持稳定序。
+        text_filters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
         // 在输出文件参数之前插入 -vf（FFmpeg 中 -vf 需位于 -i 之后、输出之前）
         let mut encoder_cmd = encoder_cmd;
         if !text_filters.is_empty() {
-            let vf = text_filters.join(",");
+            let vf = text_filters.into_iter().map(|(_, f)| f).collect::<Vec<_>>().join(",");
             let output = encoder_cmd.pop().expect("encoder_cmd 不应为空");
             encoder_cmd.push("-vf".to_string());
             encoder_cmd.push(vf);

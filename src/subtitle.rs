@@ -220,31 +220,41 @@ const BUNDLED_FONT_FILES: &[&str] = &[
 /// 字体 id（前端存进工程的 font_family 值）→ 随包字体文件名。
 /// 仅包含随包字体；楷体/黑体/仿宋/Impact 等系统字体不在此映射，
 /// 由 resolve_font 的系统字体库步骤解析（不随包、不兜底到下面 CJK 字体）。
-const FONT_ID_TO_FILE: &[(&str, &str)] = &[
-    ("source-han-sans", "NotoSansSC-Regular.ttf"),
-    ("zcool-kuaile", "ZCOOLKuaiLe-Regular.ttf"),
-    ("zcool-hei", "ZCOOLQingKeHuangYou-Regular.ttf"),
-    ("bebas", "BebasNeue-Regular.ttf"),
+// (字体 id, 字重, 随包文件名)。字重可选 normal / bold。
+// 仅随包字体有独立 Bold 变体的是思源黑体；站酷 / Bebas 无 Bold 文件，bold 回退 Regular。
+const FONT_ID_TO_FILE: &[(&str, &str, &str)] = &[
+    ("source-han-sans", "normal", "NotoSansSC-Regular.ttf"),
+    ("source-han-sans", "bold", "NotoSansSC-Bold.ttf"),
+    ("zcool-kuaile", "normal", "ZCOOLKuaiLe-Regular.ttf"),
+    ("zcool-kuaile", "bold", "ZCOOLKuaiLe-Regular.ttf"),
+    ("zcool-hei", "normal", "ZCOOLQingKeHuangYou-Regular.ttf"),
+    ("zcool-hei", "bold", "ZCOOLQingKeHuangYou-Regular.ttf"),
+    ("bebas", "normal", "BebasNeue-Regular.ttf"),
+    ("bebas", "bold", "BebasNeue-Regular.ttf"),
 ];
 
 /// 全局兜底：未知/未指定/旧工程 id 时使用，保证中文不渲染成 tofu。
 const CJK_FALLBACK_FILE: &str = "NotoSansSC-Regular.ttf";
 
 /// 根据字体 id/家族名返回随包字体文件名（仅限随包字体，不含系统字体）。
+/// weight：normal / bold；bold 时优先返回 Bold 变体（思源黑体有独立 Bold 文件），
+/// 其它随包字体无 Bold 文件则回退 Regular。
 /// 系统字体（楷体/黑体/仿宋/Impact 等）不随包，交由 resolve_font 的系统字体库步骤解析。
-fn resolve_bundled_filename(family_lc: &str) -> Option<&'static str> {
+fn resolve_bundled_filename(family_lc: &str, weight: &str) -> Option<&'static str> {
     let family_lc = family_lc.trim();
+    let weight = weight.trim().to_lowercase();
+    let is_bold = weight == "bold";
     if family_lc.is_empty() { return None; }
-    // 0) 按字体 id 精确匹配（仅随包字体）
-    for (id, file) in FONT_ID_TO_FILE {
-        if family_lc.eq_ignore_ascii_case(id) { return Some(file); }
+    // 0) 按字体 id + 字重精确匹配（仅随包字体）
+    for (id, w, file) in FONT_ID_TO_FILE {
+        if family_lc.eq_ignore_ascii_case(id) && w.eq_ignore_ascii_case(&weight) { return Some(file); }
     }
     // 1) 若 font_family 已直接是随包字体文件名（.ttf/.otf/.woff2）
     if family_lc.ends_with(".ttf") || family_lc.ends_with(".otf") || family_lc.ends_with(".woff2") {
         for f in BUNDLED_FONT_FILES {
             if f.eq_ignore_ascii_case(family_lc) { return Some(f); }
         }
-        // 旧工程里的 woff2 子集文件名 → 映射到完整随包 TTF
+        // 旧工程里的 woff2 子集文件名 → 映射到完整随包 TTF（bold 时优先 Bold 变体）
         if family_lc.ends_with(".woff2") {
             if family_lc.contains("zcool") {
                 if family_lc.contains("kuai") { return Some("ZCOOLKuaiLe-Regular.ttf"); }
@@ -252,24 +262,33 @@ fn resolve_bundled_filename(family_lc: &str) -> Option<&'static str> {
             }
             if family_lc.contains("noto") || family_lc.contains("source") || family_lc.contains("alibaba")
                 || family_lc.contains("puhuiti") || family_lc.contains("harmony") || family_lc.contains("douyin") {
-                return Some("NotoSansSC-Regular.ttf");
+                return Some(if is_bold { "NotoSansSC-Bold.ttf" } else { "NotoSansSC-Regular.ttf" });
             }
         }
     }
     // 2) 关键字匹配（兼容旧工程/导入工程里的 family 名 → 映射到随包的完整 CJK 字体）
-    if family_lc.contains("noto sans sc") || family_lc.contains("source han sans") || family_lc.contains("notosanssc") {
-        return Some("NotoSansSC-Regular.ttf");
-    }
-    if family_lc.contains("noto serif sc") || family_lc.contains("source han serif") || family_lc.contains("notoserifsc")
+    //    先解析到 base 文件，bold 且命中思源黑体系列时升级到 Bold 变体。
+    let base = if family_lc.contains("noto sans sc") || family_lc.contains("source han sans") || family_lc.contains("notosanssc") {
+        Some("NotoSansSC-Regular.ttf")
+    } else if family_lc.contains("noto serif sc") || family_lc.contains("source han serif") || family_lc.contains("notoserifsc")
         || family_lc.contains("alibaba") || family_lc.contains("puhuiti") || family_lc.contains("harmonyos") || family_lc.contains("harmony") {
-        // 这些字体已从安装包移除，尽量解析到思源黑体（同风格且完整）
-        return Some("NotoSansSC-Regular.ttf");
+        Some("NotoSansSC-Regular.ttf") // 这些字体已从安装包移除，尽量解析到思源黑体（同风格且完整）
+    } else if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") {
+        Some("ZCOOLKuaiLe-Regular.ttf")
+    } else if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") {
+        Some("ZCOOLQingKeHuangYou-Regular.ttf")
+    } else if family_lc.contains("bebas") {
+        Some("BebasNeue-Regular.ttf")
+    } else if family_lc.contains("douyin") || family_lc.contains("meihao") {
+        Some("NotoSansSC-Regular.ttf")
+    } else {
+        None
+    };
+    if let Some(b) = base {
+        // 注：kaiti/simhei/fangsong/impact 等系统字体不在此返回，交系统字体库步骤解析。
+        if is_bold && b == "NotoSansSC-Regular.ttf" { return Some("NotoSansSC-Bold.ttf"); }
+        return Some(b);
     }
-    if family_lc.contains("zcool kuai") || family_lc.contains("zcoolkuaile") { return Some("ZCOOLKuaiLe-Regular.ttf"); }
-    if family_lc.contains("zcool qing") || family_lc.contains("zcoolqingke") { return Some("ZCOOLQingKeHuangYou-Regular.ttf"); }
-    if family_lc.contains("bebas") { return Some("BebasNeue-Regular.ttf"); }
-    if family_lc.contains("douyin") || family_lc.contains("meihao") { return Some("NotoSansSC-Regular.ttf"); }
-    // 注：kaiti/simhei/fangsong/impact 等系统字体不在此返回，交系统字体库步骤解析。
     None
 }
 
@@ -302,18 +321,23 @@ fn system_fonts_dirs() -> Vec<std::path::PathBuf> {
 }
 
 /// 根据字体 id/家族名返回系统字体候选文件名列表（Windows 为主）。
-fn system_font_candidates(family_lc: &str) -> Vec<&'static str> {
+/// weight：normal / bold；bold 时把粗体变体排在候选列表前面（找不到则用原文件）。
+fn system_font_candidates(family_lc: &str, weight: &str) -> Vec<&'static str> {
+    let is_bold = weight.trim().eq_ignore_ascii_case("bold");
     let mut out = Vec::new();
     if family_lc.contains("kaiti") {
+        // 楷体通常无独立粗体文件，bold 时仍用原文件（交浏览器/ffmpeg 渲染原字形）
         out.extend(["simkai.ttf", "KaiTi.ttf"]);
     }
     if family_lc.contains("simhei") || family_lc.contains("heiti") {
+        if is_bold { out.extend(["msyhbd.ttc", "simhei.ttf", "SimHei.ttf"]); }
         out.extend(["simhei.ttf", "SimHei.ttf", "msyh.ttc", "msyhbd.ttc"]);
     }
     if family_lc.contains("fangsong") {
         out.extend(["simfang.ttf", "FangSong.ttf"]);
     }
     if family_lc.contains("noto sans sc") || family_lc.contains("source han sans") || family_lc.contains("notosanssc") {
+        if is_bold { out.extend(["NotoSansSC-Bold.ttf", "NotoSansSC-VF.ttf"]); }
         out.extend(["NotoSansSC-Regular.ttf", "NotoSansSC-VF.ttf"]);
     }
     if family_lc.contains("noto serif sc") || family_lc.contains("source han serif") || family_lc.contains("notoserifsc") {
@@ -332,29 +356,39 @@ fn system_font_candidates(family_lc: &str) -> Vec<&'static str> {
         out.push("ZCOOLQingKeHuangYou-Regular.ttf");
     }
     if family_lc.contains("douyin") || family_lc.contains("meihao") {
+        if is_bold { out.extend(["DouyinSans-Bold.ttf", "DouyinSans.ttf", "DouyinMeihao.ttf"]); }
         out.extend(["DouyinSans.ttf", "DouyinMeihao.ttf", "DouyinSans-Bold.ttf"]);
     }
     out
 }
 
 /// 解析字体文件绝对路径。
-/// 策略：1) 随包字体目录；2) 系统字体目录；3) 全局兜底（NotoSansSC-Regular.ttf）。
-fn resolve_font(font_family: &Option<String>, fontfile_dir: &str) -> Option<String> {
+/// 策略：1) 随包字体目录（优先字重匹配，bold 回退 Regular）；2) 系统字体目录；3) 全局兜底（NotoSansSC-Regular.ttf）。
+fn resolve_font(font_family: &Option<String>, weight: &str, fontfile_dir: &str) -> Option<String> {
     let dir = fontfile_dir.trim();
     let family_lc = font_family.as_ref().map(|s| s.to_lowercase()).unwrap_or_default();
 
     // 1) 随包字体目录
     if !dir.is_empty() {
-        if let Some(file) = resolve_bundled_filename(&family_lc) {
+        if let Some(file) = resolve_bundled_filename(&family_lc, weight) {
             let p = std::path::Path::new(dir).join(file);
             if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+        }
+        // bold 请求但 Bold 变体缺失 → 回退 Regular（仅当 base 与 bold 不同，避免死循环）
+        if weight.trim().eq_ignore_ascii_case("bold") {
+            if let Some(file) = resolve_bundled_filename(&family_lc, "normal") {
+                if file != resolve_bundled_filename(&family_lc, weight).unwrap_or("") {
+                    let p = std::path::Path::new(dir).join(file);
+                    if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+                }
+            }
         }
     }
 
     // 2) 系统字体目录
     for sys_dir in system_fonts_dirs() {
         if !sys_dir.exists() { continue; }
-        for cand in system_font_candidates(&family_lc) {
+        for cand in system_font_candidates(&family_lc, weight) {
             let p = sys_dir.join(cand);
             if p.exists() { return Some(p.to_string_lossy().into_owned()); }
         }
@@ -439,8 +473,11 @@ pub fn build_text_overlay_filter(
         format!("(h - {})/2{}", fontsize, off_str(y_off))
     };
     let _ = (width, height);
+    // 字重：预览 text 默认 bold（textOverlayStyle 默认 'bold'），导出默认也应 bold，
+    // 使 fontfile 指向真实 Bold ttf，消除浏览器伪粗体 vs 真粗体差异。
+    let weight = text.font_weight.as_deref().unwrap_or("bold");
     let mut base = format!(
-        "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:enable='between(t,{},{})'",
+        "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:letter_spacing=0:enable='between(t,{},{})'",
         escaped, fontsize, fontcolor, x_expr, y_expr,
         timeline_in, timeline_out
     );
@@ -473,7 +510,7 @@ pub fn build_text_overlay_filter(
         }
     }
 
-    let fontfile = resolve_font(&text.font_family, fontfile_dir);
+    let fontfile = resolve_font(&text.font_family, weight, fontfile_dir);
     Some(with_fontfile(base, &fontfile))
 }
 
@@ -485,7 +522,7 @@ pub fn build_subtitle_overlay_filters(
     height: u32,
     fontfile_dir: &str,
 ) -> Vec<String> {
-    let fontsize = sub.font_size.unwrap_or(48);
+    let fontsize = sub.font_size.unwrap_or(24); // 与预览端 PreviewCanvas 默认 24 对齐
     let fontcolor = sub.color.clone().unwrap_or_else(|| "white".to_string());
     let stroke_width = sub.stroke_width.unwrap_or(0.0);
     let stroke_color = sub.stroke_color.clone().unwrap_or_else(|| "#000000".into());
@@ -500,13 +537,17 @@ pub fn build_subtitle_overlay_filters(
         _ => ((height as i64) / 2) - (fontsize as i64) / 2 + stroke_comp, // center 默认
     };
     let _ = width;
-    let fontfile = resolve_font(&sub.font_family, fontfile_dir);
-    sub.items.iter().filter(|i| !i.text.trim().is_empty()).map(|item| {
+    // 字幕无 weight 字段，按 normal 处理（与预览字幕未设字重一致）。
+    let fontfile = resolve_font(&sub.font_family, "normal", fontfile_dir);
+    // 修复①顺序对齐：构建前按 start 升序排序（仿 parse_srt），保证时序正确、与预览一致。
+    let mut items: Vec<&SubtitleItemOverride> = sub.items.iter().filter(|i| !i.text.trim().is_empty()).collect();
+    items.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    items.into_iter().map(|item| {
         let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
         let abs_start = timeline_in + item.start;
         let abs_end = timeline_in + item.end;
         let mut base = format!(
-            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:enable='between(t,{},{})'",
+            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:letter_spacing=0:enable='between(t,{},{})'",
             escaped, fontsize, fontcolor, stroke_comp, y_pos, abs_start, abs_end
         );
         if borderw > 0 {
@@ -554,6 +595,7 @@ mod tests {
         let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080, "").unwrap();
         assert!(f.contains("drawtext="));
         assert!(f.contains("标题"));
+        assert!(f.contains("letter_spacing=0"), "export must pin letter_spacing=0 to match preview CSS normal(0)");
         assert!(f.contains("enable='between(t,0,5)'"));
     }
 
@@ -568,6 +610,26 @@ mod tests {
         assert_eq!(fs.len(), 1);
         assert!(fs[0].contains("你好"));
         assert!(fs[0].contains("between(t,11,13)"));  // 10 + 1 .. 10 + 3
+    }
+
+    // 关键回归：字幕 items 必须按 start 升序渲染（修复①顺序对齐），乱序构造也应被排序。
+    #[test]
+    fn test_subtitle_items_sorted_by_start() {
+        let s = SubtitleOverlay {
+            items: vec![
+                SubtitleItemOverride { start: 5.0, end: 7.0, text: "后".into() },
+                SubtitleItemOverride { start: 1.0, end: 3.0, text: "先".into() },
+                SubtitleItemOverride { start: 3.0, end: 5.0, text: "中".into() },
+            ],
+            ..Default::default()
+        };
+        let fs = build_subtitle_overlay_filters(&s, 0.0, 1920, 1080, "");
+        assert_eq!(fs.len(), 3);
+        assert!(fs[0].contains("先") && fs[0].contains("between(t,1,3)"));
+        assert!(fs[1].contains("中") && fs[1].contains("between(t,3,5)"));
+        assert!(fs[2].contains("后") && fs[2].contains("between(t,5,7)"));
+        // 默认字幕字号应 = 24（与预览 PreviewCanvas 对齐）
+        assert!(fs[0].contains("fontsize=24"), "subtitle default fontsize must be 24, got: {}", fs[0]);
     }
 
     // 关键回归：阴影偏移必须是「阴影相对文字」的偏移，文字本身定位不应被阴影移动
@@ -669,7 +731,7 @@ mod tests {
             (None, "NotoSansSC-Regular.ttf"),                                      // 未指定 → 兜底
         ];
         for (family, expected) in bundled_cases {
-            let resolved = resolve_font(&family, fonts_dir);
+            let resolved = resolve_font(&family, "normal", fonts_dir);
             assert!(resolved.is_some(), "family={:?} should resolve", family);
             let path = resolved.unwrap();
             assert!(path.replace('\\', "/").ends_with(expected),
@@ -688,7 +750,7 @@ mod tests {
             ];
             for (id, needle) in sys_cases {
                 // 传空随包目录，强制只走系统字体库路径，验证不落到保底字体
-                let resolved = resolve_font(&Some(id.into()), "");
+                let resolved = resolve_font(&Some(id.into()), "normal", "");
                 assert!(resolved.is_some(), "system font {} should resolve from system lib", id);
                 let p = resolved.unwrap().replace('\\', "/").to_lowercase();
                 assert!(p.contains(needle),
@@ -697,6 +759,27 @@ mod tests {
                     "system font {} must NOT be silently fallback to bundled CJK font, got {}", id, p);
             }
         }
+    }
+
+    // 关键回归：字重 bold 必须解析到 *-Bold.ttf 变体（思源黑体），与前端 @font-face 契约一致；
+    // 其余随包字体（站酷/Bebas）无 Bold 文件时 bold 回退 Regular，绝不能臆造不存在的文件。
+    #[test]
+    fn test_font_weight_resolves_bold_ttf() {
+        let fonts_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/gui/public/fonts");
+        // 思源黑体 bold → 真实 Bold ttf
+        let resolved = resolve_font(&Some("source-han-sans".into()), "bold", fonts_dir);
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().replace('\\', "/").ends_with("NotoSansSC-Bold.ttf"),
+            "source-han-sans bold must resolve to NotoSansSC-Bold.ttf");
+        // 思源黑体 normal → Regular ttf
+        let r2 = resolve_font(&Some("source-han-sans".into()), "normal", fonts_dir);
+        assert!(r2.unwrap().replace('\\', "/").ends_with("NotoSansSC-Regular.ttf"));
+        // 站酷快乐体无 Bold 文件 → bold 回退 Regular（同文件），而非报错或落到别的字体
+        let r3 = resolve_font(&Some("zcool-kuaile".into()), "bold", fonts_dir);
+        assert!(r3.unwrap().replace('\\', "/").ends_with("ZCOOLKuaiLe-Regular.ttf"));
+        // 未指定字重（默认）也应解析成功
+        let r4 = resolve_font(&Some("bebas".into()), "", fonts_dir);
+        assert!(r4.unwrap().replace('\\', "/").ends_with("BebasNeue-Regular.ttf"));
     }
 
     // 关键回归：描边粗细变化不应移动文字中心（导出侧 borderw 补偿）

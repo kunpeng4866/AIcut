@@ -73,6 +73,16 @@ export const BUNDLED_FONT_FILES: Record<string, string> = {
   'BebasNeue-Regular.ttf': 'BebasNeue-Regular.ttf',
 };
 
+// (字体 id → 字重 → 随包 ttf 文件名) 映射。与 Rust 端 FONT_ID_TO_FILE 一一对应。
+// 思源黑体有独立 Bold 变体；站酷 / Bebas 无 Bold 文件，bold 回退 Regular（与 Rust 回退策略一致）。
+// 这是“预览 CSS @font-face 契约”的唯一定义源，新增随包字体必须同步更新此处与 Rust 端。
+export const FONT_WEIGHT_FILES: Record<string, { normal: string; bold: string }> = {
+  'source-han-sans': { normal: 'NotoSansSC-Regular.ttf', bold: 'NotoSansSC-Bold.ttf' },
+  'zcool-kuaile': { normal: 'ZCOOLKuaiLe-Regular.ttf', bold: 'ZCOOLKuaiLe-Regular.ttf' },
+  'zcool-hei': { normal: 'ZCOOLQingKeHuangYou-Regular.ttf', bold: 'ZCOOLQingKeHuangYou-Regular.ttf' },
+  'bebas': { normal: 'BebasNeue-Regular.ttf', bold: 'BebasNeue-Regular.ttf' },
+};
+
 // 注入 @font-face：让渲染器优先使用内置字体文件（离线与导出一致）。
 // 仅在浏览器环境（renderer）调用一次。
 // fontsDir：由主进程 getFontsDir() 返回（dev=仓库/gui/public/fonts，打包=resources/fonts）。
@@ -106,11 +116,17 @@ export function injectBundledFontFaces(fontsDir: string) {
     if (!f.bundled) continue;
     const family = firstFamilyName(f.css);
     if (!family) continue;
-    const isWoff2 = f.bundled.endsWith('.woff2');
-    const fmt = isWoff2 ? 'woff2' : 'truetype';
-    faces.push(
-      `@font-face{font-family:'${family}';font-style:normal;font-weight:normal;font-display:swap;src:url('${base}${f.bundled}') format('${fmt}');}`,
-    );
+    // 同一 font-family 注入 normal / bold 两条 @font-face：
+    // - 思源黑体 bold 指向真实 NotoSansSC-Bold.ttf（消除浏览器伪粗体，与导出 Bold ttf 一致）；
+    // - 无 Bold 文件的字体，bold 也指向其 Regular 文件，避免浏览器合成伪粗体造成预览/导出差异。
+    const wf = FONT_WEIGHT_FILES[f.id] ?? { normal: f.bundled, bold: f.bundled };
+    for (const [weight, file] of [['normal', wf.normal], ['bold', wf.bold]] as const) {
+      const isWoff2 = file.endsWith('.woff2');
+      const fmt = isWoff2 ? 'woff2' : 'truetype';
+      faces.push(
+        `@font-face{font-family:'${family}';font-style:normal;font-weight:${weight};font-display:swap;src:url('${base}${file}') format('${fmt}');}`,
+      );
+    }
   }
   style.textContent = faces.join('\n');
   document.head.appendChild(style);
