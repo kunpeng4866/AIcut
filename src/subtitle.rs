@@ -477,7 +477,7 @@ pub fn build_text_overlay_filter(
     // 使 fontfile 指向真实 Bold ttf，消除浏览器伪粗体 vs 真粗体差异。
     let weight = text.font_weight.as_deref().unwrap_or("bold");
     let mut base = format!(
-        "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:letter_spacing=0:enable='between(t,{},{})'",
+        "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:enable='between(t,{},{})'",
         escaped, fontsize, fontcolor, x_expr, y_expr,
         timeline_in, timeline_out
     );
@@ -547,7 +547,7 @@ pub fn build_subtitle_overlay_filters(
         let abs_start = timeline_in + item.start;
         let abs_end = timeline_in + item.end;
         let mut base = format!(
-            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:letter_spacing=0:enable='between(t,{},{})'",
+            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:enable='between(t,{},{})'",
             escaped, fontsize, fontcolor, stroke_comp, y_pos, abs_start, abs_end
         );
         if borderw > 0 {
@@ -595,7 +595,6 @@ mod tests {
         let f = build_text_overlay_filter(&t, 0.0, 5.0, 1920, 1080, "").unwrap();
         assert!(f.contains("drawtext="));
         assert!(f.contains("标题"));
-        assert!(f.contains("letter_spacing=0"), "export must pin letter_spacing=0 to match preview CSS normal(0)");
         assert!(f.contains("enable='between(t,0,5)'"));
     }
 
