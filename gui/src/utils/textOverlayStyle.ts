@@ -66,6 +66,9 @@ export function computeTextOverlayStyle(t: TextContent, scale = 1): TextOverlayP
     fontFamily: findFontCss(t.fontFamily),
     textAlign: (t.textAlign || 'center') as any,
     fontWeight: (t.fontWeight as any) || 'bold',
+    // 禁用浏览器伪粗体合成：无真实 Bold 文件的字体（系统字体/站酷/Bebas）用真实字面渲染，
+    // 与导出端 drawtext 使用同一字体文件一致；有真实 Bold 文件（思源黑体）则走 @font-face 真粗体。
+    fontSynthesis: 'none',
     textShadow,
     pointerEvents: 'auto',
     cursor: 'pointer',

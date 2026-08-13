@@ -330,7 +330,8 @@ fn system_font_candidates(family_lc: &str, weight: &str) -> Vec<&'static str> {
         out.extend(["simkai.ttf", "KaiTi.ttf"]);
     }
     if family_lc.contains("simhei") || family_lc.contains("heiti") {
-        if is_bold { out.extend(["msyhbd.ttc", "simhei.ttf", "SimHei.ttf"]); }
+        // 黑体无独立粗体文件；bold 仍用 simhei.ttf，避免回退到微软雅黑(msyhbd.ttc)导致与
+        // 预览（系统 SimHei）字体不一致。预览已禁用伪粗体(font-synthesis:none)，故两端都用真实 SimHei。
         out.extend(["simhei.ttf", "SimHei.ttf", "msyh.ttc", "msyhbd.ttc"]);
     }
     if family_lc.contains("fangsong") {
@@ -757,6 +758,14 @@ mod tests {
                 assert!(!p.ends_with("notosanssc-regular.ttf"),
                     "system font {} must NOT be silently fallback to bundled CJK font, got {}", id, p);
             }
+
+            // 关键回归：黑体 bold 必须解析到真实 SimHei(simhei.ttf)，绝不能换成微软雅黑(msyhbd.ttc)，
+            // 否则与预览（系统 SimHei + font-synthesis:none 禁用伪粗体）字体不一致 → 导出比预览细/不同。
+            let simhei_bold = resolve_font(&Some("simhei".into()), "bold", "");
+            assert!(simhei_bold.is_some(), "simhei bold should resolve from system lib");
+            let sb = simhei_bold.unwrap().replace('\\', "/").to_lowercase();
+            assert!(sb.contains("simhei"), "simhei bold must resolve to simhei.ttf, got {}", sb);
+            assert!(!sb.contains("msyh"), "simhei bold must NOT fall back to Microsoft YaHei (msyh*), got {}", sb);
         }
     }
 

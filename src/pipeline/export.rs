@@ -591,6 +591,9 @@ fn build_mux_cmd(
         "-c:v".to_string(), "copy".to_string(),
         "-c:a".to_string(), "aac".to_string(),
         "-b:a".to_string(), "192k".to_string(),
+        // 临时视频由编码器已带关键帧+faststart，但 -c:v copy 重新封装时 mp4 muxer 会把 moov 写回末尾；
+        // 这里再补 +faststart，保证成品文件 moov 前置，避免起播/拖拽卡顿。
+        "-movflags".to_string(), "+faststart".to_string(),
         output.to_string(),
     ]
 }
@@ -1451,5 +1454,18 @@ mod tests {
         assert!(next.is_some());
         assert_eq!(next.unwrap().id, "c2");
         assert!(pipeline.find_next_clip("t1", 10.0).is_none());
+    }
+
+    #[test]
+    fn test_build_mux_cmd_has_faststart() {
+        // 含音频导出：临时视频经 -c:v copy 重新封装成最终文件时，必须补 +faststart，
+        // 否则成品 moov 落在末尾 → 起播/拖拽卡顿。
+        let cmd = build_mux_cmd("tmp_video.mp4", "tmp_audio.pcm", 48000, 2, "out.mp4");
+        assert!(cmd.iter().any(|a| a == "-movflags"), "mux cmd missing -movflags");
+        let mf_idx = cmd.iter().position(|a| a == "-movflags").unwrap();
+        assert_eq!(cmd[mf_idx + 1], "+faststart", "mux cmd must set +faststart");
+        // 视频流必须走 copy（保留编码器已设的关键帧），不能重新编码
+        let cv_idx = cmd.iter().position(|a| a == "-c:v").unwrap();
+        assert_eq!(cmd[cv_idx + 1], "copy", "mux must copy video stream");
     }
 }
