@@ -423,7 +423,6 @@ export function useWebGPUPreview({
       if (!device || !pipeline || !canvas || !sampler) return;
 
       const activeClips = clipsRef.current;
-      if (activeClips.length === 0) return;
 
       // 收集已就绪的视频（readyState >= 2 即 HAVE_CURRENT_DATA）
       // 手动驱动片段若已预解码就绪，用缓存 ImageBitmap 作为纹理源（绕开每帧 seek，满帧流畅）；
@@ -455,7 +454,26 @@ export function useWebGPUPreview({
           }
         }
       }
-      if (items.length === 0) return;
+      if (items.length === 0) {
+        // 当前无就绪视频（播放头位于素材空白区或仅有文字/音频）：清空画布为黑色，
+        // 避免上一帧视频定格残留，与 CapCut 一致（无画面处显示黑底）。
+        const ctx = canvas.getContext('webgpu');
+        if (ctx) {
+          const cmd = device.createCommandEncoder();
+          const view = ctx.getCurrentTexture().createView();
+          const clearPass = cmd.beginRenderPass({
+            colorAttachments: [{
+              view,
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: 'clear',
+              storeOp: 'store',
+            }],
+          });
+          clearPass.end();
+          device.queue.submit([cmd.finish()]);
+        }
+        return;
+      }
 
       // 用 error scope 捕获本帧所有 WebGPU 验证错误，精准拿到报错文本并决定是否回退，
       // 避免依赖全局 uncapturederror（可能含偶发良性错误而误杀整个会话）

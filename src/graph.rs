@@ -700,8 +700,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
-                // 不再 shortest=1：底色已固定为工程时长，输出时长由底色决定，
-                // 较短的视频/文字轨会被冻结最后一帧填充，确保与音轨同长。
+                // 不再 shortest=1：底色已固定为工程时长并铺满整个时间轴，
+                // 视频/文字轨结束后透出黑色底色，避免末帧冻结造成卡顿。
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
