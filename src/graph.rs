@@ -968,6 +968,20 @@ fn build_clip_audio_node(c: &Clip, idx: usize, track_vol: f64, label: &str, enve
         let fade_t = if *is_out { "out" } else { "in" };
         chain.push_str(&format!(",afade=t={}:curve=qsin:st={}:d={}", fade_t, fmt(st_local), fmt(*dur)));
     }
+    // 音频滤镜（降噪/均衡器）：此前 graph.rs 音频路径未应用 clip.filters，预览有、导出无。
+    // 仅映射音频类滤镜（denoise→afftdn, equalizer→equalizer），视频类滤镜（flip/curves/chromakey）
+    // 不作用于音频流；复用 build_filter_spec 的参数解析与默认值，置于 volume/afade 之后、adelay 之前。
+    for f in &c.filters {
+        if !f.enabled { continue; }
+        match f.kind.as_str() {
+            "denoise" | "equalizer" => {
+                if let Some(s) = build_filter_spec(&f.kind, &f.params) {
+                    chain.push_str(&format!(",{}", s));
+                }
+            }
+            _ => {}
+        }
+    }
     let delay_ms = (c.timeline_in * 1000.0).round() as i64;
     if delay_ms > 0 {
         chain.push_str(&format!(",adelay={}:all=1", delay_ms));
