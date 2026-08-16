@@ -320,6 +320,17 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
             }
         }
     }
+    // 镜像翻转：GUI 把 transform.flip_h/flip_v 写进 transform（0/1），Rust Transform 现已反序列化该字段。
+    // 在预链末尾施加 hflip/vflip（yuv/rgba 均可，置于缩放/旋转/文字之后、抠像之前）。
+    // 此前该字段在 Rust 侧不存在 → 镜像在预览/导出均无效果（# 镜像无效）。
+    if c.transform.flip_h > 0.5 { pre.push_str(",hflip"); }
+    if c.transform.flip_v > 0.5 { pre.push_str(",vflip"); }
+    // clip 级同步翻转：内容若开启镜像，抠像 matte 视频与背景图片/视频必须同步翻转，
+    // 否则它们（前景剪影 / 背景画面）与已翻转的内容画面对不齐。预览（WebGPU/HTML5）是把
+    // 「内容+matte+背景」整帧一起翻转，导出侧需对各输入显式翻转对齐。
+    let mut clip_flip = String::new();
+    if c.transform.flip_h > 0.5 { clip_flip.push_str(",hflip"); }
+    if c.transform.flip_v > 0.5 { clip_flip.push_str(",vflip"); }
     pre.push_str(&format!("[{}]", pre_label));
     nodes.push(pre);
 
@@ -408,8 +419,8 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
             // 段边界之后严重时间错位（实测段1 较静态参考 PSNR 仅 ~30dB）。此处对 matte 同样
             // trim+setpts，使其与源段严格对齐。
             nodes.push(format!(
-                "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,scale={sw}:{sh},geq=lum='{geq_expr}'[{mt}]",
-                mi = matte_idx.unwrap(), sf = sf, ef = ef, sw = sw, sh = sh
+                "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,scale={sw}:{sh},geq=lum='{geq_expr}'{clip_flip}[{mt}]",
+                mi = matte_idx.unwrap(), sf = sf, ef = ef, sw = sw, sh = sh, clip_flip = clip_flip
             ));
             // trim+setpts 后的源再 alphamerge 时，必须显式转成 yuva420p，否则 ffmpeg 会
             // 丢失/损坏 alpha，导致背景色偏色（实测变成粉色）。
@@ -433,13 +444,16 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let core = format!("[{}]", keyed_label);
     // opacity + fps 作为尾部统一施加（在蒙版/matte 合成之后），保证各路输入帧率一致、透明度正确。
     // 关键帧不透明度：colorchannelmixer 的 aa 走 eval=frame 时间表达式（#6 修复）。
+    // 注意：colorchannelmixer 的 aa（alpha 系数）只有在流带 alpha 通道时才生效；YUV 流没有 alpha
+    // 平面，aa 会被静默忽略 → 导出后不透明度无任何变化（# 不透明度无效）。故透明度 < 1 时先
+    // format=yuva420p 建立 alpha 平面，再乘 alpha；关键帧路径同理。
     let op_a = kf_factor(c, &["transform.opacity", "opacity"], c.timeline_in);
     let tail = if let Some(oe) = op_a {
-        format!(",colorchannelmixer=aa='({})':eval=frame,fps={}", oe, fps)
+        format!(",format=yuva420p,colorchannelmixer=aa='({})':eval=frame,fps={}", oe, fps)
     } else {
         let opacity = keyframed(c, "transform.opacity", c.transform.opacity).clamp(0.0, 1.0);
         if opacity < 1.0 {
-            format!(",colorchannelmixer=aa={},fps={}", fmt(opacity), fps)
+            format!(",format=yuva420p,colorchannelmixer=aa={},fps={}", fmt(opacity), fps)
         } else {
             format!(",fps={}", fps)
         }
@@ -504,7 +518,7 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
         let mt_label = format!("{}mt", label);
         // matte 输入先缩放到与源一致尺寸（灰度 mp4 与源同分辨率；显式 scale 防尺寸偏差），
         // 再用 geq 把 luma 经 threshold/softness 映射为 alpha 层（luma=alpha）。
-        nodes.push(format!("[{mi}:v]scale={sw}:{sh},geq=lum='{geq_expr}'[{mt_label}]", sw = sw, sh = sh));
+        nodes.push(format!("[{mi}:v]scale={sw}:{sh},geq=lum='{geq_expr}'{clip_flip}[{mt_label}]", sw = sw, sh = sh, clip_flip = clip_flip));
         let va = format!("{}va", label);
         // alphamerge 取第二个输入（matte）的 luma 作为 alpha；源(可能 RGBA/YUV)叠加 alpha → 透明视频。
         nodes.push(format!("[{pre_tail}][{mt_label}]alphamerge[{va}]"));
@@ -533,7 +547,7 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
                                 // 背景 cover：放大到覆盖画布再裁剪溢出区域，避免直接 scale 拉伸比例失真
                                 // （scale=W:H 会把非等比素材压变形；force_original_aspect_ratio=increase
                                 // 保证最小边填满，crop 裁掉多余部分）。
-                                nodes.push(format!("[{bi}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}[{bg_label}]"));
+                                nodes.push(format!("[{bi}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}{clip_flip}[{bg_label}]", clip_flip = clip_flip));
                                 let bgout = format!("{}bgout", label);
                                 nodes.push(format!("[{bg_label}][{pre_tail}]overlay=shortest=1[{bgout}]"));
                                 pre_tail = bgout;
@@ -579,13 +593,15 @@ fn offset_x(c: &Clip, w: u32, out_w: u32) -> String {
 }
 
 /// 计算 clip 在画布上的垂直偏移（像素）：把 out_h 高度的 clip 居中到 transform.y 指定的中心。
-/// 预览坐标 y 原点在左下角，clip 中心 y = (1 - transform.y) * h。
+/// 与 WebGPU 预览 WGSL 一致：clipY = 1 - transform.y*2，即 transform.y=0 → 顶部、=1 → 底部，
+/// 增大 y 向下移动。overlay 的 y 原点在顶部，故 overlay_y = transform.y*h - out_h/2（增大 y 向下）。
+/// 旧逻辑写成 (1-y)*h 恰好与预览相反 → 导出后位置上下颠倒（# 位置Y 反了）。
 fn offset_y(c: &Clip, h: u32, out_h: u32) -> String {
     if let Some(e) = kf_factor(c, &["transform.y", "y"], c.timeline_in) {
-        return format!("'((1.0-({}))*{}-{})'", e, h, out_h as f64 / 2.0);
+        return format!("'({}*{}-{})'", e, h, out_h as f64 / 2.0);
     }
     let y = keyframed(c, "transform.y", c.transform.y);
-    format!("{}", ((1.0 - y) * h as f64 - out_h as f64 / 2.0).round() as i64)
+    format!("{}", (y * h as f64 - out_h as f64 / 2.0).round() as i64)
 }
 
 pub struct FilterGraphBuilder;

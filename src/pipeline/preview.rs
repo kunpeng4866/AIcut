@@ -414,7 +414,7 @@ mod tests {
             src_range: Range { start: src_start, end: src_end },
             timeline_in: tl_in,
             timeline_out: tl_out,
-            transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+            transform: Transform::default(),
             volume: 1.0,
             speed: 1.0,
             effects: Vec::new(),

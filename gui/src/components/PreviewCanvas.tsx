@@ -1295,6 +1295,14 @@ export default function PreviewCanvas() {
                   }
                   shadowFilter = buildMaskShadowFilter(maskList); // 仅取字符串，挂到外层 wrapper
                 }
+                // 镜像翻转（HTML5 回退）：水平→scaleX(-1)、垂直→scaleY(-1)。
+                // GUI 写入 transform.flip_h/flip_v（0/1），与 WebGPU 预览/导出一致（# 镜像无效）。
+                const flipT: string[] = [];
+                if ((clip.transform?.flip_h ?? 0) > 0.5) flipT.push('scaleX(-1)');
+                if ((clip.transform?.flip_v ?? 0) > 0.5) flipT.push('scaleY(-1)');
+                if (flipT.length) {
+                  outStyle.transform = [outStyle.transform, ...flipT].filter(Boolean).join(' ');
+                }
                 const videoEl = (
                   <video
                     key={clip.id}

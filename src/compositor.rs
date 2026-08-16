@@ -246,14 +246,7 @@ impl Compositor {
 
 /// 创建默认 Transform（居中、无缩放、无旋转、完全不透明）
 pub fn default_transform() -> Transform {
-    Transform {
-        x: 0.5,
-        y: 0.5,
-        scale_x: 1.0,
-        scale_y: 1.0,
-        rotation: 0.0,
-        opacity: 1.0,
-    }
+    Transform::default()
 }
 
 // ════════════════════ 单元测试 ════════════════════

@@ -73,14 +73,7 @@ pub fn get_version() -> String {
 
 /// 默认 Transform（居中、无缩放、无旋转、完全不透明）
 fn default_transform_value() -> Transform {
-    Transform {
-        x: 0.5,
-        y: 0.5,
-        scale_x: 1.0,
-        scale_y: 1.0,
-        rotation: 0.0,
-        opacity: 1.0,
-    }
+    Transform::default()
 }
 
 /// 判断工程是否为"简单工程"，可走 graph.rs 快速路径

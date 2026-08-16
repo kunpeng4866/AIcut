@@ -353,14 +353,7 @@ mod tests {
     use crate::project::{Asset, CanvasConfig, Clip, Project, Range, Track, Transform};
 
     fn make_transform() -> Transform {
-        Transform {
-            x: 0.5,
-            y: 0.5,
-            scale_x: 1.0,
-            scale_y: 1.0,
-            rotation: 0.0,
-            opacity: 1.0,
-        }
+        Transform::default()
     }
 
     fn make_clip(id: &str, asset_id: &str, tl_in: f64, tl_out: f64, src_start: f64) -> Clip {

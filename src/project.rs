@@ -72,6 +72,27 @@ pub struct Transform {
     pub rotation: f64,
     #[serde(default = "one_f")]
     pub opacity: f64,
+    /// 镜像翻转：水平(h)/垂直(v)，1.0=开启、0.0=关闭（GUI 写入 transform.flip_h/flip_v）。
+    /// 此前 Rust Transform 缺此字段，反序列化时被丢弃 → 镜像在预览/导出均无效。
+    #[serde(default)]
+    pub flip_h: f64,
+    #[serde(default)]
+    pub flip_v: f64,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Transform {
+            x: 0.5,
+            y: 0.5,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation: 0.0,
+            opacity: 1.0,
+            flip_h: 0.0,
+            flip_v: 0.0,
+        }
+    }
 }
 
 /// 时间范围（秒，浮点）
@@ -286,14 +307,7 @@ fn default_sample_rate() -> u32 { DEFAULT_SAMPLE_RATE }
 fn default_center() -> f64 { 0.5 }
 fn one_f() -> f64 { 1.0 }
 fn default_transform() -> Transform {
-    Transform {
-        x: 0.5,
-        y: 0.5,
-        scale_x: 1.0,
-        scale_y: 1.0,
-        rotation: 0.0,
-        opacity: 1.0,
-    }
+    Transform::default()
 }
 
 impl Project {
@@ -420,7 +434,7 @@ mod tests {
                             id: "c1".into(), asset_id: "a1".into(),
                             src_range: Range { start: 0.0, end: 5.0 },
                             timeline_in: 0.0, timeline_out: 5.0,
-                            transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                            transform: Transform::default(),
                             volume: 1.0, speed: 1.0,
                             effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
                         },
@@ -428,7 +442,7 @@ mod tests {
                             id: "c2".into(), asset_id: "a2".into(),
                             src_range: Range { start: 0.0, end: 10.0 },
                             timeline_in: 5.0, timeline_out: 15.0,
-                            transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                            transform: Transform::default(),
                             volume: 1.0, speed: 1.0,
                             effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
                         },
@@ -491,7 +505,7 @@ mod tests {
                     id: "c1".into(), asset_id: "missing".into(),
                     src_range: Range { start: 0.0, end: 5.0 },
                     timeline_in: 0.0, timeline_out: 5.0,
-                    transform: Transform { x: 0.5, y: 0.5, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 },
+                    transform: Transform::default(),
                     volume: 1.0, speed: 1.0,
                     effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
                 }],

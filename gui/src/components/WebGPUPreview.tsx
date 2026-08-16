@@ -90,7 +90,13 @@ struct VSOut {
 }
 
 @fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
-  let color = textureSample(videoTexture, videoSampler, in.uv);
+  // 镜像翻转：mask2.w 编码标志位 bit0=水平(h, 翻转 u)、bit1=垂直(v, 翻转 v)；
+  // 仅翻转贴图采样 UV，蒙版坐标(nx,ny)仍用原 UV，保证镜像只翻转画面内容、不改变蒙版区域。
+  var fuv = in.uv;
+  let fc = u.mask2.w;
+  if ((fc >= 1.0 && fc < 2.0) || fc >= 3.0) { fuv.x = 1.0 - fuv.x; }
+  if (fc >= 2.0) { fuv.y = 1.0 - fuv.y; }
+  let color = textureSample(videoTexture, videoSampler, fuv);
   let nx = in.uv.x;
   let ny = 1.0 - in.uv.y; // 画布坐标 y-down
   let m = u.mask;
@@ -672,6 +678,11 @@ export function useWebGPUPreview({
           const rotation = ((t.rotation ?? 0) * Math.PI) / 180;
           // 出片段乘转场淡出、入片段乘转场 progress 不透明度
           const opacity = (t.opacity ?? 1.0) * (extraOpacity ?? 1.0);
+          // 镜像翻转：GUI 写入 transform.flip_h/flip_v（0/1）；编码为 mask2.w 标志位
+          // bit0=水平(h)、bit1=垂直(v)，供 WGSL 翻转采样 UV（# 镜像无效）。
+          const flipH = (t.flip_h ?? 0) > 0.5;
+          const flipV = (t.flip_v ?? 0) > 0.5;
+          const flipCode = (flipH ? 1 : 0) + (flipV ? 2 : 0);
           const videoAspect = vw / vh;
 
           const uniformBuf = uniformBufsRef.current[idx];
@@ -688,7 +699,7 @@ export function useWebGPUPreview({
             rx0 = m[0]; ry0 = m[1]; rx1 = m[2]; ry1 = m[3];
           }
           data[8] = rx0; data[9] = ry0; data[10] = rx1; data[11] = ry1;
-          data[12] = mode; data[13] = r; data[14] = feather; data[15] = 0;
+          data[12] = mode; data[13] = r; data[14] = feather; data[15] = flipCode;
           // zoom 转场：把出/入片段的 scale() 折进现有用户 scale
           const zoom = parseScale(item.transform);
           if (zoom !== 1) { data[2] *= zoom; data[3] *= zoom; }
