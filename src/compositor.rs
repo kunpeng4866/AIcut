@@ -92,9 +92,9 @@ impl Compositor {
         let scaled_w = ((frame.width as f64) * tf.scale_x).round().max(1.0) as u32;
         let scaled_h = ((frame.height as f64) * tf.scale_y).round().max(1.0) as u32;
 
-        // 2. 旋转（围绕中心，双线性插值）。输出尺寸与输入一致（ow=iw, oh=ih）；
-        //    旋转后超出原边界的像素 Alpha 置 0，由下层透出——与 WebGPU 预览 /
-        //    graph.rs 的 c=none 透明角行为一致。方向：正角 = 逆时针(CCW)，与预览一致。
+        // 2. 旋转（围绕中心，双线性插值 + 边缘像素延伸 Clamp to Edge）。输出尺寸与输入一致
+        //    （ow=iw, oh=ih）；越界取边缘像素，旋转后形成完整菱形。超出全局画布的裁切由下方
+        //    over_blit 依据 dst_x/dst_y 的画布坐标裁剪负责（场景 B）。方向：正角 = 逆时针(CCW)。
         let rotated = if tf.rotation.abs() < f64::EPSILON {
             scaled
         } else {
@@ -160,10 +160,13 @@ impl Compositor {
 
     /// 围绕中心旋转 RGBA 帧（双线性插值采样）。
     ///
-    /// - 输出尺寸与输入保持一致（ow=iw, oh=ih）；旋转后超出原边界的像素 Alpha 置 0，
-    ///   由下层图层透出（与 WebGPU 预览 / graph.rs 的 `c=none` 透明角一致）。
+    /// - 输出尺寸与输入保持一致（ow=iw, oh=ih）。
+    /// - 越界处理采用「边缘像素延伸」(Clamp to Edge)：逆映射后的源坐标超出
+    ///   [0,w-1]/[0,h-1] 时夹紧到最近合法边界、取边缘像素颜色，而非丢弃为透明。
+    ///   这样旋转后形成「完整菱形」，不会在内部挖出八边形透明角。超出全局画布的
+    ///   裁切交由 `over_blit` 依据 dst_x/dst_y 在合成时按画布坐标处理（场景 B）。
     /// - 旋转方向：正角度 = 逆时针(CCW)，与 WebGPU 预览一致（graph.rs 用 `-rotation` 对齐）。
-    /// - 采用后向映射：对输出每个像素逆旋转求源坐标；源越界则置完全透明。
+    /// - 采用后向映射：对输出每个像素逆旋转求源坐标。
     fn rotate_rgba(src: &[u8], w: u32, h: u32, degrees: f64) -> Vec<u8> {
         let w = w as i64;
         let h = h as i64;
@@ -184,19 +187,19 @@ impl Compositor {
             for x in 0..w {
                 let dx = x as f64 - cx;
                 let dy = y as f64 - cy;
-                // 后向映射（正角=CCW 对应的逆旋转）
-                let sx = dx * cos - dy * sin + cx;
-                let sy = dx * sin + dy * cos + cy;
+            // 后向映射（正角=CCW 对应的逆旋转）
+            let mut sx = dx * cos - dy * sin + cx;
+            let mut sy = dx * sin + dy * cos + cy;
 
-                let dst_idx = ((y * w + x) as usize) * 4;
-                if sx < 0.0 || sx > (w - 1) as f64 || sy < 0.0 || sy > (h - 1) as f64 {
-                    // 超出原边界 → 完全透明（RGB=0, A=0）
-                    dst[dst_idx..dst_idx + 4].copy_from_slice(&[0, 0, 0, 0]);
-                    continue;
-                }
+            // 边缘像素延伸（Clamp to Edge）：超出源边界时夹紧到最近合法边缘，
+            // 取边缘像素颜色，而非丢弃为透明——避免旋转后出现八边形挖空。
+            // 超出全局画布的裁切交由 over_blit 的画布坐标裁剪处理。
+            sx = sx.clamp(0.0, (w - 1) as f64);
+            sy = sy.clamp(0.0, (h - 1) as f64);
 
-                // 双线性插值
-                let x0 = sx.floor() as i64;
+            // 双线性插值（sx/sy 已夹紧；x1/y1 的 min 边界防御仍保留）
+            let dst_idx = ((y * w + x) as usize) * 4;
+            let x0 = sx.floor() as i64;
                 let y0 = sy.floor() as i64;
                 let x1 = (x0 + 1).min(w - 1);
                 let y1 = (y0 + 1).min(h - 1);
@@ -560,17 +563,22 @@ mod tests {
 
     #[test]
     fn test_rotate_45_800x800() {
-        // 仿真真实导出：800x800 不透明红块旋转 45°，四角 alpha 必须为 0。
+        // 仿真真实导出：800x800 不透明红块旋转 45°，边缘像素延伸后四角应为
+        // 不透明红（完整菱形），无透明挖空。
         let w = 800u32;
         let h = 800u32;
         let src = [255, 0, 0, 255].repeat((w * h) as usize);
         let dst = Compositor::rotate_rgba(&src, w, h, 45.0);
-        let a = |x: u32, y: u32| dst[((y * w + x) as usize) * 4 + 3];
-        assert_eq!(a(0, 0), 0, "TL corner alpha must be 0");
-        assert_eq!(a(799, 0), 0, "TR corner alpha must be 0");
-        assert_eq!(a(0, 799), 0, "BL corner alpha must be 0");
-        assert_eq!(a(799, 799), 0, "BR corner alpha must be 0");
-        assert_eq!(a(400, 400), 255, "center alpha must be 255");
+        let px = |x: u32, y: u32| -> &[u8] {
+            &dst[((y * w + x) as usize) * 4..((y * w + x) as usize) * 4 + 4]
+        };
+        // 四角：边缘延伸 → 不透明红（完整菱形），非透明。
+        assert_eq!(px(0, 0), &[255, 0, 0, 255], "TL corner must be opaque red");
+        assert_eq!(px(799, 0), &[255, 0, 0, 255], "TR corner must be opaque red");
+        assert_eq!(px(0, 799), &[255, 0, 0, 255], "BL corner must be opaque red");
+        assert_eq!(px(799, 799), &[255, 0, 0, 255], "BR corner must be opaque red");
+        // 中心仍是红。
+        assert_eq!(px(400, 400), &[255, 0, 0, 255], "center must be red");
     }
 
     #[test]
@@ -592,8 +600,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rotate_45_transparent_corners() {
-        // 8x8 不透明红块旋转 45°，四角应变为完全透明（alpha=0），中心仍不透明红。
+    fn test_rotate_45_edge_extend_corners() {
+        // 8x8 不透明红块旋转 45°，采用边缘像素延伸后四角应为不透明红（完整菱形），
+        // 而非透明。
         let w = 8u32;
         let h = 8u32;
         let src = [255, 0, 0, 255].repeat((w * h) as usize);
@@ -603,11 +612,11 @@ mod tests {
             &dst[((y * w + x) as usize) * 4..((y * w + x) as usize) * 4 + 4]
         };
 
-        // 四角：旋转后超出原边界 → 透明
-        assert_eq!(px(0, 0)[3], 0, "TL corner should be transparent");
-        assert_eq!(px(w - 1, 0)[3], 0, "TR corner should be transparent");
-        assert_eq!(px(0, h - 1)[3], 0, "BL corner should be transparent");
-        assert_eq!(px(w - 1, h - 1)[3], 0, "BR corner should be transparent");
+        // 四角：边缘延伸 → 不透明红，无透明挖空
+        assert_eq!(px(0, 0), &[255, 0, 0, 255], "TL corner should be opaque red");
+        assert_eq!(px(w - 1, 0), &[255, 0, 0, 255], "TR corner should be opaque red");
+        assert_eq!(px(0, h - 1), &[255, 0, 0, 255], "BL corner should be opaque red");
+        assert_eq!(px(w - 1, h - 1), &[255, 0, 0, 255], "BR corner should be opaque red");
 
         // 中心点：原始红块核心，旋转后仍完全不透明且为红
         let c = px(w / 2, h / 2);
@@ -616,7 +625,8 @@ mod tests {
 
     #[test]
     fn test_composite_with_rotation() {
-        // 画布 8x8。底层蓝色（不透明），顶层红色旋转 45° → 角透明露出蓝，中心红。
+        // 画布 8x8。底层蓝色（不透明），顶层红色旋转 45°（边缘延伸，无透明角）→
+        // 红块覆盖处为红，未被红块覆盖的角仍为蓝；中心红。
         let comp = Compositor::new(8, 8);
         let blue = make_frame(8, 8, 0, 0, 255, 255, 0.0);
         let red = make_frame(8, 8, 255, 0, 0, 255, 0.0);
@@ -634,14 +644,42 @@ mod tests {
             &result.data[((y * 8 + x) as usize) * 4..((y * 8 + x) as usize) * 4 + 4]
         };
 
-        // 四角应为蓝（红块透明角露出下层蓝）
-        assert_eq!(px(0, 0), &[0, 0, 255, 255], "TL corner should be blue");
-        assert_eq!(px(7, 0), &[0, 0, 255, 255], "TR corner should be blue");
-        assert_eq!(px(0, 7), &[0, 0, 255, 255], "BL corner should be blue");
-        assert_eq!(px(7, 7), &[0, 0, 255, 255], "BR corner should be blue");
+        // 四角：被红块旋转后的菱形主体覆盖 → 不透明红（完整菱形，无透明露出蓝）
+        assert_eq!(px(0, 0), &[255, 0, 0, 255], "TL corner should be opaque red");
+        assert_eq!(px(7, 0), &[255, 0, 0, 255], "TR corner should be opaque red");
+        assert_eq!(px(0, 7), &[255, 0, 0, 255], "BL corner should be opaque red");
+        assert_eq!(px(7, 7), &[255, 0, 0, 255], "BR corner should be opaque red");
 
         // 中心应为红（旋转后主体）
         let c = px(4, 4);
         assert_eq!(c, &[255, 0, 0, 255], "center should be red");
+    }
+
+    #[test]
+    fn test_rotate_clip_at_canvas_edge() {
+        // 场景 B：红块紧贴右边缘 (x=1.0) 旋转 45°，超出全局画布的角应由 over_blit
+        // 按画布坐标裁切为黑色背景，而非在帧内部挖出透明角。
+        let comp = Compositor::new(12, 12);
+        let red = make_frame(12, 12, 255, 0, 0, 255, 0.0);
+        let mut tf_red = default_transform();
+        tf_red.x = 1.0; // 中心贴在右边缘
+        tf_red.rotation = 45.0;
+        let result = comp.composite(&[make_layer(red, tf_red)]);
+
+        let mut bg_count = 0usize;
+        let mut red_count = 0usize;
+        for i in 0..(12 * 12) {
+            let p = &result.data[i * 4..i * 4 + 4];
+            // 合成结果只应出现两种像素：不透明红，或透明黑(背景)——不得出现
+            // 半透明 / 内部透明角（即 alpha 非 0 非 255）。
+            assert!(p[3] == 0 || p[3] == 255, "像素 alpha 应为 0 或 255（无内部透明角）");
+            if p == &[0, 0, 0, 0] {
+                bg_count += 1;
+            } else if p == &[255, 0, 0, 255] {
+                red_count += 1;
+            }
+        }
+        assert!(bg_count > 0, "超出画布部分应被裁切为黑色背景");
+        assert!(red_count > 0, "红块主体应出现在画布内");
     }
 }
