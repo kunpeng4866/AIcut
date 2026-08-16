@@ -876,3 +876,130 @@ fn test_render_with_plugin_filter() {
         cmd
     );
 }
+
+// ── 5s 视频 + 40s 音频：导出尾部（35~40s）必须为黑场 ──
+// 回归根因：graph.rs 快速路径 overlay 默认 eof_action=repeat 会复用视频最后一帧，
+// 导致音轨 outlast 视频时末帧定格（卡顿）。修复后 overlay 加 eof_action=pass，
+// 视频结束后透传黑场 base；base 时长 = 工程时间轴长度（= 音轨最大结束时间 40s）。
+
+/// 构造「5s 视频 + 40s 音频」最小工程 JSON（无字幕，走 graph.rs 快速路径）
+fn video5_audio40_project_json() -> String {
+    r#"{
+        "version": "1.0",
+        "canvas": { "width": 1280, "height": 720, "fps": 30, "sample_rate": 48000 },
+        "assets": [
+            { "id": "v", "type": "video", "path": "v.mp4", "duration": 5, "width": 1280, "height": 720, "codec": "h264" },
+            { "id": "a", "type": "audio", "path": "a.mp4", "duration": 40, "width": 1280, "height": 720, "codec": "h264" }
+        ],
+        "tracks": [
+            { "id": "v1", "type": "video", "order": 0, "visible": true, "isMain": true,
+              "clips": [ { "id": "c1", "assetId": "v", "src_range": { "start": 0, "end": 5 }, "timelineIn": 0, "timelineOut": 5,
+                "transform": { "x": 0.5, "y": 0.5, "scale_x": 1, "scale_y": 1, "rotation": 0, "opacity": 1 }, "volume": 1, "speed": 1 } ] },
+            { "id": "a1", "type": "audio", "order": 1, "visible": true,
+              "clips": [ { "id": "c2", "assetId": "a", "src_range": { "start": 0, "end": 40 }, "timelineIn": 0, "timelineOut": 40,
+                "transform": { "x": 0.5, "y": 0.5, "scale_x": 1, "scale_y": 1, "rotation": 0, "opacity": 1 }, "volume": 1, "speed": 1 } ] }
+        ]
+    }"#
+    .to_string()
+}
+
+#[test]
+fn test_render_5s_video_40s_audio_black_tail() {
+    let json = video5_audio40_project_json();
+    let cmd = render(&json).expect("5s视频+40s音频工程不应 panic");
+    // 1) 黑场修复：overlay 必须 eof_action=pass（视频结束后透传 base，不复用末帧）
+    assert!(cmd.contains("eof_action=pass"), "应含 eof_action=pass 修复末帧定格，实际: {}", cmd);
+    // 2) 底色时长 = 40s（音轨最大结束时间），而非 5s（视频时长）
+    assert!(cmd.contains("color=c=black:s=1280x720:d=40"), "底色应铺满 40s 时间轴，实际: {}", cmd);
+    // 3) 输出总时长 = 40s
+    assert!(cmd.contains("-t 40"), "输出时长应为 40s，实际: {}", cmd);
+}
+
+/// 无 ffmpeg 时跳过真实导出+像素验证的辅助判断
+fn ffmpeg_available() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 运行 ffmpeg，返回 stdout 原始字节（失败返回空）
+fn run_ffmpeg(args: &[&str]) -> Vec<u8> {
+    std::process::Command::new("ffmpeg")
+        .args(args)
+        .output()
+        .map(|o| o.stdout)
+        .unwrap_or_default()
+}
+
+/// 抽取 `t` 秒处单帧的灰度平均值（luma，0~255）
+fn frame_luma(path: &str, t: f64) -> f64 {
+    let data = run_ffmpeg(&[
+        "-hide_banner", "-loglevel", "error",
+        "-ss", &format!("{}", t), "-i", path,
+        "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-",
+    ]);
+    if data.is_empty() { return 0.0; }
+    let sum: u64 = data.iter().map(|&b| b as u64).sum();
+    sum as f64 / data.len() as f64
+}
+
+#[test]
+fn test_export_5s_video_40s_audio_black_tail_pixels() {
+    if !ffmpeg_available() {
+        eprintln!("跳过：环境无 ffmpeg，无法生成素材并验证像素");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("aicut_black_tail_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let vpath = dir.join("v.mp4");
+    let apath = dir.join("a.m4a");
+    let out = dir.join("out.mp4");
+
+    // 5s 灰色视频（luma≈128）+ 40s 正弦音频，作为素材
+    let _ = run_ffmpeg(&[
+        "-y", "-f", "lavfi", "-i", "color=c=gray:s=160x120:r=25:d=5",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", vpath.to_str().unwrap(),
+    ]);
+    let _ = run_ffmpeg(&[
+        "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=40",
+        "-c:a", "aac", apath.to_str().unwrap(),
+    ]);
+    if !vpath.exists() || !apath.exists() {
+        eprintln!("跳过：生成测试素材失败");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+
+    let json = format!(
+        r#"{{
+        "version": "1.0",
+        "canvas": {{ "width": 160, "height": 120, "fps": 30, "sample_rate": 48000 }},
+        "assets": [
+            {{ "id": "v", "type": "video", "path": "{}", "duration": 5, "width": 160, "height": 120, "codec": "h264" }},
+            {{ "id": "a", "type": "audio", "path": "{}", "duration": 40, "width": 160, "height": 120, "codec": "h264" }}
+        ],
+        "tracks": [
+            {{ "id": "v1", "type": "video", "order": 0, "visible": true, "isMain": true,
+              "clips": [ {{ "id": "c1", "assetId": "v", "src_range": {{ "start": 0, "end": 5 }}, "timelineIn": 0, "timelineOut": 5,
+                "transform": {{ "x": 0.5, "y": 0.5, "scale_x": 1, "scale_y": 1, "rotation": 0, "opacity": 1 }}, "volume": 1, "speed": 1 }} ] }},
+            {{ "id": "a1", "type": "audio", "order": 1, "visible": true,
+              "clips": [ {{ "id": "c2", "assetId": "a", "src_range": {{ "start": 0, "end": 40 }}, "timelineIn": 0, "timelineOut": 40,
+                "transform": {{ "x": 0.5, "y": 0.5, "scale_x": 1, "scale_y": 1, "rotation": 0, "opacity": 1 }}, "volume": 1, "speed": 1 }} ] }}
+        ]
+    }}"#,
+        vpath.display().to_string().replace('\\', "/"),
+        apath.display().to_string().replace('\\', "/")
+    );
+
+    aicut_engine::export_project(&json, out.to_str().unwrap()).expect("导出应成功");
+
+    // 尾部（35~40s）必须黑场（luma 接近 0）；头部（2s）必须仍在播放灰色视频（luma 显著 > 0）
+    let tail = frame_luma(out.to_str().unwrap(), 38.0);
+    let head = frame_luma(out.to_str().unwrap(), 2.0);
+    assert!(tail < 10.0, "38s 处应黑场（luma 接近 0），实际 luma={}", tail);
+    assert!(head > 100.0, "2s 处应仍在播放灰色视频，实际 luma={}", head);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -702,7 +702,9 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let ox = offset_x(c, w); let oy = offset_y(c, h);
                 // 不再 shortest=1：底色已固定为工程时长并铺满整个时间轴，
                 // 视频/文字轨结束后透出黑色底色，避免末帧冻结造成卡顿。
-                nodes.push(format!("[{}][{}]overlay=x={}:y={}[{}]", acc, src, ox, oy, next_acc));
+                // eof_action=pass：从输入（视频轨）结束时透传主输入（黑场 base），
+                // 而不是默认 repeat（复用视频最后一帧 → 末帧定格卡顿）。
+                nodes.push(format!("[{}][{}]overlay=x={}:y={}:eof_action=pass[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
                 let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
@@ -764,7 +766,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let next_acc = format!("va{}", vci + 1);
                 // base 必须被消费：单轨（主轨直接产出）也必须 overlay 到 base，否则 color 滤镜输出孤立导致 filtergraph 绑定失败。
                 // 底色时长 = 工程时间轴长度，输出时长由底色决定，避免音轨 outlast 视频。
-                nodes.push(format!("[{}][{}]overlay=x=0:y=0[{}]", acc, track_acc, next_acc));
+                // eof_action=pass：视频轨结束后透传黑场 base，避免复用最后一帧造成末帧定格。
+                nodes.push(format!("[{}][{}]overlay=x=0:y=0:eof_action=pass[{}]", acc, track_acc, next_acc));
                 acc = next_acc;
             }
         }
