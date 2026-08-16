@@ -551,6 +551,77 @@ pub fn build_subtitle_overlay_filters(
     height: u32,
     fontfile_dir: &str,
 ) -> Vec<String> {
+    build_subtitle_overlay_filters_impl(sub, width, height, fontfile_dir, |item| {
+        (timeline_in + item.start, timeline_in + item.end)
+    })
+}
+
+/// 完整导出路径用：字幕 item 是素材源时间戳（ASR 结果），预览端按 clipSourceTime
+/// 把时间线时间映射为源时间再匹配；导出 drawtext 的 enable 需要时间线时间，故反向换算
+/// （变速/倒放/裁剪/曲线变速）。冻结帧（freeze）源时间非单调、语义不唯一，不特殊处理。
+pub fn build_subtitle_overlay_filters_for_clip(
+    sub: &SubtitleOverlay,
+    clip: &crate::project::Clip,
+    width: u32,
+    height: u32,
+    fontfile_dir: &str,
+) -> Vec<String> {
+    build_subtitle_overlay_filters_impl(sub, width, height, fontfile_dir, |item| {
+        (source_to_timeline(item.start, clip), source_to_timeline(item.end, clip))
+    })
+}
+
+/// 源素材时间 → 时间线时间（`clip_source_time` 的逆映射），用于字幕 item 定位。
+///
+/// 正向映射（预览端 `clipSourceTime`，见 strategy.rs）：
+///   `src = src_range.start + off · speed`（正放）；`src_range.start + (dur - off) · speed`（倒放）
+/// 逆向（给定源时间 S，求时间线绝对时间 T）：
+/// - 线性：`T = timeline_in + (S - src_range.start) / speed`
+/// - 倒放（reverse 标志，speed 仍为正）：`T = timeline_in + dur - (S - src_range.start) / speed`
+/// - 曲线（curve 非空时忽略 reverse/freeze）：二分反解归一化偏移 `off_norm`，
+///   使 `speed_integral(curve, off_norm, 0) == (S - src_range.start) / dur`，
+///   再 `T = timeline_in + off_norm · dur`。
+fn source_to_timeline(src: f64, clip: &crate::project::Clip) -> f64 {
+    let timeline_in = clip.timeline_in;
+    let dur = clip.timeline_out - timeline_in;
+    let remap = &clip.time_remap;
+    let off = if !remap.curve.is_empty() {
+        let target = if dur > 1e-9 { (src - clip.src_range.start) / dur } else { 0.0 };
+        let mut lo = 0.0f64;
+        let mut hi = 1.0f64;
+        for _ in 0..80 {
+            let mid = 0.5 * (lo + hi);
+            if crate::pipeline::strategy::speed_integral(&remap.curve, mid, 0.0) < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi) * dur
+    } else if remap.reverse {
+        dur - (src - clip.src_range.start) / clip.speed
+    } else {
+        (src - clip.src_range.start) / clip.speed
+    };
+    timeline_in + off
+}
+
+/// 单条字幕 item 的时间线绝对窗口 [start, end)（`source_to_timeline` 的公开封装）。
+/// 供导出端的逐帧 Debug 日志复用，保证与 drawtext 的 enable 窗口完全一致。
+pub fn subtitle_item_timeline(item: &SubtitleItemOverride, clip: &crate::project::Clip) -> (f64, f64) {
+    (source_to_timeline(item.start, clip), source_to_timeline(item.end, clip))
+}
+
+fn build_subtitle_overlay_filters_impl<F>(
+    sub: &SubtitleOverlay,
+    width: u32,
+    height: u32,
+    fontfile_dir: &str,
+    time_of: F,
+) -> Vec<String>
+where
+    F: Fn(&SubtitleItemOverride) -> (f64, f64),
+{
     let fontsize = sub.font_size.unwrap_or(24); // 与预览端 PreviewCanvas 默认 24 对齐
     let fontcolor = sub.color.clone().unwrap_or_else(|| "white".to_string());
     let stroke_width = sub.stroke_width.unwrap_or(0.0);
@@ -573,8 +644,7 @@ pub fn build_subtitle_overlay_filters(
     items.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
     items.into_iter().map(|item| {
         let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
-        let abs_start = timeline_in + item.start;
-        let abs_end = timeline_in + item.end;
+        let (abs_start, abs_end) = time_of(item);
         let mut base = format!(
             "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:enable='between(t,{},{})'",
             escaped, fontsize, fontcolor, stroke_comp, y_pos, abs_start, abs_end
@@ -638,6 +708,81 @@ mod tests {
         assert_eq!(fs.len(), 1);
         assert!(fs[0].contains("你好"));
         assert!(fs[0].contains("between(t,11,13)"));  // 10 + 1 .. 10 + 3
+    }
+
+    #[test]
+    fn test_source_to_timeline_linear_and_reverse() {
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c1","assetId":"a1","src_range":{"start":10,"end":50},"timelineIn":5,"timelineOut":25,"speed":2}"#,
+        ).unwrap();
+        // 线性变速：源时间 12/14 → 时间线 6/7（timeline_in=5 + (12-10)/2 .. (14-10)/2）
+        assert!((source_to_timeline(12.0, &clip) - 6.0).abs() < 1e-6);
+        assert!((source_to_timeline(14.0, &clip) - 7.0).abs() < 1e-6);
+
+        let rev: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c2","assetId":"a2","src_range":{"start":10,"end":30},"timelineIn":0,"timelineOut":20,"speed":1,"time_remap":{"reverse":true}}"#,
+        ).unwrap();
+        // 倒放：源 10 → 末尾(20)，源 30 → 开头(0)
+        assert!((source_to_timeline(10.0, &rev) - 20.0).abs() < 1e-6);
+        assert!((source_to_timeline(30.0, &rev) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_build_subtitle_overlay_filters_for_clip() {
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c1","assetId":"a1","src_range":{"start":10,"end":50},"timelineIn":5,"timelineOut":25,"speed":2}"#,
+        ).unwrap();
+        let s = SubtitleOverlay {
+            items: vec![SubtitleItemOverride { start: 12.0, end: 14.0, text: "变速字幕".into() }],
+            ..Default::default()
+        };
+        let fs = build_subtitle_overlay_filters_for_clip(&s, &clip, 1920, 1080, "");
+        assert_eq!(fs.len(), 1);
+        assert!(fs[0].contains("between(t,6,7)"), "got: {}", fs[0]);
+    }
+
+    // 用户验证标准：timeline_in=6.44, src_range.start=0, speed=1, item 0~5
+    // 必须严格返回绝对时间线窗口 (6.44, 11.44)，既不能遗漏 timeline_in，也不能把 en 算成 st+帧时长。
+    #[test]
+    fn test_subtitle_item_timeline_absolute_window() {
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c","assetId":"a","src_range":{"start":0,"end":5},"timelineIn":6.44,"timelineOut":11.44,"speed":1}"#,
+        ).unwrap();
+        let item = SubtitleItemOverride { start: 0.0, end: 5.0, text: "验证".into() };
+        let (st, en) = subtitle_item_timeline(&item, &clip);
+        assert!((st - 6.44).abs() < 1e-9, "st 应为 6.44，实际 {}", st);
+        assert!((en - 11.44).abs() < 1e-9, "en 应为 11.44，实际 {}", en);
+
+        // 端到端：导出 drawtext 滤镜的 enable 表达式必须用绝对时间线窗口（浮点尾数 11.4400…001 不影响）
+        let s = SubtitleOverlay { items: vec![item], ..Default::default() };
+        let fs = build_subtitle_overlay_filters_for_clip(&s, &clip, 1280, 720, "");
+        assert!(fs[0].contains("enable='between(t,6.44,11.44"), "got: {}", fs[0]);
+    }
+
+    #[test]
+    fn test_source_to_timeline_curve_roundtrip() {
+        // 曲线变速：srcDur=30，曲线 speed 1→2（f1=∫₀¹=1.5），dur=srcDur/f1=20。
+        // clip_source_time 用积分映射 t→src，source_to_timeline 用二分反解 src→t，二者应互逆。
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c","assetId":"a","src_range":{"start":10,"end":40},"timelineIn":5,"timelineOut":25,"speed":1,"time_remap":{"curve":[{"speed":1,"play":0},{"speed":2,"play":1}]}}"#,
+        ).unwrap();
+        for &t in &[5.0, 8.0, 12.0, 15.0, 18.0, 22.0, 25.0] {
+            let (src, _frozen) = crate::pipeline::strategy::clip_source_time(t, &clip);
+            let back = source_to_timeline(src, &clip);
+            assert!((back - t).abs() < 1e-2, "t={} src={} back={}", t, src, back);
+        }
+    }
+
+    #[test]
+    fn test_source_to_timeline_roundtrip() {
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c1","assetId":"a1","src_range":{"start":10,"end":50},"timelineIn":5,"timelineOut":25,"speed":2}"#,
+        ).unwrap();
+        for &t in &[5.0, 8.0, 12.0, 20.0, 25.0] {
+            let (src, _frozen) = crate::pipeline::strategy::clip_source_time(t, &clip);
+            let back = source_to_timeline(src, &clip);
+            assert!((back - t).abs() < 1e-3, "t={} src={} back={}", t, src, back);
+        }
     }
 
     // 关键回归：字幕 items 必须按 start 升序渲染（修复①顺序对齐），乱序构造也应被排序。

@@ -43,6 +43,30 @@ fn fade_gain_at(clip: &Clip, t: f64) -> f32 {
     1.0
 }
 
+// 收集文字/字幕叠加层的 enable 时间窗（时间线绝对时间），用于逐帧 Debug 日志
+// 确认「时间线时间 → 源时间 → 字幕 enable」三者一一对应（`AICUT_DEBUG_EXPORT` 开启时输出）。
+fn collect_overlay_windows(project: &Project) -> Vec<(f64, f64, String)> {
+    let mut windows: Vec<(f64, f64, String)> = Vec::new();
+    for track in &project.tracks {
+        if !track.visible { continue; }
+        for clip in &track.clips {
+            if let Some(t) = &clip.text {
+                if !t.content.trim().is_empty() {
+                    windows.push((clip.timeline_in, clip.timeline_out, format!("text[{}]", t.content)));
+                }
+            }
+            if let Some(s) = &clip.subtitle {
+                for item in &s.items {
+                    if item.text.trim().is_empty() { continue; }
+                    let (st, en) = subtitle::subtitle_item_timeline(item, clip);
+                    windows.push((st, en, format!("sub[{}]", item.text)));
+                }
+            }
+        }
+    }
+    windows
+}
+
 // ════════════════════ ExportConfig ════════════════════
 
 /// 导出配置
@@ -402,7 +426,7 @@ impl<'a> ExportPipeline<'a> {
                     }
                 }
                 if let Some(s) = &clip.subtitle {
-                    for f in subtitle::build_subtitle_overlay_filters(s, clip.timeline_in, w, h, &fontfile_dir) {
+                    for f in subtitle::build_subtitle_overlay_filters_for_clip(s, clip, w, h, &fontfile_dir) {
                         text_filters.push((clip.timeline_in, f));
                     }
                 }
@@ -440,8 +464,26 @@ impl<'a> ExportPipeline<'a> {
         let sample_rate = self.config.sample_rate;
         let fps = self.config.fps;
 
+        // Debug 日志（`AICUT_DEBUG_EXPORT=1` 时启用）：逐帧打印时间线时间、各视频片段源时间、
+        // 以及每条字幕/文字 item 的 enable 状态，用于确认三者一一对应。
+        let debug_enabled = std::env::var("AICUT_DEBUG_EXPORT").is_ok();
+        let debug_windows = if debug_enabled { collect_overlay_windows(self.project) } else { Vec::new() };
+
         while !self.is_done() {
             let t = self.current_time();
+
+            if debug_enabled {
+                let mut line = format!("[export-debug] frame={} t={:.3}", self.current_frame(), t);
+                for cr in self.timeline.clips_at(t).iter().filter(|c| c.track_type == "video" || c.track_type == "effect") {
+                    let (src_t, _frozen) = clip_source_time(t, cr.clip);
+                    line.push_str(&format!(" {}@src={:.3}", cr.clip.id, src_t));
+                }
+                for (st, en, text) in &debug_windows {
+                    let on = t >= *st && t < *en;
+                    line.push_str(&format!(" {}({:.2},{:.2})={}", text, st, en, if on { "ON" } else { "off" }));
+                }
+                eprintln!("{}", line);
+            }
 
             match self.render_video_frame(t) {
                 Ok(frame) => {

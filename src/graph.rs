@@ -298,18 +298,20 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     if !clip_filters.is_empty() { pre.push_str(&format!(",{}", clip_filters)); }
     // 字幕/文字叠加层烧录：GUI 导出走本路径（render→graph.rs），必须把 clip.text /
     // clip.subtitle 烤进视频，否则预览可见、导出成片丢失（#1 P0）。
-    // 复用 subtitle 模块的 drawtext 构造函数。graph.rs 各 clip 链使用**局部时间戳**
-    // （t 从 0 起、到本片段时长 dur 止），故以 0..dur 为 enable 窗口（与 ExportPipeline
-    // 用工程时间线不同）。仅当片段确含 text/subtitle 时才改此链，普通导出不受影响。
+    // 复用 subtitle 模块的 drawtext 构造函数。字幕/文字 clip 无真实素材，resolve_clip_input
+    // 为其合成透明底色流（color=c=black@0，PTS 从 0 起），该底色流 overlay 到主时间线 base
+    // 时两输入 PTS 对齐（都从 0 起），故 drawtext 的 enable 直接用**绝对时间线窗口**：
+    // text → timeline_in~timeline_out；subtitle → subtitle_item_timeline 把源时间戳逆映射为
+    // 时间线绝对秒。t 即全局 PTS，无需 setpts 偏移。仅当片段确含 text/subtitle 时才改此链。
     if dur > 0.0 {
         let fontfile_dir = std::env::var("AICUT_FONTS_DIR").unwrap_or_default();
         if let Some(t) = &c.text {
-            if let Some(f) = subtitle::build_text_overlay_filter(t, 0.0, dur, w, h, &fontfile_dir) {
+            if let Some(f) = subtitle::build_text_overlay_filter(t, c.timeline_in, c.timeline_out, w, h, &fontfile_dir) {
                 pre.push_str(&format!(",{}", f));
             }
         }
         if let Some(s) = &c.subtitle {
-            for f in subtitle::build_subtitle_overlay_filters(s, 0.0, w, h, &fontfile_dir) {
+            for f in subtitle::build_subtitle_overlay_filters_for_clip(s, c, w, h, &fontfile_dir) {
                 pre.push_str(&format!(",{}", f));
             }
         }
