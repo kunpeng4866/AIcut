@@ -119,6 +119,15 @@ impl Compositor {
             Self::rotate_rgba(&scaled, scaled_w, scaled_h, tf.rotation)
         };
 
+        // 2.5 镜像翻转（水平 flip_h / 垂直 flip_v）：与 WebGPU 预览一致，在缩放/旋转之后施加。
+        // 预览端对采样 UV 做 fuv.x=1-fuv.x（水平）/ fuv.y=1-fuv.y（垂直），等效于对旋转后的
+        // 画面缓冲按列/行翻转；输出尺寸不变（AABB 外接矩形仍由旋转步骤决定）。
+        let flipped = if tf.flip_h > 0.5 || tf.flip_v > 0.5 {
+            Self::flip_rgba(&rotated, rotated_w, rotated_h, tf.flip_h > 0.5, tf.flip_v > 0.5)
+        } else {
+            rotated
+        };
+
         // 3. 计算目标位置（Transform.x/y 是归一化坐标，0.5 = 中心）
         //    旋转后的外接矩形居中放置，与预览旋转 quad 的中心一致。
         let center_x = tf.x * (self.width as f64);
@@ -133,7 +142,7 @@ impl Compositor {
             canvas,
             self.width,
             self.height,
-            &rotated,
+            &flipped,
             rotated_w,
             rotated_h,
             dst_x,
@@ -264,6 +273,29 @@ impl Compositor {
         }
 
         (dst, out_w, out_h)
+    }
+
+    /// 镜像翻转 RGBA 帧。
+    ///
+    /// - `flip_h`：水平翻转（反转列，对应预览 `fuv.x = 1 - fuv.x`）。
+    /// - `flip_v`：垂直翻转（反转行，对应预览 `fuv.y = 1 - fuv.y`）。
+    /// - 作用于旋转后的画面内容，与 WebGPU 预览对采样 UV 的翻转一致；输出尺寸不变
+    ///   （AABB 外接矩形仍由旋转步骤决定），故可直接替换 `rotated` 缓冲交给 `over_blit`。
+    /// - 采用最近邻逐像素拷贝，alpha 一并翻转，四角透明区域保持透明。
+    fn flip_rgba(src: &[u8], w: u32, h: u32, flip_h: bool, flip_v: bool) -> Vec<u8> {
+        let w = w as usize;
+        let h = h as usize;
+        let mut dst = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let sy = if flip_v { h - 1 - y } else { y };
+            for x in 0..w {
+                let sx = if flip_h { w - 1 - x } else { x };
+                let src_idx = (sy * w + sx) * 4;
+                let dst_idx = (y * w + x) * 4;
+                dst[dst_idx..dst_idx + 4].copy_from_slice(&src[src_idx..src_idx + 4]);
+            }
+        }
+        dst
     }
 
     /// Over 合成：将 src（带 opacity）blit 到 dst 画布的 (dst_x, dst_y) 位置
@@ -655,6 +687,75 @@ mod tests {
         assert_eq!(dst, src);
         assert_eq!(out_w, 4);
         assert_eq!(out_h, 4);
+    }
+
+    #[test]
+    fn test_flip_rgba_h_swaps_left_right() {
+        // 左半红、右半蓝的 4x2 帧，水平翻转后左蓝右红。
+        let w = 4u32;
+        let h = 2u32;
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let col = if x < w / 2 { [255u8, 0, 0, 255] } else { [0u8, 0, 255, 255] };
+                let i = ((y * w + x) as usize) * 4;
+                src[i..i + 4].copy_from_slice(&col);
+            }
+        }
+        let dst = Compositor::flip_rgba(&src, w, h, true, false);
+        let px = |x: u32, y: u32| -> &[u8] {
+            &dst[((y * w + x) as usize) * 4..((y * w + x) as usize) * 4 + 4]
+        };
+        assert_eq!(px(0, 0), &[0, 0, 255, 255]); // 原行首(红)翻到行尾 → 左列现蓝
+        assert_eq!(px(3, 0), &[255, 0, 0, 255]); // 原行尾(蓝)翻到行首 → 右列现红
+        // 垂直方向不变
+        assert_eq!(px(1, 0), &[0, 0, 255, 255]);
+        // 尺寸不变
+        assert_eq!(dst.len(), src.len());
+    }
+
+    #[test]
+    fn test_flip_rgba_v_swaps_top_bottom() {
+        // 上红下蓝的 2x4 帧，垂直翻转后上蓝下红。
+        let w = 2u32;
+        let h = 4u32;
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let col = if y < h / 2 { [255u8, 0, 0, 255] } else { [0u8, 0, 255, 255] };
+                let i = ((y * w + x) as usize) * 4;
+                src[i..i + 4].copy_from_slice(&col);
+            }
+        }
+        let dst = Compositor::flip_rgba(&src, w, h, false, true);
+        let px = |x: u32, y: u32| -> &[u8] {
+            &dst[((y * w + x) as usize) * 4..((y * w + x) as usize) * 4 + 4]
+        };
+        assert_eq!(px(0, 0), &[0, 0, 255, 255]); // 原底部(蓝)翻到顶部
+        assert_eq!(px(0, 3), &[255, 0, 0, 255]); // 原顶部(红)翻到底部
+    }
+
+    #[test]
+    fn test_composite_applies_flip_on_layer() {
+        // 端到端：含 flip_h 的图层经 composite_layer（经由 composite）应水平翻转。
+        let comp = Compositor::new(4, 2);
+        let mut frame = make_frame(4, 2, 0, 0, 0, 0, 0.0);
+        // 手写左红右蓝
+        for y in 0..2 {
+            for x in 0..4 {
+                let col = if x < 2 { [255u8, 0, 0, 255] } else { [0u8, 0, 255, 255] };
+                let i = ((y * 4 + x) as usize) * 4;
+                frame.data[i..i + 4].copy_from_slice(&col);
+            }
+        }
+        let mut tf = default_transform();
+        tf.flip_h = 1.0;
+        let result = comp.composite(&[make_layer(frame, tf)]);
+        let px = |x: u32, y: u32| -> &[u8] {
+            &result.data[((y * 4 + x) as usize) * 4..((y * 4 + x) as usize) * 4 + 4]
+        };
+        assert_eq!(px(0, 0), &[0, 0, 255, 255]); // 翻转后左列=原右(蓝)
+        assert_eq!(px(3, 0), &[255, 0, 0, 255]); // 翻转后右列=原左(红)
     }
 
     #[test]
