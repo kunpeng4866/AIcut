@@ -208,7 +208,7 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
     let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
     let input = resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map);
+    let chain = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map, None, None);
     nodes.extend(chain);
     Some(label)
 }
@@ -252,11 +252,15 @@ fn resolve_clip_input(
     None
 }
 
-fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>) -> Vec<String> {
+fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, target_w: Option<u32>, target_h: Option<u32>) -> Vec<String> {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
-    let sw = (w as f64 * sx).round() as u32;
-    let sh = (h as f64 * sy).round() as u32;
+    // 目标尺寸：单片段路径显式传入（已做 contain 适配 + 用户缩放）时优先使用；
+    // 多片段轨路径传 None，退回旧的按画布比例缩放（保证 concat/xfade 各输入同尺寸）。
+    let base_w = target_w.unwrap_or(w);
+    let base_h = target_h.unwrap_or(h);
+    let sw = target_w.unwrap_or_else(|| (w as f64 * sx).round() as u32);
+    let sh = target_h.unwrap_or_else(|| (h as f64 * sy).round() as u32);
     // 关键帧动画：scale 走 eval=frame 时间表达式（前端 `scale` 键同时驱动两轴，#6 修复）。
     let sx_a = kf_factor(c, &["transform.scaleX", "scaleX", "scale"], c.timeline_in);
     let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
@@ -267,15 +271,15 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let mut pre = match (&sx_a, &sy_a) {
         (Some(ex), Some(ey)) => format!(
             "{}scale=w='trunc(({})*{}/2)*2':h='trunc(({})*{}/2)*2':eval=frame",
-            input, ex, w, ey, h
+            input, ex, base_w, ey, base_h
         ),
         (Some(ex), None) => format!(
             "{}scale=w='trunc(({})*{}/2)*2':h={}:eval=frame",
-            input, ex, w, sh
+            input, ex, base_w, sh
         ),
         (None, Some(ey)) => format!(
             "{}scale=w={}:h='trunc(({})*{}/2)*2':eval=frame",
-            input, sw, ey, h
+            input, sw, ey, base_h
         ),
         (None, None) => format!("{}scale={}:{}", input, sw, sh),
     };
@@ -546,22 +550,42 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     nodes
 }
 
-/// 计算 clip 在画布上的水平偏移（像素）。关键帧位置 X 走 overlay 的 x 时间表达式（#6 修复）。
-fn offset_x(c: &Clip, w: u32) -> String {
-    if let Some(e) = kf_factor(c, &["transform.x", "x"], c.timeline_in) {
-        return format!("'(({})-0.5)*{}'", e, w);
+/// contain 适配：把源视频等比缩进画布（留黑边、不变形、不裁切），返回适配后尺寸。
+/// 与 WebGPU 预览 WGSL 的 contain 逻辑一致：源更宽 → 宽度撑满、上下留边；
+/// 源更高 → 高度撑满、左右留边。源尺寸缺失时回退画布尺寸。
+fn contain_fit_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 { return (canvas_w, canvas_h); }
+    let src_aspect = src_w as f64 / src_h as f64;
+    let canvas_aspect = canvas_w as f64 / canvas_h as f64;
+    if src_aspect > canvas_aspect {
+        // 源更宽：宽度撑满画布，高度按比例（上下黑边）
+        let h = (canvas_w as f64 / src_aspect).round().max(2.0) as u32;
+        (canvas_w, h)
+    } else {
+        // 源更高：高度撑满画布，宽度按比例（左右黑边）
+        let w = (canvas_h as f64 * src_aspect).round().max(2.0) as u32;
+        (w, canvas_h)
     }
-    let x = keyframed(c, "transform.x", c.transform.x);
-    format!("{}", ((x - 0.5) * w as f64).round() as i64)
 }
 
-/// 计算 clip 在画布上的垂直偏移（像素）。关键帧位置 Y 走 overlay 的 y 时间表达式（#6 修复）。
-fn offset_y(c: &Clip, h: u32) -> String {
+/// 计算 clip 在画布上的水平偏移（像素）：把 out_w 宽度的 clip 居中到 transform.x 指定的中心。
+/// 关键帧位置 X 走 overlay 的 x 时间表达式（#6 修复）。
+fn offset_x(c: &Clip, w: u32, out_w: u32) -> String {
+    if let Some(e) = kf_factor(c, &["transform.x", "x"], c.timeline_in) {
+        return format!("'(({})*{}-{})'", e, w, out_w as f64 / 2.0);
+    }
+    let x = keyframed(c, "transform.x", c.transform.x);
+    format!("{}", (x * w as f64 - out_w as f64 / 2.0).round() as i64)
+}
+
+/// 计算 clip 在画布上的垂直偏移（像素）：把 out_h 高度的 clip 居中到 transform.y 指定的中心。
+/// 预览坐标 y 原点在左下角，clip 中心 y = (1 - transform.y) * h。
+fn offset_y(c: &Clip, h: u32, out_h: u32) -> String {
     if let Some(e) = kf_factor(c, &["transform.y", "y"], c.timeline_in) {
-        return format!("'(0.5-({}))*{}'", e, h);
+        return format!("'((1.0-({}))*{}-{})'", e, h, out_h as f64 / 2.0);
     }
     let y = keyframed(c, "transform.y", c.transform.y);
-    format!("{}", ((0.5 - y) * h as f64).round() as i64)
+    format!("{}", ((1.0 - y) * h as f64 - out_h as f64 / 2.0).round() as i64)
 }
 
 pub struct FilterGraphBuilder;
@@ -698,10 +722,26 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c = clips[0];
                 let src = format!("vs{}", vci);
                 let Some(input) = resolve_clip_input(c, vci, &asset_to_idx, w, h, project.canvas.fps, &mut nodes, 1e9) else { vci += 1; continue; };
-                let chain = build_video_chain(c, &input, w, h, &src, project.canvas.fps, &matte_map, &bg_map);
+                // contain 适配：预览对每个视频 clip 先按源宽高比等比缩进画布（留黑边），
+                // 再乘用户缩放。导出此前直接按画布尺寸缩放（比例失真 + 叠加错位），
+                // 与预览不一致（# 问题②：窄素材被拉伸铺满、与预览看到的不同）。
+                // 此处复刻预览逻辑：先 contain 到画布，再乘 transform.scale。
+                let asset = project.asset_by_id(&c.asset_id);
+                let (cfit_w, cfit_h) = contain_fit_size(
+                    asset.map(|a| a.width).unwrap_or(0),
+                    asset.map(|a| a.height).unwrap_or(0),
+                    w, h,
+                );
+                let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
+                let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
+                let sw = (cfit_w as f64 * sx).round().max(2.0) as u32;
+                let sh = (cfit_h as f64 * sy).round().max(2.0) as u32;
+                let chain = build_video_chain(c, &input, w, h, &src, project.canvas.fps, &matte_map, &bg_map, Some(sw), Some(sh));
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
-                let ox = offset_x(c, w); let oy = offset_y(c, h);
+                // 居中叠加：把 sw×sh 的 clip 中心对齐到 transform.(x,y) 指定的画布中心，
+                // 而非左上角——修复此前小尺寸 clip 被左上对齐（与预览居中不符）的问题。
+                let ox = offset_x(c, w, sw); let oy = offset_y(c, h, sh);
                 // 不再 shortest=1：底色已固定为工程时长并铺满整个时间轴，
                 // 视频/文字轨结束后透出黑色底色，避免末帧冻结造成卡顿。
                 // eof_action=pass：从输入（视频轨）结束时透传主输入（黑场 base），
@@ -780,13 +820,29 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     //   出片段在转场窗 [outT-dur, outT] 乘 cos(progress·π/2)（1→0 淡出）
     //   入片段在同窗乘 sin(progress·π/2)（0→1 淡入）
     //   窗外保持原增益。最后统一 amix(normalize=0) 保留 equal-power 合成，alimiter 限幅防削波。
-    // 音频源：有 audio 轨则取 audio 轨片段；否则取 video/effect 轨自带音频（与旧逻辑一致）。
-    let mut aout_label = String::new();
-    let audio_source_clips: Vec<&Clip> = if !audio_clips.is_empty() {
-        audio_clips.clone()
-    } else {
-        video_clips.iter().map(|(_, c)| *c).collect()
+    // 音频源：混合「视频轨自带音轨 + 独立音频轨」。
+    // 旧逻辑：存在音频轨时只用音频轨片段，整体丢弃视频自带音轨 → 导出后视频无声、
+    // 仅背景音（与预览不一致，# 问题①）。修正为混合全部音轨，仅跳过被静音 / 非独奏 /
+    // 隐藏的视频轨（与预览 trackHasAudio 一致）。
+    let has_solo = project.tracks.iter().any(|t| t.solo);
+    let track_audible = |t: &Track| -> bool {
+        if t.muted { return false; }
+        if has_solo && !t.solo { return false; }
+        if t.track_type == "video" && t.visible == false { return false; }
+        true
     };
+    let mut aout_label = String::new();
+    let mut audio_source_clips: Vec<&Clip> = Vec::new();
+    for (_, c) in &video_clips {
+        if let Some(t) = project.tracks.iter().find(|t| t.clips.iter().any(|cc| cc.id == c.id)) {
+            if track_audible(t) { audio_source_clips.push(c); }
+        }
+    }
+    for c in &audio_clips {
+        if let Some(t) = project.tracks.iter().find(|t| t.clips.iter().any(|cc| cc.id == c.id)) {
+            if track_audible(t) { audio_source_clips.push(c); }
+        }
+    }
     if !audio_source_clips.is_empty() {
         let mut audio_labels: Vec<String> = Vec::new();
         let mut audio_nodes: Vec<String> = Vec::new();
