@@ -208,7 +208,7 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
     let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
     let input = resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur)?;
     let label = format!("vs{}", ci);
-    let chain = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map, None, None);
+    let (chain, _, _) = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map, None, None);
     nodes.extend(chain);
     Some(label)
 }
@@ -252,7 +252,11 @@ fn resolve_clip_input(
     None
 }
 
-fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, target_w: Option<u32>, target_h: Option<u32>) -> Vec<String> {
+/// 构建单个 clip 的视频滤镜图，返回 (滤镜图语句列表, 最终输出宽度, 最终输出高度)。
+/// 最终输出宽高用于 overlay 居中计算。当单片段路径显式传入 target_w/h 且 clip 含静态
+/// 旋转时，返回 AABB 外接矩形尺寸，使旋转后的完整画面（四角透明）都能被渲染，与 WebGPU
+/// 预览一致；多片段 concat 路径传 None/None，保持输入尺寸不变，避免 concat 分辨率协商失败。
+fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u32, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, target_w: Option<u32>, target_h: Option<u32>) -> (Vec<String>, u32, u32) {
     let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
     let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
     // 目标尺寸：单片段路径显式传入（已做 contain 适配 + 用户缩放）时优先使用；
@@ -261,6 +265,10 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let base_h = target_h.unwrap_or(h);
     let sw = target_w.unwrap_or_else(|| (w as f64 * sx).round() as u32);
     let sh = target_h.unwrap_or_else(|| (h as f64 * sy).round() as u32);
+    // 默认输出尺寸 = 缩放后尺寸；含静态旋转且走单片段 overlay 路径时再扩展为 AABB。
+    let mut out_w = sw;
+    let mut out_h = sh;
+    let has_explicit_target = target_w.is_some() && target_h.is_some();
     // 关键帧动画：scale 走 eval=frame 时间表达式（前端 `scale` 键同时驱动两轴，#6 修复）。
     let sx_a = kf_factor(c, &["transform.scaleX", "scaleX", "scale"], c.timeline_in);
     let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
@@ -293,10 +301,24 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let rot_a = kf_factor(c, &["transform.rotation", "rotation"], c.timeline_in);
     if let Some(re) = rot_a {
         // 关键帧旋转：rotate 的 a 表达式逐帧求值（支持 t），#6 修复。
+        // 关键帧暂保持输入尺寸输出，避免 AABB 随时间变化导致 overlay 偏移复杂化。
         pre.push_str(&format!(",rotate=a='({})*PI/180'", re));
     } else {
         let rot = keyframed(c, "transform.rotation", c.transform.rotation);
-        if rot.abs() > 0.01 { pre.push_str(&format!(",rotate={}*PI/180", fmt(rot))); }
+        if rot.abs() > 0.01 {
+            if has_explicit_target {
+                // 静态旋转 + 单片段 overlay 路径：扩展为 AABB 外接矩形，四角透明，
+                // 使旋转后的完整画面（视觉上矩形→菱形）与 WebGPU 预览一致，避免八角形。
+                let rad = rot * std::f64::consts::PI / 180.0;
+                let abs_cos = rad.cos().abs();
+                let abs_sin = rad.sin().abs();
+                out_w = (sw as f64 * abs_cos + sh as f64 * abs_sin).round().max(1.0) as u32;
+                out_h = (sw as f64 * abs_sin + sh as f64 * abs_cos).round().max(1.0) as u32;
+                pre.push_str(&format!(",rotate={}*PI/180:ow={}:oh={}:c=none", fmt(rot), out_w, out_h));
+            } else {
+                pre.push_str(&format!(",rotate={}*PI/180", fmt(rot)));
+            }
+        }
     }
     let clip_filters = build_clip_filters(c).unwrap_or_default();
     if !clip_filters.is_empty() { pre.push_str(&format!(",{}", clip_filters)); }
@@ -561,7 +583,7 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     }
     // 尾部：opacity + fps（tail 以逗号开头，pre_tail 是标签，标签后直接接滤镜不能留逗号）。
     nodes.push(format!("[{pre_tail}]{}[{label}]", tail.trim_start_matches(',')));
-    nodes
+    (nodes, out_w, out_h)
 }
 
 /// contain 适配：把源视频等比缩进画布（留黑边、不变形、不裁切），返回适配后尺寸。
@@ -752,12 +774,13 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let sy = keyframed(c, "transform.scaleY", c.transform.scale_y).max(0.01);
                 let sw = (cfit_w as f64 * sx).round().max(2.0) as u32;
                 let sh = (cfit_h as f64 * sy).round().max(2.0) as u32;
-                let chain = build_video_chain(c, &input, w, h, &src, project.canvas.fps, &matte_map, &bg_map, Some(sw), Some(sh));
+                let (chain, out_w, out_h) = build_video_chain(c, &input, w, h, &src, project.canvas.fps, &matte_map, &bg_map, Some(sw), Some(sh));
                 nodes.extend(chain);
                 let next_acc = format!("va{}", vci + 1);
-                // 居中叠加：把 sw×sh 的 clip 中心对齐到 transform.(x,y) 指定的画布中心，
-                // 而非左上角——修复此前小尺寸 clip 被左上对齐（与预览居中不符）的问题。
-                let ox = offset_x(c, w, sw); let oy = offset_y(c, h, sh);
+                // 居中叠加：把旋转后的实际输出尺寸 out_w×out_h 中心对齐到 transform.(x,y)
+                // 指定的画布中心。若含静态旋转，out_w/h 已是 AABB 外接矩形，保证四角透明
+                // 的完整菱形与 WebGPU 预览一致；无旋转时 out_w/h = sw/sh。
+                let ox = offset_x(c, w, out_w); let oy = offset_y(c, h, out_h);
                 // 不再 shortest=1：底色已固定为工程时长并铺满整个时间轴，
                 // 视频/文字轨结束后透出黑色底色，避免末帧冻结造成卡顿。
                 // eof_action=pass：从输入（视频轨）结束时透传主输入（黑场 base），
