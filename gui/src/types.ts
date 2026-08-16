@@ -4,6 +4,8 @@ import type { SubtitleGenResult } from './aiTypes';
 export interface CanvasConfig { width: number; height: number; fps?: number; sample_rate?: number }
 export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number; proxyPath?: string }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number; flip_h?: number; flip_v?: number }
+// 自由裁切：归一化源空间(0..1, y-down)，(x,y)=裁切框左上角，(w,h)=宽高。{0,0,1,1}=不裁切(显示整帧)。
+export interface CropConfig { x: number; y: number; w: number; h: number }
 export interface RangeConfig { start: number; end: number }
 // 文字背景
 export interface TextBackground {
@@ -70,7 +72,7 @@ export interface TimeRemapConfig { reverse?: boolean; freeze?: FreezeConfig | nu
 
 export interface ClipConfig {
   id: string; assetId: string; src_range: RangeConfig; timelineIn: number; timelineOut: number;
-  transform?: TransformConfig; volume?: number; speed?: number;
+  transform?: TransformConfig; crop?: CropConfig; volume?: number; speed?: number;
   time_remap?: TimeRemapConfig;
   effects?: any[]; masks?: MaskConfig[]; filters?: any[]; keyframes?: Record<string, any>;
   text?: TextContent;

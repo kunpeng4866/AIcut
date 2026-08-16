@@ -102,6 +102,32 @@ pub struct Range {
     pub end: f64,
 }
 
+/// 自由裁剪区域（归一化 0..1，SOURCE 空间，y-down）。
+/// `{x,y}` = 裁剪框左上角，`{w,h}` = 尺寸；`{0,0,1,1}` = 不裁剪（整帧）。
+/// GUI 序列化为 JSON：`{ "x": f32, "y": f32, "w": f32, "h": f32 }`
+/// （键名与字段名一致，无需 rename），缺省字段按 f32 默认 0。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CropRect {
+    /// 裁剪框左上角 x（归一化 0..1，SOURCE 空间，y-down）
+    pub x: f32,
+    /// 裁剪框左上角 y（归一化 0..1，SOURCE 空间，y-down）
+    pub y: f32,
+    /// 裁剪框宽度（归一化 0..1，相对 SOURCE 宽度）
+    pub w: f32,
+    /// 裁剪框高度（归一化 0..1，相对 SOURCE 高度）
+    pub h: f32,
+}
+
+impl CropRect {
+    /// 是否等价"不裁剪"（整帧 {0,0,1,1} 容差内）。
+    pub fn is_full_frame(&self) -> bool {
+        (self.x as f64).abs() < 1e-6
+            && (self.y as f64).abs() < 1e-6
+            && (self.w as f64 - 1.0).abs() < 1e-6
+            && (self.h as f64 - 1.0).abs() < 1e-6
+    }
+}
+
 /// 速度曲线控制点：(播放时间位置, 速度倍率)，用于构建分段线性 setpts 表达式
 ///
 /// 每个关键帧 = (play, speed)：在播放时间线 `play` 秒处，素材以 `speed` 倍率推进。
@@ -222,6 +248,12 @@ pub struct Clip {
     pub timeline_out: f64,
     #[serde(default = "default_transform")]
     pub transform: Transform,
+    /// 自由裁剪（归一化 0..1，SOURCE 空间，y-down）。None = 不裁剪；
+    /// `{0,0,1,1}` = 整帧（无裁剪，等价 None）。导出两端（graph.rs / compositor.rs）
+    /// 都需支持：裁剪区域作为新的"源"，后续 transform（缩放/旋转/翻转/位置）作用于
+    /// 裁剪后的矩形（视为满格源），与 WebGPU 预览一致。
+    #[serde(default)]
+    pub crop: Option<CropRect>,
     #[serde(default = "one_f")]
     pub volume: f64,
     #[serde(default = "one_f")]
@@ -436,7 +468,7 @@ mod tests {
                             timeline_in: 0.0, timeline_out: 5.0,
                             transform: Transform::default(),
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None, crop: None,
                         },
                         Clip {
                             id: "c2".into(), asset_id: "a2".into(),
@@ -444,7 +476,7 @@ mod tests {
                             timeline_in: 5.0, timeline_out: 15.0,
                             transform: Transform::default(),
                             volume: 1.0, speed: 1.0,
-                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
+                            effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None, crop: None,
                         },
                     ],
                     ..Default::default()
@@ -507,7 +539,7 @@ mod tests {
                     timeline_in: 0.0, timeline_out: 5.0,
                     transform: Transform::default(),
                     volume: 1.0, speed: 1.0,
-                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
+                    effects: vec![], masks: vec![], filters: vec![], keyframes: Default::default(), speed_curve: vec![], time_remap: TimeRemap::default(), text: None, subtitle: None, transition: None, audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None, crop: None,
                 }],
                 ..Default::default()
             }],

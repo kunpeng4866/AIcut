@@ -7,7 +7,7 @@
 //! Transform 应用顺序：缩放 → 旋转（双线性插值，中心为原点）→ 位置 → 不透明度
 
 use crate::pipeline::strategy::{PixelFormat, VideoFrame};
-use crate::project::Transform;
+use crate::project::{CropRect, Transform};
 
 // ════════════════════ 类型定义 ════════════════════
 
@@ -20,6 +20,9 @@ pub struct CompositeLayer {
     pub transform: Transform,
     /// 转场 wipe 遮罩：画布归一化矩形 (x0,y0,x1,y1)，y-down；仅保留矩形内像素。None = 不裁剪。
     pub reveal_mask: Option<(f32, f32, f32, f32)>,
+    /// 自由裁剪（归一化 0..1，SOURCE 空间，y-down）。None = 不裁剪。
+    /// 在 scale→rotate→flip→over_blit 之前，把 frame 的裁剪子矩形作为新的"源"。
+    pub crop: Option<CropRect>,
 }
 
 // ════════════════════ Compositor ════════════════════
@@ -70,14 +73,40 @@ impl Compositor {
 
     /// 合成单层到画布（带 Transform）
     fn composite_layer(&self, canvas: &mut [u8], layer: &CompositeLayer) {
-        let frame = &layer.frame;
         let tf = &layer.transform;
+
+        // 自由裁剪（CropRect）：在 scale→rotate→flip→over_blit 之前，从 SOURCE 帧提取
+        // 裁剪子矩形（源像素坐标），作为新的"源"（cw×ch）交给后续变换管道。
+        // 归一化 0..1（SOURCE 空间，y-down）：cx=round(x*sw), cy=round(y*sh),
+        // cw=round(w*sw), ch=round(h*sh)，钳入边界，cw/ch 至少 1。
+        // None 或整帧 {0,0,1,1} → 使用原始 frame（不改动原管道行为）。
+        let (src_data, src_w, src_h) = match &layer.crop {
+            Some(cr) if !cr.is_full_frame() => {
+                let full_w = layer.frame.width as i64;
+                let full_h = layer.frame.height as i64;
+                let cx = (cr.x as f64 * full_w as f64).round().clamp(0.0, full_w as f64) as i64;
+                let cy = (cr.y as f64 * full_h as f64).round().clamp(0.0, full_h as f64) as i64;
+                let cw = (cr.w as f64 * full_w as f64).round().clamp(1.0, (full_w - cx) as f64).max(1.0) as u32;
+                let ch = (cr.h as f64 * full_h as f64).round().clamp(1.0, (full_h - cy) as f64).max(1.0) as u32;
+                let cx = cx as usize;
+                let cy = cy as usize;
+                let mut sub = vec![0u8; (cw as usize) * (ch as usize) * 4];
+                for row in 0..(ch as usize) {
+                    let src_row = ((cy + row) * (full_w as usize) + cx) * 4;
+                    let dst_row = row * (cw as usize) * 4;
+                    sub[dst_row..dst_row + (cw as usize) * 4]
+                        .copy_from_slice(&layer.frame.data[src_row..src_row + (cw as usize) * 4]);
+                }
+                (sub, cw, ch)
+            }
+            _ => (layer.frame.data.clone(), layer.frame.width, layer.frame.height),
+        };
 
         // contain-fit 与 WebGPU 预览对齐：先按资产/画布宽高比做一次 fit，再乘用户缩放。
         // 预览 shader 中：
         //   videoAspect > canvasAspect ? fitScale=(1, canvasAspect/videoAspect)
         //                              : fitScale=(videoAspect/canvasAspect, 1)
-        let frame_aspect = frame.width as f64 / (frame.height as f64).max(1.0);
+        let frame_aspect = src_w as f64 / (src_h as f64).max(1.0);
         let canvas_aspect = self.width as f64 / (self.height as f64).max(1.0);
         let (fit_x, fit_y) = if frame_aspect > canvas_aspect {
             (1.0, canvas_aspect / frame_aspect)
@@ -92,20 +121,20 @@ impl Compositor {
         let scaled_w = ((self.width as f64) * eff_scale_x).round().max(1.0) as u32;
         let scaled_h = ((self.height as f64) * eff_scale_y).round().max(1.0) as u32;
 
-        let scaled = if scaled_w == frame.width && scaled_h == frame.height {
-            frame.data.clone()
+        let scaled = if scaled_w == src_w && scaled_h == src_h {
+            src_data.clone()
         } else {
-            let sx = if frame.width == 0 {
+            let sx = if src_w == 0 {
                 1.0
             } else {
-                scaled_w as f64 / frame.width as f64
+                scaled_w as f64 / src_w as f64
             };
-            let sy = if frame.height == 0 {
+            let sy = if src_h == 0 {
                 1.0
             } else {
-                scaled_h as f64 / frame.height as f64
+                scaled_h as f64 / src_h as f64
             };
-            Self::scale_nearest(&frame.data, frame.width, frame.height, sx, sy)
+            Self::scale_nearest(&src_data, src_w, src_h, sx, sy)
         };
 
         // 2. 旋转（围绕中心，双线性插值）。输出尺寸为旋转后外接矩形（AABB），
@@ -414,7 +443,7 @@ mod tests {
     }
 
     fn make_layer(frame: VideoFrame, tf: Transform) -> CompositeLayer {
-        CompositeLayer { frame, transform: tf, reveal_mask: None }
+        CompositeLayer { frame, transform: tf, reveal_mask: None, crop: None }
     }
 
     #[test]

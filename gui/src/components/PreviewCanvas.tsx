@@ -6,6 +6,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import { useWebGPUPreview, type ActiveVideoClip } from './WebGPUPreview';
+import PreviewTransformOverlay from './PreviewTransformOverlay';
 import type { ClipConfig, TrackConfig, AssetConfig, SpeedPointConfig, KeyingConfig } from '../types';
 import { rawSpeedIntegral, rawSpeedAt } from '../utils/speedCurve';
 import { ClipFrameCache, isRVFCSupported } from '../utils/frameCache';
@@ -1193,6 +1194,8 @@ export default function PreviewCanvas() {
               ))}
               {/* 可见 canvas：WebGPU 渲染 */}
               <canvas ref={canvasRef} style={theme.canvas} onClick={handleTogglePlay} />
+              {/* 预览交互覆盖层：拖拽移动/缩放/旋转/裁切，并与右侧面板联动 */}
+              <PreviewTransformOverlay />
             </>
           ) : (
             <>

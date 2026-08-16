@@ -277,6 +277,23 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
     let mut nodes: Vec<String> = Vec::new();
 
+    // 0) 自由裁剪（CropRect）：在 scale/rotate/xfade 之前，对 SOURCE 帧做 crop。
+    // 归一化 0..1（SOURCE 空间，y-down）→ ffmpeg 表达式 crop=iw*W:ih*H:iw*X:ih*Y。
+    // 仅当 crop 存在且非整帧 {0,0,1,1} 时插入；否则保持原链与输入不变。
+    // 注意：滤镜链语法要求后续 filter 用逗号分隔，故 crop 参数末尾必须带 ','。
+    let crop_prefix = match &c.crop {
+        Some(cr) if !cr.is_full_frame() => format!(
+            "{}crop=iw*{}:ih*{}:iw*{}:ih*{},",
+            input,
+            fmt(cr.w as f64),
+            fmt(cr.h as f64),
+            fmt(cr.x as f64),
+            fmt(cr.y as f64)
+        ),
+        _ => input.to_string(),
+    };
+    let input = crop_prefix.as_str();
+
     // 1) 预抠像链：scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
     let mut pre_label = format!("{}p", label);
     let mut pre = match (&sx_a, &sy_a) {
@@ -1172,6 +1189,53 @@ mod rotation_direction_tests {
         assert!(
             !cmd.contains("rotate=90"),
             "graph.rs must NOT emit positive-angle rotate (CW); cmd: {}",
+            cmd
+        );
+    }
+
+    /// 自由裁剪：crop 滤镜必须按 crop=iw*W:ih*H:iw*X:ih*Y 语法生成，
+    /// 且与后续 scale 之间必须有逗号分隔（否则 ffmpeg 解析报 -22 导出失败）。
+    #[test]
+    fn test_graph_crop_emits_comma_separated_filter() {
+        let json = r#"{
+          "canvas": {"width":1920,"height":1080,"fps":30},
+          "assets": [{"id":"a1","type":"video","path":"E:/dummy.mp4","duration":2.0,"width":400,"height":400,"codec":"h264","fps":30}],
+          "tracks":[{"id":"t1","type":"video","order":0,"clips":[{
+            "id":"c1","assetId":"a1","src_range":{"start":0,"end":2.0},
+            "timelineIn":0,"timelineOut":2.0,
+            "crop":{"x":0.5,"y":0.0,"w":0.5,"h":1.0},
+            "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+            "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+          }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0}]
+        }"#;
+        let cmd = render_project_json(json).expect("build command");
+        println!("CMD: {}", cmd);
+        assert!(
+            cmd.contains("crop=iw*0.5:ih*1:iw*0.5:ih*0,"),
+            "crop filter must be emitted with trailing comma before next filter; cmd: {}",
+            cmd
+        );
+    }
+
+    /// 整帧 crop {0,0,1,1} 等价"不裁剪"，不应生成任何 crop 滤镜。
+    #[test]
+    fn test_graph_full_frame_crop_emits_no_filter() {
+        let json = r#"{
+          "canvas": {"width":1920,"height":1080,"fps":30},
+          "assets": [{"id":"a1","type":"video","path":"E:/dummy.mp4","duration":2.0,"width":400,"height":400,"codec":"h264","fps":30}],
+          "tracks":[{"id":"t1","type":"video","order":0,"clips":[{
+            "id":"c1","assetId":"a1","src_range":{"start":0,"end":2.0},
+            "timelineIn":0,"timelineOut":2.0,
+            "crop":{"x":0,"y":0,"w":1,"h":1},
+            "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+            "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+          }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0}]
+        }"#;
+        let cmd = render_project_json(json).expect("build command");
+        println!("CMD: {}", cmd);
+        assert!(
+            !cmd.contains("crop="),
+            "full-frame crop must not emit a crop filter; cmd: {}",
             cmd
         );
     }

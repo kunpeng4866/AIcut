@@ -38,7 +38,8 @@ struct Uniforms {
   transform: vec4f,
   params: vec4f,
   mask: vec4f,
-  mask2: vec4f, // x=mode(0=rect,1=circle), y=r(圈半径), z=feather, w=unused
+  mask2: vec4f, // x=mode(0=rect,1=circle), y=r(圈半径), z=feather, w=flip标志位
+  crop: vec4f,  // x,y=裁切框左上角(归一化源空间), z,w=裁切框宽高；{0,0,1,1}=不裁切
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var videoTexture: texture_2d<f32>;
@@ -90,15 +91,17 @@ struct VSOut {
 }
 
 @fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
+  // 自由裁切：把采样 UV 重映射到裁切框内的源区域（裁切区被缩放填满 clip 显示框）。
+  var cuv = vec2f(u.crop.x + in.uv.x * u.crop.z, u.crop.y + in.uv.y * u.crop.w);
   // 镜像翻转：mask2.w 编码标志位 bit0=水平(h, 翻转 u)、bit1=垂直(v, 翻转 v)；
   // 仅翻转贴图采样 UV，蒙版坐标(nx,ny)仍用原 UV，保证镜像只翻转画面内容、不改变蒙版区域。
-  var fuv = in.uv;
+  var fuv = cuv;
   let fc = u.mask2.w;
   if ((fc >= 1.0 && fc < 2.0) || fc >= 3.0) { fuv.x = 1.0 - fuv.x; }
   if (fc >= 2.0) { fuv.y = 1.0 - fuv.y; }
   let color = textureSample(videoTexture, videoSampler, fuv);
-  let nx = in.uv.x;
-  let ny = 1.0 - in.uv.y; // 画布坐标 y-down
+  let nx = cuv.x;
+  let ny = 1.0 - cuv.y; // 画布坐标 y-down（相对裁切后画面）
   let m = u.mask;
   if (nx < m.x || nx > m.z || ny < m.y || ny > m.w) { return vec4f(0.0, 0.0, 0.0, 0.0); }
   var alpha = color.a * u.params.y;
@@ -382,7 +385,7 @@ export function useWebGPUPreview({
 
         // 预分配 MAX_CLIPS 个 uniform buffer，避免每帧创建/销毁
         uniformBufsRef.current = Array.from({ length: MAX_CLIPS }, () =>
-          device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+          device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
         );
         samplerRef.current = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 
@@ -686,7 +689,7 @@ export function useWebGPUPreview({
           const videoAspect = vw / vh;
 
           const uniformBuf = uniformBufsRef.current[idx];
-          const data = new Float32Array(16);
+          const data = new Float32Array(20);
           data[0] = posX; data[1] = posY; data[2] = scaleX; data[3] = scaleY;
           data[4] = rotation; data[5] = opacity; data[6] = videoAspect; data[7] = canvasAspect;
           // maskRect：元组=矩形硬裁切；对象=圆形遮罩（mode=1）
@@ -700,6 +703,9 @@ export function useWebGPUPreview({
           }
           data[8] = rx0; data[9] = ry0; data[10] = rx1; data[11] = ry1;
           data[12] = mode; data[13] = r; data[14] = feather; data[15] = flipCode;
+          // 自由裁切：归一化源空间 {x,y,w,h}，缺省为整帧 {0,0,1,1}
+          const crop = clip.crop || { x: 0, y: 0, w: 1, h: 1 };
+          data[16] = crop.x; data[17] = crop.y; data[18] = crop.w; data[19] = crop.h;
           // zoom 转场：把出/入片段的 scale() 折进现有用户 scale
           const zoom = parseScale(item.transform);
           if (zoom !== 1) { data[2] *= zoom; data[3] *= zoom; }

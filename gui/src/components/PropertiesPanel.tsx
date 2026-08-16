@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import type { RightPanel } from '../store/uiStore';
-import type { ClipConfig, TransformConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, WipeMaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig, TextBackground, TextShadow } from '../types';
+import type { ClipConfig, TransformConfig, CropConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, WipeMaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig, TextBackground, TextShadow } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 import MaskTab from './panels/MaskTab';
 import KeyingTab from './panels/KeyingTab';
@@ -203,6 +203,47 @@ function TransformTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) 
         <span style={S.label}>镜像</span>
         <ToggleBtn active={!!t.flip_h} onClick={() => toggleFlip('h')}>水平</ToggleBtn>
         <ToggleBtn active={!!t.flip_v} onClick={() => toggleFlip('v')}>垂直</ToggleBtn>
+      </div>
+      <CropSection clip={clip} trackId={trackId} />
+    </div>
+  );
+}
+
+// 自由裁切：归一化源空间 {x,y,w,h}（0..1），与预览窗口裁切操作双向联动。
+function CropSection({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
+  const updateClip = useProjectStore((s) => s.updateClip);
+  const updateClipLive = useProjectStore((s) => s.updateClipLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
+  const crop = clip.crop || { x: 0, y: 0, w: 1, h: 1 };
+  const setCrop = (p: Partial<CropConfig>) => {
+    const next = { ...crop, ...p };
+    next.w = Math.max(0.02, Math.min(next.w, 1 - next.x));
+    next.h = Math.max(0.02, Math.min(next.h, 1 - next.y));
+    updateClipLive(trackId, clip.id, { crop: next });
+  };
+  const reset = () => { pushHistorySnapshot(); updateClip(trackId, clip.id, { crop: { x: 0, y: 0, w: 1, h: 1 } }); };
+  const pct = (v: number) => Math.round(v * 100);
+  const num = (e: React.ChangeEvent<HTMLInputElement>) => Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) / 100;
+  const inp = (label: string, val: number, on: (v: number) => void) => (
+    <label style={{ flex: 1, fontSize: 11, color: '#bbb' }}>
+      {label}
+      <input type="number" min={0} max={100} value={pct(val)} onFocus={pushHistorySnapshot}
+        onChange={(e) => on(num(e))} style={{ ...S.input, marginTop: 2 }} />
+    </label>
+  );
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={S.row}>
+        <span style={S.label}>裁剪</span>
+        <button onClick={reset} style={{ ...S.btn, fontSize: 11 }}>重置</button>
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {inp('X %', crop.x, (v) => setCrop({ x: Math.min(v, 1 - crop.w) }))}
+        {inp('Y %', crop.y, (v) => setCrop({ y: Math.min(v, 1 - crop.h) }))}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+        {inp('宽 %', crop.w, (v) => setCrop({ w: v }))}
+        {inp('高 %', crop.h, (v) => setCrop({ h: v }))}
       </div>
     </div>
   );
