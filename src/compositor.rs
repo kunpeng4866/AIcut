@@ -4,7 +4,7 @@
 //!   out_a = src_a + dst_a * (1 - src_a)
 //!   out_c = (src_c * src_a + dst_c * dst_a * (1 - src_a)) / out_a   (out_a > 0 时)
 //!
-//! Transform 应用顺序：缩放 → 旋转（预留）→ 位置 → 不透明度
+//! Transform 应用顺序：缩放 → 旋转（双线性插值，中心为原点）→ 位置 → 不透明度
 
 use crate::pipeline::strategy::{PixelFormat, VideoFrame};
 use crate::project::Transform;
@@ -92,20 +92,29 @@ impl Compositor {
         let scaled_w = ((frame.width as f64) * tf.scale_x).round().max(1.0) as u32;
         let scaled_h = ((frame.height as f64) * tf.scale_y).round().max(1.0) as u32;
 
-        // 2. 计算目标位置（Transform.x/y 是归一化坐标，0.5 = 中心）
+        // 2. 旋转（围绕中心，双线性插值）。输出尺寸与输入一致（ow=iw, oh=ih）；
+        //    旋转后超出原边界的像素 Alpha 置 0，由下层透出——与 WebGPU 预览 /
+        //    graph.rs 的 c=none 透明角行为一致。方向：正角 = 逆时针(CCW)，与预览一致。
+        let rotated = if tf.rotation.abs() < f64::EPSILON {
+            scaled
+        } else {
+            Self::rotate_rgba(&scaled, scaled_w, scaled_h, tf.rotation)
+        };
+
+        // 3. 计算目标位置（Transform.x/y 是归一化坐标，0.5 = 中心）
         //    帧-> 画布上的左上角
         let center_x = tf.x * (self.width as f64);
         let center_y = tf.y * (self.height as f64);
         let dst_x = (center_x - (scaled_w as f64) / 2.0).round() as i64;
         let dst_y = (center_y - (scaled_h as f64) / 2.0).round() as i64;
 
-        // 3. Over 合成（应用 opacity）
+        // 4. Over 合成（应用 opacity + 已旋转）
         let opacity = tf.opacity.clamp(0.0, 1.0);
         Self::over_blit(
             canvas,
             self.width,
             self.height,
-            &scaled,
+            &rotated,
             scaled_w,
             scaled_h,
             dst_x,
@@ -113,9 +122,6 @@ impl Compositor {
             opacity,
             layer.reveal_mask,
         );
-
-        // TODO: 旋转 — 需要 3-pass shear 或矩阵插值，当前预留接口
-        // if tf.rotation.abs() > f64::EPSILON { ... }
     }
 
     /// 最近邻缩放
@@ -146,6 +152,72 @@ impl Compositor {
                 let dst_idx = ((dy as usize) * (dst_w as usize) + (dx as usize)) * 4;
 
                 dst[dst_idx..dst_idx + 4].copy_from_slice(&src[src_idx..src_idx + 4]);
+            }
+        }
+
+        dst
+    }
+
+    /// 围绕中心旋转 RGBA 帧（双线性插值采样）。
+    ///
+    /// - 输出尺寸与输入保持一致（ow=iw, oh=ih）；旋转后超出原边界的像素 Alpha 置 0，
+    ///   由下层图层透出（与 WebGPU 预览 / graph.rs 的 `c=none` 透明角一致）。
+    /// - 旋转方向：正角度 = 逆时针(CCW)，与 WebGPU 预览一致（graph.rs 用 `-rotation` 对齐）。
+    /// - 采用后向映射：对输出每个像素逆旋转求源坐标；源越界则置完全透明。
+    fn rotate_rgba(src: &[u8], w: u32, h: u32, degrees: f64) -> Vec<u8> {
+        let w = w as i64;
+        let h = h as i64;
+        let mut dst = vec![0u8; (w as usize) * (h as usize) * 4];
+
+        if degrees.abs() < f64::EPSILON {
+            dst.copy_from_slice(src);
+            return dst;
+        }
+
+        let rad = degrees * std::f64::consts::PI / 180.0;
+        let cos = rad.cos();
+        let sin = rad.sin();
+        let cx = (w - 1) as f64 / 2.0;
+        let cy = (h - 1) as f64 / 2.0;
+
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f64 - cx;
+                let dy = y as f64 - cy;
+                // 后向映射（正角=CCW 对应的逆旋转）
+                let sx = dx * cos - dy * sin + cx;
+                let sy = dx * sin + dy * cos + cy;
+
+                let dst_idx = ((y * w + x) as usize) * 4;
+                if sx < 0.0 || sx > (w - 1) as f64 || sy < 0.0 || sy > (h - 1) as f64 {
+                    // 超出原边界 → 完全透明（RGB=0, A=0）
+                    dst[dst_idx..dst_idx + 4].copy_from_slice(&[0, 0, 0, 0]);
+                    continue;
+                }
+
+                // 双线性插值
+                let x0 = sx.floor() as i64;
+                let y0 = sy.floor() as i64;
+                let x1 = (x0 + 1).min(w - 1);
+                let y1 = (y0 + 1).min(h - 1);
+                let fx = sx - x0 as f64;
+                let fy = sy - y0 as f64;
+
+                let i00 = ((y0 * w + x0) as usize) * 4;
+                let i10 = ((y0 * w + x1) as usize) * 4;
+                let i01 = ((y1 * w + x0) as usize) * 4;
+                let i11 = ((y1 * w + x1) as usize) * 4;
+
+                for c in 0..4 {
+                    let v00 = src[i00 + c] as f64;
+                    let v10 = src[i10 + c] as f64;
+                    let v01 = src[i01 + c] as f64;
+                    let v11 = src[i11 + c] as f64;
+                    let top = v00 * (1.0 - fx) + v10 * fx;
+                    let bot = v01 * (1.0 - fx) + v11 * fx;
+                    let v = top * (1.0 - fy) + bot * fy;
+                    dst[dst_idx + c] = v.round().clamp(0.0, 255.0) as u8;
+                }
             }
         }
 
@@ -487,6 +559,21 @@ mod tests {
     }
 
     #[test]
+    fn test_rotate_45_800x800() {
+        // 仿真真实导出：800x800 不透明红块旋转 45°，四角 alpha 必须为 0。
+        let w = 800u32;
+        let h = 800u32;
+        let src = [255, 0, 0, 255].repeat((w * h) as usize);
+        let dst = Compositor::rotate_rgba(&src, w, h, 45.0);
+        let a = |x: u32, y: u32| dst[((y * w + x) as usize) * 4 + 3];
+        assert_eq!(a(0, 0), 0, "TL corner alpha must be 0");
+        assert_eq!(a(799, 0), 0, "TR corner alpha must be 0");
+        assert_eq!(a(0, 799), 0, "BL corner alpha must be 0");
+        assert_eq!(a(799, 799), 0, "BR corner alpha must be 0");
+        assert_eq!(a(400, 400), 255, "center alpha must be 255");
+    }
+
+    #[test]
     fn test_default_transform_centered() {
         let tf = default_transform();
         assert_eq!(tf.x, 0.5);
@@ -494,5 +581,67 @@ mod tests {
         assert_eq!(tf.scale_x, 1.0);
         assert_eq!(tf.scale_y, 1.0);
         assert_eq!(tf.opacity, 1.0);
+    }
+
+    #[test]
+    fn test_rotate_identity() {
+        // 0 度旋转应原样返回
+        let src = [255, 0, 0, 255].repeat(4 * 4);
+        let dst = Compositor::rotate_rgba(&src, 4, 4, 0.0);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_rotate_45_transparent_corners() {
+        // 8x8 不透明红块旋转 45°，四角应变为完全透明（alpha=0），中心仍不透明红。
+        let w = 8u32;
+        let h = 8u32;
+        let src = [255, 0, 0, 255].repeat((w * h) as usize);
+        let dst = Compositor::rotate_rgba(&src, w, h, 45.0);
+
+        let px = |x: u32, y: u32| -> &[u8] {
+            &dst[((y * w + x) as usize) * 4..((y * w + x) as usize) * 4 + 4]
+        };
+
+        // 四角：旋转后超出原边界 → 透明
+        assert_eq!(px(0, 0)[3], 0, "TL corner should be transparent");
+        assert_eq!(px(w - 1, 0)[3], 0, "TR corner should be transparent");
+        assert_eq!(px(0, h - 1)[3], 0, "BL corner should be transparent");
+        assert_eq!(px(w - 1, h - 1)[3], 0, "BR corner should be transparent");
+
+        // 中心点：原始红块核心，旋转后仍完全不透明且为红
+        let c = px(w / 2, h / 2);
+        assert_eq!(c, &[255, 0, 0, 255], "center should be opaque red");
+    }
+
+    #[test]
+    fn test_composite_with_rotation() {
+        // 画布 8x8。底层蓝色（不透明），顶层红色旋转 45° → 角透明露出蓝，中心红。
+        let comp = Compositor::new(8, 8);
+        let blue = make_frame(8, 8, 0, 0, 255, 255, 0.0);
+        let red = make_frame(8, 8, 255, 0, 0, 255, 0.0);
+
+        let mut tf_red = default_transform();
+        tf_red.rotation = 45.0;
+
+        let layers = vec![
+            make_layer(blue, default_transform()),
+            make_layer(red, tf_red),
+        ];
+        let result = comp.composite(&layers);
+
+        let px = |x: u32, y: u32| -> &[u8] {
+            &result.data[((y * 8 + x) as usize) * 4..((y * 8 + x) as usize) * 4 + 4]
+        };
+
+        // 四角应为蓝（红块透明角露出下层蓝）
+        assert_eq!(px(0, 0), &[0, 0, 255, 255], "TL corner should be blue");
+        assert_eq!(px(7, 0), &[0, 0, 255, 255], "TR corner should be blue");
+        assert_eq!(px(0, 7), &[0, 0, 255, 255], "BL corner should be blue");
+        assert_eq!(px(7, 7), &[0, 0, 255, 255], "BR corner should be blue");
+
+        // 中心应为红（旋转后主体）
+        let c = px(4, 4);
+        assert_eq!(c, &[255, 0, 0, 255], "center should be red");
     }
 }
