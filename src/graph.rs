@@ -204,13 +204,16 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
     out
 }
 
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32) -> Option<String> {
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32, target_w: Option<u32>, target_h: Option<u32>) -> (Option<String>, u32, u32) {
     let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
-    let input = resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur)?;
+    let input = match resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur) {
+        Some(i) => i,
+        None => return (None, 0, 0),
+    };
     let label = format!("vs{}", ci);
-    let (chain, _, _) = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map, None, None);
+    let (chain, out_w, out_h) = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map, target_w, target_h);
     nodes.extend(chain);
-    Some(label)
+    (Some(label), out_w, out_h)
 }
 
 /// 构建单个 clip 的视频滤镜图，返回**多条**滤镜图语句（以 `;` 连接）。
@@ -788,14 +791,28 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:eof_action=pass[{}]", acc, src, ox, oy, next_acc));
                 acc = next_acc; vci += 1;
             } else {
-                let Some(mut track_acc) = build_clip_chain(clips[0], vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
-                vci += 1;
-                // 累积时间线原点 = 本轨首个片段的主时间线起点。xfade 的 offset 是相对
-                // 累积视频流时间轴的，而转场窗锚点在出片段（prev）的主时间线
-                // [prev.timeline_out - xdur, prev.timeline_out]。两者相减才得到正确的 offset；
-                // 错误地用 (prev.timeline_out - prev.timeline_in) 会按"上一段自身时长"偏移，
-                // 第 2 个及以后的 xfade 把时间轴算短，多片段工程视频被截断。
+                // 多片段轨：每段先归一化到画布尺寸（含 AABB 旋转的菱形居中），再 concat/xfade，
+                // 与单片段分支一致（基于画布叠加），避免各段尺寸不一导致 concat 报 -22 Invalid argument。
                 let master_origin = clips[0].timeline_in;
+                // 首片段：AABB 目标尺寸 = contain 适配后再乘缩放
+                let c0 = clips[0];
+                let (c0fit_w, c0fit_h) = contain_fit_size(
+                    project.asset_by_id(&c0.asset_id).map(|a| a.width).unwrap_or(0),
+                    project.asset_by_id(&c0.asset_id).map(|a| a.height).unwrap_or(0), w, h);
+                let c0sx = keyframed(c0, "transform.scaleX", c0.transform.scale_x).max(0.01);
+                let c0sy = keyframed(c0, "transform.scaleY", c0.transform.scale_y).max(0.01);
+                let c0sw = (c0fit_w as f64 * c0sx).round().max(2.0) as u32;
+                let c0sh = (c0fit_h as f64 * c0sy).round().max(2.0) as u32;
+                let (Some(mut track_acc), tacc_w, tacc_h) = build_clip_chain(c0, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(c0sw), Some(c0sh)) else { vci += 1; continue; };
+                // 归一化首片段到画布尺寸（菱形居中到 transform.(x,y)）
+                let c0dur = (c0.timeline_out - c0.timeline_in).max(0.1);
+                let c0cv = format!("cv{}", vci);
+                nodes.push(format!("color=c=black:s={}x{}:d={}[{}]", w, h, fmt(c0dur), c0cv));
+                let c0ox = offset_x(c0, w, tacc_w); let c0oy = offset_y(c0, h, tacc_h);
+                let track_acc_c = format!("cv{}o", vci);
+                nodes.push(format!("[{}][{}]overlay=x={}:y={}:eof_action=pass[{}]", c0cv, track_acc, c0ox, c0oy, track_acc_c));
+                track_acc = track_acc_c.clone();
+                vci += 1;
                 for ci in 1..clips.len() {
                     let prev = clips[ci - 1]; let curr = clips[ci];
                     let gap = curr.timeline_in - prev.timeline_out;
@@ -803,19 +820,32 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let trans_opt = clip_transition(prev).or_else(|| clip_transition(curr));
                     let trans_params = clip_transition_params(prev).or_else(|| clip_transition_params(curr));
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
-                    let Some(curr_label) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps) else { vci += 1; continue; };
+                    // 当前片段 AABB 目标尺寸 = contain 适配后再乘缩放
+                    let (cfit_w, cfit_h) = contain_fit_size(
+                        project.asset_by_id(&curr.asset_id).map(|a| a.width).unwrap_or(0),
+                        project.asset_by_id(&curr.asset_id).map(|a| a.height).unwrap_or(0), w, h);
+                    let csx = keyframed(curr, "transform.scaleX", curr.transform.scale_x).max(0.01);
+                    let csy = keyframed(curr, "transform.scaleY", curr.transform.scale_y).max(0.01);
+                    let csw = (cfit_w as f64 * csx).round().max(2.0) as u32;
+                    let csh = (cfit_h as f64 * csy).round().max(2.0) as u32;
+                    let (Some(curr_label), cur_w, cur_h) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(csw), Some(csh)) else { vci += 1; continue; };
                     vci += 1;
+                    // 归一化当前片段到画布尺寸（菱形居中到 transform.(x,y)）
+                    let cdur = (curr.timeline_out - curr.timeline_in).max(0.1);
+                    let ccv = format!("cv{}", vci);
+                    nodes.push(format!("color=c=black:s={}x{}:d={}[{}]", w, h, fmt(cdur), ccv));
+                    let cox = offset_x(curr, w, cur_w); let coy = offset_y(curr, h, cur_h);
+                    let curr_canvas = format!("cv{}o", vci);
+                    nodes.push(format!("[{}][{}]overlay=x={}:y={}:eof_action=pass[{}]", ccv, curr_label, cox, coy, curr_canvas));
                     if has_transition {
                         let (xstyle, xdur_raw) = trans_opt.unwrap();
                         let xdur = xdur_raw.min(5.0).max(0.1);
                         let merged = format!("x{}", vci);
                         // 注意：xfade 滤镜没有 fps 参数（会报 "Option not found"），
                         // 帧率一致由各路视频链末尾的 fps=<canvas.fps> 保证。
-                        // xfade 无 easing 参数，xfade 自带缓动近似，无需额外处理。
-                        // offset 相对累积视频流时间轴：转场窗起点（主时间线） - 轨道原点。
                         let offset = (prev.timeline_out - xdur) - master_origin;
                         nodes.push(format!("[{}][{}]xfade=transition={}:duration={}:offset={}[{}]",
-                            track_acc, curr_label, xstyle, fmt(xdur),
+                            track_acc, curr_canvas, xstyle, fmt(xdur),
                             fmt(offset), merged));
                         track_acc = merged.clone();
                         // feather：xfade 的 wipe/circle 无原生软边参数；
@@ -840,7 +870,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                         }
                     } else {
                         let merged = format!("x{}", vci);
-                        nodes.push(format!("[{}][{}]concat=n=2:v=1:a=0[{}]", track_acc, curr_label, merged));
+                        nodes.push(format!("[{}][{}]concat=n=2:v=1:a=0[{}]", track_acc, curr_canvas, merged));
                         track_acc = merged;
                     }
                 }
