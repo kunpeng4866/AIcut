@@ -305,21 +305,25 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     if let Some(re) = rot_a {
         // 关键帧旋转：rotate 的 a 表达式逐帧求值（支持 t），#6 修复。
         // 关键帧暂保持输入尺寸输出，避免 AABB 随时间变化导致 overlay 偏移复杂化。
-        pre.push_str(&format!(",rotate=a='({})*PI/180'", re));
+        // 符号：ffmpeg rotate 滤镜正角度在图像空间为顺时针(CW)，与 WebGPU 预览（NDC Y-up，
+        // 正角度=逆时针 CCW）相反；取负使导出方向与预览一致。
+        pre.push_str(&format!(",rotate=a='-({})*PI/180'", re));
     } else {
         let rot = keyframed(c, "transform.rotation", c.transform.rotation);
         if rot.abs() > 0.01 {
             if has_explicit_target {
                 // 静态旋转 + 单片段 overlay 路径：扩展为 AABB 外接矩形，四角透明，
                 // 使旋转后的完整画面（视觉上矩形→菱形）与 WebGPU 预览一致，避免八角形。
+                // 角度取负：ffmpeg rotate 正角度=CW，预览正角度=CCW，故取负对齐方向。
                 let rad = rot * std::f64::consts::PI / 180.0;
                 let abs_cos = rad.cos().abs();
                 let abs_sin = rad.sin().abs();
                 out_w = (sw as f64 * abs_cos + sh as f64 * abs_sin).round().max(1.0) as u32;
                 out_h = (sw as f64 * abs_sin + sh as f64 * abs_cos).round().max(1.0) as u32;
-                pre.push_str(&format!(",rotate={}*PI/180:ow={}:oh={}:c=none", fmt(rot), out_w, out_h));
+                pre.push_str(&format!(",rotate=-{}*PI/180:ow={}:oh={}:c=none", fmt(rot), out_w, out_h));
             } else {
-                pre.push_str(&format!(",rotate={}*PI/180", fmt(rot)));
+                // 角度取负对齐预览方向（同上）。
+                pre.push_str(&format!(",rotate=-{}*PI/180", fmt(rot)));
             }
         }
     }
@@ -1138,3 +1142,37 @@ pub fn get_preset_list() -> Vec<String> { crate::preset::preset_names() }
 
 /// 版本字符串
 pub fn engine_version() -> String { format!("aicut-engine {}", env!("CARGO_PKG_VERSION")) }
+
+#[cfg(test)]
+mod rotation_direction_tests {
+    use super::*;
+
+    /// 旋转方向必须与 WebGPU 预览一致（正角度 = 逆时针 CCW）。
+    /// ffmpeg rotate 滤镜正角度在图像空间为顺时针(CW)，故 graph.rs 必须对角度取负。
+    /// 本测试锁定：生成的命令必须含 `rotate=-`（CCW），绝不能出现未取负的正角度 `rotate=90`（CW）。
+    #[test]
+    fn test_graph_rotate_is_ccw_matches_preview() {
+        let json = r#"{
+          "canvas": {"width":1920,"height":1080,"fps":30},
+          "assets": [{"id":"a1","type":"video","path":"E:/dummy.mp4","duration":2.0,"width":200,"height":400,"codec":"h264","fps":30}],
+          "tracks":[{"id":"t1","type":"video","order":0,"clips":[{
+            "id":"c1","assetId":"a1","src_range":{"start":0,"end":2.0},
+            "timelineIn":0,"timelineOut":2.0,
+            "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":90,"opacity":1},
+            "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+          }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0}]
+        }"#;
+        let cmd = render_project_json(json).expect("build command");
+        println!("CMD: {}", cmd);
+        assert!(
+            cmd.contains("rotate=-"),
+            "graph.rs rotate must be negated (CCW) to match preview; cmd: {}",
+            cmd
+        );
+        assert!(
+            !cmd.contains("rotate=90"),
+            "graph.rs must NOT emit positive-angle rotate (CW); cmd: {}",
+            cmd
+        );
+    }
+}
