@@ -7,7 +7,8 @@ import { useUIStore } from '../store/uiStore';
 import type { ClipConfig, CropConfig, TransformConfig } from '../types';
 
 type Mode = 'move' | 'rotate' | 'crop';
-const HANDLE = 11;          // 句柄像素尺寸
+const HANDLE = 14;          // 句柄像素尺寸
+const HANDLE_INSET = 8;     // 句柄中心向裁切框内侧偏移量，避免满幅时句柄压在画布边缘抓不到
 const MIN_CROP = 0.02;      // 裁切最小边长(归一化)
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
@@ -228,13 +229,13 @@ export default function PreviewTransformOverlay() {
     >{label}</button>
   );
 
-  const H = (key: string, x: number, y: number, cursor: string) => (
+  const H = (key: string, x: number, y: number, cursor: string, ix = 0, iy = 0) => (
     <div
       onPointerDown={(e) => beginDrag(e, 'cropHandle', key)}
       onPointerMove={onMove}
       onPointerUp={onUp}
       style={{
-        position: 'absolute', left: x - HANDLE / 2, top: y - HANDLE / 2, width: HANDLE, height: HANDLE,
+        position: 'absolute', left: x + ix - HANDLE / 2, top: y + iy - HANDLE / 2, width: HANDLE, height: HANDLE,
         background: '#fff', border: '2px solid #e94560', borderRadius: 2, cursor, pointerEvents: 'auto',
       }}
     />
@@ -303,16 +304,16 @@ export default function PreviewTransformOverlay() {
             onPointerMove={onMove}
             onPointerUp={onUp}
           />
-          {/* 角 */}
-          {H('tl', geom.cornersPx[0][0], geom.cornersPx[0][1], 'nwse-resize')}
-          {H('tr', geom.cornersPx[1][0], geom.cornersPx[1][1], 'nesw-resize')}
-          {H('br', geom.cornersPx[2][0], geom.cornersPx[2][1], 'nwse-resize')}
-          {H('bl', geom.cornersPx[3][0], geom.cornersPx[3][1], 'nesw-resize')}
+          {/* 角（句柄中心向框内偏移 INSET，确保满幅时也完全落在画布内可抓取） */}
+          {H('tl', geom.cornersPx[0][0], geom.cornersPx[0][1], 'nwse-resize', HANDLE_INSET, HANDLE_INSET)}
+          {H('tr', geom.cornersPx[1][0], geom.cornersPx[1][1], 'nesw-resize', -HANDLE_INSET, HANDLE_INSET)}
+          {H('br', geom.cornersPx[2][0], geom.cornersPx[2][1], 'nwse-resize', -HANDLE_INSET, -HANDLE_INSET)}
+          {H('bl', geom.cornersPx[3][0], geom.cornersPx[3][1], 'nesw-resize', HANDLE_INSET, -HANDLE_INSET)}
           {/* 边中点 */}
-          {H('t', geom.midPx[0][0], geom.midPx[0][1], 'ns-resize')}
-          {H('r', geom.midPx[1][0], geom.midPx[1][1], 'ew-resize')}
-          {H('b', geom.midPx[2][0], geom.midPx[2][1], 'ns-resize')}
-          {H('l', geom.midPx[3][0], geom.midPx[3][1], 'ew-resize')}
+          {H('t', geom.midPx[0][0], geom.midPx[0][1], 'ns-resize', 0, HANDLE_INSET)}
+          {H('r', geom.midPx[1][0], geom.midPx[1][1], 'ew-resize', -HANDLE_INSET, 0)}
+          {H('b', geom.midPx[2][0], geom.midPx[2][1], 'ns-resize', 0, -HANDLE_INSET)}
+          {H('l', geom.midPx[3][0], geom.midPx[3][1], 'ew-resize', HANDLE_INSET, 0)}
         </>
       )}
     </div>
