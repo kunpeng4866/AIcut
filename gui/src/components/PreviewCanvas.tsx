@@ -1298,6 +1298,18 @@ export default function PreviewCanvas() {
                   }
                   shadowFilter = buildMaskShadowFilter(maskList); // 仅取字符串，挂到外层 wrapper
                 }
+                // 自由裁切（HTML5 回退）：把源 crop 区域缩放填满显示框。
+                // 用 top-left origin 的 translate+scale；源比例≈画布比例(contain=1)时精确。
+                // 与 flip/转场 zoom 同时存在时叠加为近似（HTML5 仅为 WebGPU 不可用时的回退路径）。
+                const cropCfg = clip.crop;
+                const hasCrop = !!(cropCfg && (cropCfg.x > 1e-4 || cropCfg.y > 1e-4 || cropCfg.w < 0.9999 || cropCfg.h < 0.9999));
+                let cropTransform = '';
+                if (hasCrop) {
+                  const cw = Math.max(0.001, cropCfg.w || 1);
+                  const ch = Math.max(0.001, cropCfg.h || 1);
+                  cropTransform = `translate(${-cropCfg.x / cw * 100}%, ${-cropCfg.y / ch * 100}%) scale(${1 / cw}, ${1 / ch})`;
+                  outStyle.transformOrigin = 'top left';
+                }
                 // 镜像翻转（HTML5 回退）：水平→scaleX(-1)、垂直→scaleY(-1)。
                 // GUI 写入 transform.flip_h/flip_v（0/1），与 WebGPU 预览/导出一致（# 镜像无效）。
                 const flipT: string[] = [];
@@ -1305,6 +1317,10 @@ export default function PreviewCanvas() {
                 if ((clip.transform?.flip_v ?? 0) > 0.5) flipT.push('scaleY(-1)');
                 if (flipT.length) {
                   outStyle.transform = [outStyle.transform, ...flipT].filter(Boolean).join(' ');
+                }
+                // crop 追加到 transform 最右（最先应用）：先裁源，再翻转/转场变换
+                if (cropTransform) {
+                  outStyle.transform = outStyle.transform ? `${outStyle.transform} ${cropTransform}` : cropTransform;
                 }
                 const videoEl = (
                   <video

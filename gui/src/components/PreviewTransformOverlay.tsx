@@ -118,6 +118,19 @@ export default function PreviewTransformOverlay() {
     return () => parent.removeEventListener('wheel', onWheel);
   }, [target, pushHistorySnapshot, updateClipLive]);
 
+  // 回车确认：裁剪模式下按回车，退出裁剪模式（裁剪结果已实时写入 store，此处仅作"确认完成"的明确反馈）
+  useEffect(() => {
+    if (mode !== 'crop') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        setMode('move');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mode]);
+
   // 几何：整帧框(用于移动/旋转) 与 裁切框(8 句柄)
   const geom = useMemo(() => {
     if (!target) return null;
@@ -250,7 +263,9 @@ export default function PreviewTransformOverlay() {
         <ToolBtn m="move" label="移动" />
         <ToolBtn m="rotate" label="旋转" />
         <ToolBtn m="crop" label="裁剪" />
-        <span style={{ color: '#cdd', fontSize: 11, alignSelf: 'center', paddingLeft: 4 }}>滚轮缩放</span>
+        <span style={{ color: '#cdd', fontSize: 11, alignSelf: 'center', paddingLeft: 4 }}>
+          {mode === 'crop' ? '拖句柄裁切 · 回车确认' : '滚轮缩放'}
+        </span>
       </div>
 
       {/* 整帧变换框（移动/旋转模式）：0 尺寸旋转锚点 + 可交互边框矩形（事件冒泡到边框） */}
