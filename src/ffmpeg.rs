@@ -392,7 +392,7 @@ pub fn build_pipe_encoder_cmd(
 pub fn build_extract_frame_cmd(input: &str, t: f64, width: u32, height: u32) -> Vec<String> {
     vec![
         "ffmpeg".to_string(),
-        "-ss".to_string(), format!("{:.3}", t),
+        "-ss".to_string(), format!("{:.6}", t),
         "-i".to_string(), input.to_string(),
         "-frames:v".to_string(), "1".to_string(),
         "-f".to_string(), "rawvideo".to_string(),
@@ -407,7 +407,7 @@ pub fn build_extract_frame_accurate(input: &str, t: f64, width: u32, height: u32
     vec![
         "ffmpeg".to_string(),
         "-i".to_string(), input.to_string(),
-        "-ss".to_string(), format!("{:.3}", t),
+        "-ss".to_string(), format!("{:.6}", t),
         "-frames:v".to_string(), "1".to_string(),
         "-f".to_string(), "rawvideo".to_string(),
         "-pix_fmt".to_string(), "rgba".to_string(),

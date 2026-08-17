@@ -2,7 +2,7 @@
 import type { SubtitleGenResult } from './aiTypes';
 
 export interface CanvasConfig { width: number; height: number; fps?: number; sample_rate?: number }
-export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number; proxyPath?: string }
+export interface AssetConfig { id: string; type: string; path: string; duration?: number; width?: number; height?: number; codec?: string; fps?: number; proxyPath?: string; sar?: number }
 export interface TransformConfig { x?: number; y?: number; scale_x?: number; scale_y?: number; rotation?: number; opacity?: number; flip_h?: number; flip_v?: number }
 // 自由裁切：归一化源空间(0..1, y-down)，(x,y)=裁切框左上角，(w,h)=宽高。{0,0,1,1}=不裁切(显示整帧)。
 export interface CropConfig { x: number; y: number; w: number; h: number }
@@ -222,7 +222,7 @@ export interface TrackConfig {
   pan?: number;
 }
 export interface ProjectConfig { version?: string; canvas: CanvasConfig; assets: AssetConfig[]; tracks: TrackConfig[] }
-export interface MediaInfo { path: string; media_type: string; duration: number; width: number; height: number; codec: string; fps: number }
+export interface MediaInfo { path: string; media_type: string; duration: number; width: number; height: number; codec: string; fps: number; sar?: number }
 export interface RenderResult { command: string }
 
 // ── 导出选项 ──

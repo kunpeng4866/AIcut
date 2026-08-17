@@ -559,7 +559,7 @@ pub fn script_to_project(script: &ScriptResult, assets: &[String]) -> crate::pro
         project.assets.push(crate::project::Asset {
             id: format!("a{}", i), asset_type: "video".into(),
             path: asset_path.clone(), duration: script.total_duration,
-            width: 1920, height: 1080, codec: "h264".into(),
+            width: 1920, height: 1080, codec: "h264".into(), sar: 1.0,
         });
     }
 

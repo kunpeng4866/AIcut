@@ -398,6 +398,7 @@ mod tests {
                 width: 0,
                 height: 0,
                 codec: String::new(),
+                sar: 1.0,
             }],
             tracks: vec![],
         }

@@ -244,7 +244,7 @@ fn test_render_audio_track() {
     let cmd = render(&json).expect("音频工程不应 panic");
     assert!(cmd.contains(":a]"), "应含音频输入流标记 :a]，实际: {}", cmd);
     assert!(cmd.contains("volume="), "应含 volume 滤镜，实际: {}", cmd);
-    assert!(!cmd.contains("[aout]"), "单音频轨不应产生 amix/aout 标签");
+    assert!(cmd.contains("[aout]"), "视频音轨 + 独立音频轨混合应产生 amix/aout 标签，实际: {}", cmd);
 }
 
 /// 构造含旋转的工程 JSON
@@ -372,8 +372,8 @@ fn test_render_multi_track_overlay() {
     }"#;
     let cmd = render(&json.to_string()).expect("多轨工程不应 panic");
     assert!(cmd.contains("overlay="), "多轨应含 overlay, 实际: {}", cmd);
-    // PIP 轨应缩小
-    assert!(cmd.contains("scale=576:324"), "PIP 应缩小到 30%, 实际: {}", cmd);
+    // PIP 轨应 contain 适配（640x480 → 1440x1080）后缩小 30%
+    assert!(cmd.contains("scale=432:324"), "PIP 应 contain 适配后缩小 30%, 实际: {}", cmd);
 }
 
 #[test]
@@ -769,7 +769,7 @@ fn test_validate_negative_duration() {
         canvas: aicut_engine::project::CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
         assets: vec![aicut_engine::project::Asset {
             id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(),
-            duration: -5.0, width: 1920, height: 1080, codec: "h264".into(),
+            duration: -5.0, width: 1920, height: 1080, codec: "h264".into(), sar: 1.0,
         }],
         tracks: vec![],
     };
@@ -792,7 +792,7 @@ fn test_project_io_roundtrip_with_tracks() {
         canvas: aicut_engine::project::CanvasConfig { width: 1280, height: 720, fps: 24, sample_rate: 44100 },
         assets: vec![aicut_engine::project::Asset {
             id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(),
-            duration: 5.0, width: 1920, height: 1080, codec: "h264".into(),
+            duration: 5.0, width: 1920, height: 1080, codec: "h264".into(), sar: 1.0,
         }],
         tracks: vec![aicut_engine::project::Track {
             id: "t1".into(), track_type: "video".into(), order: 0,

@@ -74,6 +74,62 @@ function callEngine(...args: string[]): Promise<string> {
   });
 }
 
+// ── 引擎二进制 ↔ 源码一致性校验 ──
+// 问题：改 Rust 源码后忘跑 cargo build，ENGINE_BIN 是旧二进制，静默“改了没生效”。
+// 方案：比对 src/*.rs（及 build.rs/Cargo.toml）最新 mtime 与二进制 mtime，
+//      源码较新则开发模式下自动 `cargo build --offline` 重建，失败弹窗提示。
+
+const SRC_ROOT = join(__dirname, '../../src');
+const REPO_ROOT = join(__dirname, '../..');
+
+async function newestSourceMtime(dir: string): Promise<number> {
+  let newest = 0;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) {
+        newest = Math.max(newest, await newestSourceMtime(p));
+      } else if (e.name.endsWith('.rs')) {
+        newest = Math.max(newest, (await stat(p)).mtimeMs);
+      }
+    }
+  } catch { /* 目录不存在等，忽略 */ }
+  return newest;
+}
+
+async function rebuildEngine(): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('cargo', ['build', '--offline'], {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let err = '';
+    child.stdout?.on('data', (d: Buffer) => process.stdout.write(`[cargo] ${d}`));
+    child.stderr?.on('data', (d: Buffer) => { err += d.toString(); });
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(err || `cargo build 退出码 ${code}`))));
+    child.on('error', reject);
+  });
+}
+
+async function ensureEngineFresh(): Promise<void> {
+  if (app.isPackaged) return; // 打包模式引擎随包，无源码树，跳过
+  try {
+    const binMtime = (await stat(ENGINE_BIN)).mtimeMs;
+    const srcMtime = Math.max(
+      await newestSourceMtime(SRC_ROOT),
+      ...(await Promise.all(['build.rs', 'Cargo.toml'].map(async (f) => {
+        try { return (await stat(join(REPO_ROOT, f))).mtimeMs; } catch { return 0; }
+      }))),
+    );
+    if (srcMtime <= binMtime) return; // 源码未变，二进制最新
+    console.log('[engine] 检测到源码较新，自动重建引擎 (cargo build --offline) ...');
+  } catch {
+    console.log('[engine] 引擎二进制缺失，自动重建 (cargo build --offline) ...');
+  }
+  await rebuildEngine();
+}
+
 function getWindowIconPath(): string {
   if (app.isPackaged) {
     return join(__dirname, '..', 'dist', 'icon.ico');
@@ -779,6 +835,18 @@ app.whenReady().then(async () => {
 
   // 确保草稿目录存在
   mkdir(getDraftsDir(), { recursive: true }).catch(() => {});
+
+  // 校验引擎二进制与源码是否脱节（开发模式自动重建），失败时弹窗提示而非静默用旧二进制
+  try {
+    await ensureEngineFresh();
+  } catch (e: any) {
+    console.error('[engine] 引擎构建失败:', e?.message ?? e);
+    dialog.showErrorBox(
+      '引擎构建失败',
+      `Rust 引擎构建失败，请在仓库根目录手动运行 cargo build --offline：\n\n${e?.message ?? e}`,
+    );
+  }
+
   createWindow();
 });
 

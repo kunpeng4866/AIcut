@@ -125,6 +125,7 @@ export default function MediaPanel() {
             width, height,
             codec: info?.codec || 'h264',
             fps: info?.fps || 30,
+            sar: info?.sar || 1,
           });
           // 4K 源素材：异步生成 720p 代理，完成后回填代理路径，预览走代理保证流畅
           if (isVideo && (width > 1920 || height > 1080)) {
@@ -133,7 +134,7 @@ export default function MediaPanel() {
               .catch(() => {});
           }
         } catch {
-          addAsset({ id: uid('asset'), type: pathExtIsAudio(path) ? 'audio' : 'video', path, duration: 5, width: 1920, height: 1080, codec: 'h264', fps: 30 });
+          addAsset({ id: uid('asset'), type: pathExtIsAudio(path) ? 'audio' : 'video', path, duration: 5, width: 1920, height: 1080, codec: 'h264', fps: 30, sar: 1 });
         }
       }
     } finally {

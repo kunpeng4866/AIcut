@@ -250,12 +250,14 @@ impl<'a> ExportPipeline<'a> {
         Ok(output.stdout[..expected_size].to_vec())
     }
 
-    /// 计算片段解码目标尺寸（素材原始分辨率，不应用 clip 缩放，交给 compositor 处理）
+    /// 计算片段解码目标尺寸（素材显示分辨率 = 码流尺寸 × SAR，不应用 clip 缩放，交给 compositor 处理）。
+    /// 用显示宽高而非码流宽高：非 1:1 SAR 素材经 `-s 显示宽x显示高` 抽帧输出正方形像素，
+    /// 使 compositor 的 contain-fit 按正确的显示宽高比计算，避免横向拉伸。
     fn clip_decode_size(&self, clip: &Clip) -> (u32, u32) {
         let asset = self.project.asset_by_id(&clip.asset_id);
         asset
             .filter(|a| a.width > 0 && a.height > 0)
-            .map(|a| (a.width, a.height))
+            .map(|a| (a.display_width(), a.display_height()))
             .unwrap_or((self.config.width, self.config.height))
     }
 
@@ -1292,6 +1294,7 @@ mod tests {
                     width: 1920,
                     height: 1080,
                     codec: "h264".to_string(),
+                    sar: 1.0,
                 },
             ],
             tracks: vec![
@@ -1480,7 +1483,7 @@ mod tests {
             canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
             assets: vec![Asset {
                 id: "a1".to_string(), asset_type: "video".to_string(), path: "test_input.mp4".to_string(),
-                duration: 10.0, width: 1920, height: 1080, codec: "h264".to_string(),
+                duration: 10.0, width: 1920, height: 1080, codec: "h264".to_string(), sar: 1.0,
             }],
             tracks: vec![Track {
                 id: "t1".to_string(), track_type: "video".to_string(), order: 0,

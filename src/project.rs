@@ -55,6 +55,16 @@ pub struct Asset {
     pub height: u32,
     #[serde(default)]
     pub codec: String,
+    /// 采样宽高比 (SAR)：如 "4:3"→1.333。非正方形像素素材显示宽高 = width×sar × height。
+    #[serde(default = "one_f")]
+    pub sar: f64,
+}
+
+impl Asset {
+    /// 显示宽度：码流像素宽 × SAR（非正方形像素纠正为显示像素）。
+    pub fn display_width(&self) -> u32 { (self.width as f64 * self.sar).round() as u32 }
+    /// 显示高度：SAR 仅拉伸宽度（像素宽高比），高度不变。
+    pub fn display_height(&self) -> u32 { self.height }
 }
 
 /// 2D 变换（归一化 0-1，原点左下角）
@@ -492,8 +502,8 @@ mod tests {
             version: "1.0".into(),
             canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
             assets: vec![
-                Asset { id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(), duration: 5.0, width: 1920, height: 1080, codec: "h264".into() },
-                Asset { id: "a2".into(), asset_type: "audio".into(), path: "a.mp3".into(), duration: 3.0, width: 0, height: 0, codec: String::new() },
+                Asset { id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(), duration: 5.0, width: 1920, height: 1080, codec: "h264".into(), sar: 1.0 },
+                Asset { id: "a2".into(), asset_type: "audio".into(), path: "a.mp3".into(), duration: 3.0, width: 0, height: 0, codec: String::new(), sar: 1.0 },
             ],
             tracks: vec![],
         };
@@ -507,7 +517,7 @@ mod tests {
         let p = Project {
             version: "1.0".into(),
             canvas: CanvasConfig { width: 1920, height: 1080, fps: 30, sample_rate: 48000 },
-            assets: vec![Asset { id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(), duration: 5.0, width: 1920, height: 1080, codec: "h264".into() }],
+            assets: vec![Asset { id: "a1".into(), asset_type: "video".into(), path: "v.mp4".into(), duration: 5.0, width: 1920, height: 1080, codec: "h264".into(), sar: 1.0 }],
             tracks: vec![],
         };
         assert!(p.validate().is_empty());

@@ -442,6 +442,7 @@ mod tests {
                     width: 1920,
                     height: 1080,
                     codec: "h264".to_string(),
+                    sar: 1.0,
                 },
             ],
             tracks: vec![

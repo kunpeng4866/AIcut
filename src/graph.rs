@@ -294,6 +294,9 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
         ),
         (None, None) => format!("{}scale={}:{}", input, sw, sh),
     };
+    // setsar=1：scale 后强制正方形像素。非 1:1 SAR 素材 scale 会保留 SAR 导致显示尺寸≠sw×sh，
+    // 非均匀缩放 (scale_x≠scale_y) 也会引入 SAR，此处归零保证输出即为 sw×sh 的方形像素。
+    pre.push_str(",setsar=1");
 
     // 自由裁剪（CropRect）：纯裁剪，与 WebGPU/HTML5 预览一致——完整素材按 contain 原尺寸
     // 缩放显示，仅把 crop 框外像素置透明（crop 提取框内 + pad 原位回填透明黑@0），
@@ -790,8 +793,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 // 此处复刻预览逻辑：先 contain 到画布，再乘 transform.scale。
                 let asset = project.asset_by_id(&c.asset_id);
                 let (cfit_w, cfit_h) = contain_fit_size(
-                    asset.map(|a| a.width).unwrap_or(0),
-                    asset.map(|a| a.height).unwrap_or(0),
+                    asset.map(|a| a.display_width()).unwrap_or(0),
+                    asset.map(|a| a.display_height()).unwrap_or(0),
                     w, h,
                 );
                 let sx = keyframed(c, "transform.scaleX", c.transform.scale_x).max(0.01);
@@ -818,8 +821,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 // 首片段：AABB 目标尺寸 = contain 适配后再乘缩放
                 let c0 = clips[0];
                 let (c0fit_w, c0fit_h) = contain_fit_size(
-                    project.asset_by_id(&c0.asset_id).map(|a| a.width).unwrap_or(0),
-                    project.asset_by_id(&c0.asset_id).map(|a| a.height).unwrap_or(0), w, h);
+                    project.asset_by_id(&c0.asset_id).map(|a| a.display_width()).unwrap_or(0),
+                    project.asset_by_id(&c0.asset_id).map(|a| a.display_height()).unwrap_or(0), w, h);
                 let c0sx = keyframed(c0, "transform.scaleX", c0.transform.scale_x).max(0.01);
                 let c0sy = keyframed(c0, "transform.scaleY", c0.transform.scale_y).max(0.01);
                 let c0sw = (c0fit_w as f64 * c0sx).round().max(2.0) as u32;
@@ -843,8 +846,8 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let has_transition = trans_opt.is_some() && gap <= 0.0;
                     // 当前片段 AABB 目标尺寸 = contain 适配后再乘缩放
                     let (cfit_w, cfit_h) = contain_fit_size(
-                        project.asset_by_id(&curr.asset_id).map(|a| a.width).unwrap_or(0),
-                        project.asset_by_id(&curr.asset_id).map(|a| a.height).unwrap_or(0), w, h);
+                        project.asset_by_id(&curr.asset_id).map(|a| a.display_width()).unwrap_or(0),
+                        project.asset_by_id(&curr.asset_id).map(|a| a.display_height()).unwrap_or(0), w, h);
                     let csx = keyframed(curr, "transform.scaleX", curr.transform.scale_x).max(0.01);
                     let csy = keyframed(curr, "transform.scaleY", curr.transform.scale_y).max(0.01);
                     let csw = (cfit_w as f64 * csx).round().max(2.0) as u32;
@@ -1157,8 +1160,14 @@ pub fn render_project(json: &str) -> anyhow::Result<ffmpeg::RenderCommand> {
 /// 可用滤镜预置名列表
 pub fn get_preset_list() -> Vec<String> { crate::preset::preset_names() }
 
-/// 版本字符串
-pub fn engine_version() -> String { format!("aicut-engine {}", env!("CARGO_PKG_VERSION")) }
+/// 版本字符串（含编译时构建标识，见 build.rs 的 ENGINE_BUILD_ID）
+pub fn engine_version() -> String {
+    format!(
+        "aicut-engine {} (build {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("ENGINE_BUILD_ID")
+    )
+}
 
 #[cfg(test)]
 mod rotation_direction_tests {

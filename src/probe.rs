@@ -16,6 +16,9 @@ pub struct MediaInfo {
     pub fps: f64,
     pub sample_rate: u32,
     pub bitrate_kbps: f64,
+    /// 采样宽高比 (SAR)：如 "4:3"→1.333、"1:1"→1.0。非正方形像素时用于换算显示宽高。
+    #[serde(default = "one_f")]
+    pub sar: f64,
 }
 
 impl Default for MediaInfo {
@@ -24,8 +27,16 @@ impl Default for MediaInfo {
             path: String::new(), media_type: "video".into(),
             duration: 0.0, width: 1920, height: 1080,
             codec: "h264".into(), fps: 30.0, sample_rate: 48000, bitrate_kbps: 8000.0,
+            sar: 1.0,
         }
     }
+}
+
+impl MediaInfo {
+    /// 显示宽度：码流像素宽 × SAR（非正方形像素纠正为显示像素）。
+    pub fn display_width(&self) -> u32 { (self.width as f64 * self.sar).round() as u32 }
+    /// 显示高度：SAR 仅拉伸宽度（像素宽高比），高度不变。
+    pub fn display_height(&self) -> u32 { self.height }
 }
 
 /// 通过 ffprobe 探测媒体文件元数据
@@ -80,6 +91,11 @@ fn parse_ffprobe_json(path: &str, json: &str) -> Result<MediaInfo, String> {
                     info.width = s["width"].as_u64().unwrap_or(1920) as u32;
                     info.height = s["height"].as_u64().unwrap_or(1080) as u32;
                     info.codec = s["codec_name"].as_str().unwrap_or("h264").into();
+                    // SAR：sample_aspect_ratio 形如 "4:3"，解析为数值；缺失/无效/0 默认 1.0。
+                    info.sar = s["sample_aspect_ratio"].as_str()
+                        .and_then(parse_ratio)
+                        .filter(|r| *r > 0.0)
+                        .unwrap_or(1.0);
                     // fps = r_frame_rate (如 "30000/1001")
                     if let Some(fps_str) = s["r_frame_rate"].as_str() {
                         info.fps = parse_fraction(fps_str).unwrap_or(30.0);
@@ -123,6 +139,20 @@ fn parse_fraction(s: &str) -> Option<f64> {
         None
     }
 }
+
+/// 解析 "4:3" 或 "4/3" 形式的比值字符串（SAR 用 ':'，帧率用 '/'）。
+fn parse_ratio(s: &str) -> Option<f64> {
+    for sep in [':', '/'] {
+        if let Some((num, den)) = s.split_once(sep) {
+            let n: f64 = num.trim().parse().ok()?;
+            let d: f64 = den.trim().parse().ok()?;
+            if d != 0.0 { return Some(n / d); }
+        }
+    }
+    None
+}
+
+fn one_f() -> f64 { 1.0 }
 
 #[cfg(test)]
 mod tests {
