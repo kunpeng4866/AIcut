@@ -782,7 +782,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             if let Some(tp) = out_trans.get(cr.clip.id.as_str()) {
                 apply_outgoing_transition(&mut vframe, &mut tf, tp);
             }
-            layers.push(CompositeLayer { frame: vframe, transform: tf, reveal_mask: None });
+            layers.push(CompositeLayer { frame: vframe, transform: tf, reveal_mask: None, crop: clip.crop });
         }
         // 额外层：转场后 clip（叠加在顶层，淡入/滑入/wipe 揭示）
         for ((next, tp), req) in extra_next.iter().zip(prefetch_reqs.iter().skip(video_clips.len())) {
@@ -792,7 +792,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             let mut vframe = frame.to_video_frame(t, &next.asset_id);
             // 入片段转场效果
             apply_incoming_transition(&mut vframe, &mut tf, tp);
-            layers.push(CompositeLayer { frame: vframe, transform: tf, reveal_mask: None });
+            layers.push(CompositeLayer { frame: vframe, transform: tf, reveal_mask: None, crop: next.crop });
         }
         // flash 白场叠加（alpha = sin(ep·π)），置于最顶层
         if flash_alpha > 1e-4 {
@@ -809,7 +809,7 @@ impl<'a> RenderStrategy for ExportPipeline<'a> {
             };
             let mut wf = crate::compositor::default_transform();
             wf.opacity = flash_alpha;
-            layers.push(CompositeLayer { frame: white, transform: wf, reveal_mask: None });
+            layers.push(CompositeLayer { frame: white, transform: wf, reveal_mask: None, crop: None });
         }
 
         // 4. 多轨道 Over 合成（输出画布尺寸的 RGBA 帧）
@@ -1275,7 +1275,7 @@ mod tests {
             text: None,
             subtitle: None,
             transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None, crop: None,
         }
     }
 

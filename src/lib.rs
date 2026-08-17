@@ -97,6 +97,13 @@ pub fn is_simple_project(project: &Project) -> bool {
         if clip.transform != default_tf {
             return false;
         }
+        // 裁切：graph.rs 快速路径的 crop 是「提取子矩形再 scale 填满」，与预览「纯裁剪（框外透明、
+        // 不放大填满）」语义不一致 → 带非整帧裁切的 clip 强制走完整路径（compositor 纯裁剪）。
+        if let Some(cr) = &clip.crop {
+            if !cr.is_full_frame() {
+                return false;
+            }
+        }
         if !clip.filters.is_empty() {
             return false;
         }
@@ -374,7 +381,7 @@ mod tests {
             time_remap: crate::project::TimeRemap { reverse: false, freeze: None, curve: Vec::new() },
             text: None,
             subtitle: None, transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None, crop: None,
         }
     }
 

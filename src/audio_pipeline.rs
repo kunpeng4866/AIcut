@@ -377,7 +377,7 @@ mod tests {
             keyframes: Default::default(),
             text: None,
             subtitle: None, transition: None,
-            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None,
+            audio_fade_in: 0.0, audio_fade_out: 0.0, keying: None, super_resolution: None, crop: None,
         }
     }
 

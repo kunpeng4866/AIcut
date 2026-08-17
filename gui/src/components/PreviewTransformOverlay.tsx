@@ -118,7 +118,7 @@ export default function PreviewTransformOverlay() {
     return () => parent.removeEventListener('wheel', onWheel);
   }, [target, pushHistorySnapshot, updateClipLive]);
 
-  // 回车确认：裁剪模式下按回车，退出裁剪模式（裁剪结果已实时写入 store，此处仅作"确认完成"的明确反馈）
+  // 回车确认：裁剪模式下按回车退出裁剪模式（crop 已实时写入 store，此处仅作"确认完成"的明确反馈）。
   useEffect(() => {
     if (mode !== 'crop') return;
     const onKey = (e: KeyboardEvent) => {
@@ -149,7 +149,7 @@ export default function PreviewTransformOverlay() {
     const [rxp, ryp] = ndcToPx(rxN, ryN, fw, fh);
     const angleDeg = Math.atan2(ryp - cyp, rxp - cxp) * 180 / Math.PI;
     // 裁切框顶点(源 UV)
-    const crop = target.clip.crop || defaultCrop;
+    const crop = target.clip.crop ?? defaultCrop;
     const cornersUV = [
       [crop.x, crop.y], [crop.x + crop.w, crop.y],
       [crop.x + crop.w, crop.y + crop.h], [crop.x, crop.y + crop.h],
@@ -173,11 +173,12 @@ export default function PreviewTransformOverlay() {
   const beginDrag = (e: React.PointerEvent, type: Mode | 'cropHandle', handle?: string) => {
     e.stopPropagation();
     const t = target.clip.transform || {};
-    const crop = target.clip.crop || defaultCrop;
+    const crop = target.clip.crop ?? defaultCrop;
     const [cxN, cyN] = uvToNdc(0.5, 0.5, t, geom.fs);
     const [cxp, cyp] = ndcToPx(cxN, cyN, geom.fw, geom.fh);
     const startAngle = Math.atan2(-(e.clientY - cyp), e.clientX - cxp);
-    pushHistorySnapshot();
+    // 裁切会话在进入裁剪模式时已压一次快照；移动/旋转仍拖前压。
+    if (type !== 'cropHandle') pushHistorySnapshot();
     drag.current = {
       type, handle,
       startClientX: e.clientX, startClientY: e.clientY,
@@ -232,9 +233,14 @@ export default function PreviewTransformOverlay() {
     drag.current = null;
   };
 
+  // 进入裁剪模式时压一次快照（整次裁剪会话 = 一次撤销）；其余模式直接切换。
+  const enterMode = (m: Mode) => {
+    if (m === 'crop' && mode !== 'crop') pushHistorySnapshot();
+    setMode(m);
+  };
   const ToolBtn = ({ m, label }: { m: Mode; label: string }) => (
     <button
-      onClick={() => setMode(m)}
+      onClick={() => enterMode(m)}
       style={{
         background: mode === m ? '#e94560' : 'rgba(15,52,96,0.92)', color: '#fff',
         border: 'none', borderRadius: 5, padding: '5px 11px', fontSize: 12, cursor: 'pointer',
@@ -258,8 +264,8 @@ export default function PreviewTransformOverlay() {
 
   return (
     <div ref={rootRef} data-testid="preview-overlay" data-mode={mode} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 20, fontFamily: 'system-ui' }}>
-      {/* 工具栏 */}
-      <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 6, pointerEvents: 'auto', background: 'rgba(0,0,0,0.35)', padding: 4, borderRadius: 8 }}>
+      {/* 工具栏：zIndex 抬高，确保在裁剪框/移动框/句柄之上（否则这些 pointerEvents:auto 的框会覆盖工具栏导致按钮点不到） */}
+      <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 6, pointerEvents: 'auto', background: 'rgba(0,0,0,0.35)', padding: 4, borderRadius: 8, zIndex: 30 }}>
         <ToolBtn m="move" label="移动" />
         <ToolBtn m="rotate" label="旋转" />
         <ToolBtn m="crop" label="裁剪" />

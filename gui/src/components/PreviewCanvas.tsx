@@ -1298,17 +1298,21 @@ export default function PreviewCanvas() {
                   }
                   shadowFilter = buildMaskShadowFilter(maskList); // 仅取字符串，挂到外层 wrapper
                 }
-                // 自由裁切（HTML5 回退）：把源 crop 区域缩放填满显示框。
-                // 用 top-left origin 的 translate+scale；源比例≈画布比例(contain=1)时精确。
-                // 与 flip/转场 zoom 同时存在时叠加为近似（HTML5 仅为 WebGPU 不可用时的回退路径）。
+                // 自由裁切（HTML5 回退）：纯裁剪，不放大填满（画面尺寸严格不变）。
+                // 用 clip-path 按 contain 后视频实际区域裁掉框外；百分比相对视频元素（=frame 全尺寸）。
                 const cropCfg = clip.crop;
                 const hasCrop = !!(cropCfg && (cropCfg.x > 1e-4 || cropCfg.y > 1e-4 || cropCfg.w < 0.9999 || cropCfg.h < 0.9999));
-                let cropTransform = '';
                 if (hasCrop) {
-                  const cw = Math.max(0.001, cropCfg.w || 1);
-                  const ch = Math.max(0.001, cropCfg.h || 1);
-                  cropTransform = `translate(${-cropCfg.x / cw * 100}%, ${-cropCfg.y / ch * 100}%) scale(${1 / cw}, ${1 / ch})`;
-                  outStyle.transformOrigin = 'top left';
+                  const vA = (asset?.width || project.canvas.width) / (asset?.height || project.canvas.height);
+                  const cA = project.canvas.width / project.canvas.height;
+                  const pw = vA > cA ? 100 : (vA / cA) * 100;
+                  const ph = vA > cA ? (cA / vA) * 100 : 100;
+                  const ox = (100 - pw) / 2, oy = (100 - ph) / 2;
+                  const left = ox + cropCfg.x * pw;
+                  const top = oy + cropCfg.y * ph;
+                  const right = ox + (cropCfg.x + cropCfg.w) * pw;
+                  const bottom = oy + (cropCfg.y + cropCfg.h) * ph;
+                  outStyle.clipPath = `inset(${top}% ${100 - right}% ${100 - bottom}% ${left}%)`;
                 }
                 // 镜像翻转（HTML5 回退）：水平→scaleX(-1)、垂直→scaleY(-1)。
                 // GUI 写入 transform.flip_h/flip_v（0/1），与 WebGPU 预览/导出一致（# 镜像无效）。
@@ -1317,10 +1321,6 @@ export default function PreviewCanvas() {
                 if ((clip.transform?.flip_v ?? 0) > 0.5) flipT.push('scaleY(-1)');
                 if (flipT.length) {
                   outStyle.transform = [outStyle.transform, ...flipT].filter(Boolean).join(' ');
-                }
-                // crop 追加到 transform 最右（最先应用）：先裁源，再翻转/转场变换
-                if (cropTransform) {
-                  outStyle.transform = outStyle.transform ? `${outStyle.transform} ${cropTransform}` : cropTransform;
                 }
                 const videoEl = (
                   <video

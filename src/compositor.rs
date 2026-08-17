@@ -21,7 +21,7 @@ pub struct CompositeLayer {
     /// 转场 wipe 遮罩：画布归一化矩形 (x0,y0,x1,y1)，y-down；仅保留矩形内像素。None = 不裁剪。
     pub reveal_mask: Option<(f32, f32, f32, f32)>,
     /// 自由裁剪（归一化 0..1，SOURCE 空间，y-down）。None = 不裁剪。
-    /// 在 scale→rotate→flip→over_blit 之前，把 frame 的裁剪子矩形作为新的"源"。
+    /// 在 scale→rotate→flip→over_blit 之前，把 crop 框外像素置透明（纯裁剪，不放大填满）。
     pub crop: Option<CropRect>,
 }
 
@@ -75,32 +75,33 @@ impl Compositor {
     fn composite_layer(&self, canvas: &mut [u8], layer: &CompositeLayer) {
         let tf = &layer.transform;
 
-        // 自由裁剪（CropRect）：在 scale→rotate→flip→over_blit 之前，从 SOURCE 帧提取
-        // 裁剪子矩形（源像素坐标），作为新的"源"（cw×ch）交给后续变换管道。
+        // 自由裁剪（CropRect）：纯裁剪，与 WebGPU/HTML5 预览一致——完整素材按 contain 原尺寸显示，
+        // 仅把 crop 框外像素置透明（alpha=0），不做子矩形提取、不放大填满。
         // 归一化 0..1（SOURCE 空间，y-down）：cx=round(x*sw), cy=round(y*sh),
         // cw=round(w*sw), ch=round(h*sh)，钳入边界，cw/ch 至少 1。
-        // None 或整帧 {0,0,1,1} → 使用原始 frame（不改动原管道行为）。
-        let (src_data, src_w, src_h) = match &layer.crop {
-            Some(cr) if !cr.is_full_frame() => {
-                let full_w = layer.frame.width as i64;
-                let full_h = layer.frame.height as i64;
+        // None 或整帧 {0,0,1,1} → 直接使用原始 frame（不改动原管道行为）。
+        let src_w = layer.frame.width;
+        let src_h = layer.frame.height;
+        let mut src_data = layer.frame.data.clone();
+        if let Some(cr) = &layer.crop {
+            if !cr.is_full_frame() {
+                let full_w = src_w as i64;
+                let full_h = src_h as i64;
                 let cx = (cr.x as f64 * full_w as f64).round().clamp(0.0, full_w as f64) as i64;
                 let cy = (cr.y as f64 * full_h as f64).round().clamp(0.0, full_h as f64) as i64;
-                let cw = (cr.w as f64 * full_w as f64).round().clamp(1.0, (full_w - cx) as f64).max(1.0) as u32;
-                let ch = (cr.h as f64 * full_h as f64).round().clamp(1.0, (full_h - cy) as f64).max(1.0) as u32;
-                let cx = cx as usize;
-                let cy = cy as usize;
-                let mut sub = vec![0u8; (cw as usize) * (ch as usize) * 4];
-                for row in 0..(ch as usize) {
-                    let src_row = ((cy + row) * (full_w as usize) + cx) * 4;
-                    let dst_row = row * (cw as usize) * 4;
-                    sub[dst_row..dst_row + (cw as usize) * 4]
-                        .copy_from_slice(&layer.frame.data[src_row..src_row + (cw as usize) * 4]);
+                let cw = (cr.w as f64 * full_w as f64).round().clamp(1.0, (full_w - cx) as f64).max(1.0) as i64;
+                let ch = (cr.h as f64 * full_h as f64).round().clamp(1.0, (full_h - cy) as f64).max(1.0) as i64;
+                let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);
+                for row in 0..src_h as usize {
+                    let base = row * (src_w as usize) * 4;
+                    for col in 0..src_w as usize {
+                        if col < cx || col >= cx + cw || row < cy || row >= cy + ch {
+                            src_data[base + col * 4 + 3] = 0;
+                        }
+                    }
                 }
-                (sub, cw, ch)
             }
-            _ => (layer.frame.data.clone(), layer.frame.width, layer.frame.height),
-        };
+        }
 
         // contain-fit 与 WebGPU 预览对齐：先按资产/画布宽高比做一次 fit，再乘用户缩放。
         // 预览 shader 中：

@@ -277,23 +277,6 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
     let mut nodes: Vec<String> = Vec::new();
 
-    // 0) 自由裁剪（CropRect）：在 scale/rotate/xfade 之前，对 SOURCE 帧做 crop。
-    // 归一化 0..1（SOURCE 空间，y-down）→ ffmpeg 表达式 crop=iw*W:ih*H:iw*X:ih*Y。
-    // 仅当 crop 存在且非整帧 {0,0,1,1} 时插入；否则保持原链与输入不变。
-    // 注意：滤镜链语法要求后续 filter 用逗号分隔，故 crop 参数末尾必须带 ','。
-    let crop_prefix = match &c.crop {
-        Some(cr) if !cr.is_full_frame() => format!(
-            "{}crop=iw*{}:ih*{}:iw*{}:ih*{},",
-            input,
-            fmt(cr.w as f64),
-            fmt(cr.h as f64),
-            fmt(cr.x as f64),
-            fmt(cr.y as f64)
-        ),
-        _ => input.to_string(),
-    };
-    let input = crop_prefix.as_str();
-
     // 1) 预抠像链：scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
     let mut pre_label = format!("{}p", label);
     let mut pre = match (&sx_a, &sy_a) {
@@ -311,6 +294,23 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
         ),
         (None, None) => format!("{}scale={}:{}", input, sw, sh),
     };
+
+    // 自由裁剪（CropRect）：纯裁剪，与 WebGPU/HTML5 预览一致——完整素材按 contain 原尺寸
+    // 缩放显示，仅把 crop 框外像素置透明（crop 提取框内 + pad 原位回填透明黑@0），
+    // 不做子矩形提取、不放大填满。施加在 scale 之后、rotate 之前，保证裁剪作用于未旋转的
+    // 源空间。归一化 0..1（SOURCE 空间，y-down）→ 缩放后像素坐标 cx=round(x*sw)、cy=round(y*sh)。
+    if let Some(cr) = &c.crop {
+        if !cr.is_full_frame() {
+            let cx = ((cr.x as f64 * sw as f64).round() as i64).clamp(0, sw as i64) as u32;
+            let cy = ((cr.y as f64 * sh as f64).round() as i64).clamp(0, sh as i64) as u32;
+            let cw = ((cr.w as f64 * sw as f64).round() as i64).clamp(1, (sw as i64 - cx as i64).max(1)).max(1) as u32;
+            let ch = ((cr.h as f64 * sh as f64).round() as i64).clamp(1, (sh as i64 - cy as i64).max(1)).max(1) as u32;
+            pre.push_str(&format!(
+                ",format=rgba,crop={}:{}:{}:{},pad={}:{}:{}:{}:color=black@0",
+                cw, ch, cx, cy, sw, sh, cx, cy
+            ));
+        }
+    }
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
     if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur) {
@@ -1193,8 +1193,10 @@ mod rotation_direction_tests {
         );
     }
 
-    /// 自由裁剪：crop 滤镜必须按 crop=iw*W:ih*H:iw*X:ih*Y 语法生成，
-    /// 且与后续 scale 之间必须有逗号分隔（否则 ffmpeg 解析报 -22 导出失败）。
+    /// 自由裁剪：必须按「纯裁剪」语义生成——先 scale 到 contain 尺寸，再 crop 提取框内 +
+    /// pad 原位回填透明黑@0（框外透明、不放大填满），与 WebGPU/HTML5 预览一致。
+    /// 画布 1920x1080、素材 400x400（contain=1080x1080）、crop{x:0.5,y:0,w:0.5,h:1}：
+    /// cx=540,cy=0,cw=540,ch=1080,sw=sh=1080。
     #[test]
     fn test_graph_crop_emits_comma_separated_filter() {
         let json = r#"{
@@ -1211,8 +1213,8 @@ mod rotation_direction_tests {
         let cmd = render_project_json(json).expect("build command");
         println!("CMD: {}", cmd);
         assert!(
-            cmd.contains("crop=iw*0.5:ih*1:iw*0.5:ih*0,"),
-            "crop filter must be emitted with trailing comma before next filter; cmd: {}",
+            cmd.contains("format=rgba,crop=540:1080:540:0,pad=1080:1080:540:0:color=black@0"),
+            "crop must be pure-crop (transparent outside, no stretch); cmd: {}",
             cmd
         );
     }

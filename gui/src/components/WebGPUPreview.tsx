@@ -91,15 +91,19 @@ struct VSOut {
 }
 
 @fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
-  // 自由裁切：把采样 UV 重映射到裁切框内的源区域（裁切区被缩放填满 clip 显示框）。
-  var cuv = vec2f(u.crop.x + in.uv.x * u.crop.z, u.crop.y + in.uv.y * u.crop.w);
   // 镜像翻转：mask2.w 编码标志位 bit0=水平(h, 翻转 u)、bit1=垂直(v, 翻转 v)；
   // 仅翻转贴图采样 UV，蒙版坐标(nx,ny)仍用原 UV，保证镜像只翻转画面内容、不改变蒙版区域。
-  var fuv = cuv;
+  var fuv = in.uv;
   let fc = u.mask2.w;
   if ((fc >= 1.0 && fc < 2.0) || fc >= 3.0) { fuv.x = 1.0 - fuv.x; }
   if (fc >= 2.0) { fuv.y = 1.0 - fuv.y; }
+  // textureSample 必须在 uniform 控制流中调用：先采样，再基于非 uniform 的插值 uv 做丢弃。
   let color = textureSample(videoTexture, videoSampler, fuv);
+  // 自由裁切（纯裁剪，不放大填满）：画面保持 contain 原尺寸，裁切框外的像素透明。
+  let cuv = in.uv;
+  if (cuv.x < u.crop.x || cuv.x > u.crop.x + u.crop.z || cuv.y < u.crop.y || cuv.y > u.crop.y + u.crop.w) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
   let nx = cuv.x;
   let ny = 1.0 - cuv.y; // 画布坐标 y-down（相对裁切后画面）
   let m = u.mask;
@@ -312,6 +316,7 @@ export function useWebGPUPreview({
     try {
       module = device.createShaderModule({ code: shaderSrc });
       p = device.createRenderPipeline({
+        label: 'filter-' + kind,
         layout: 'auto',
         vertex: { module, entryPoint: 'vs_main' },
         fragment: { module, entryPoint: 'fs_main', targets: [{ format: 'rgba8unorm' }] },
@@ -333,7 +338,10 @@ export function useWebGPUPreview({
         filterPipelinesRef.current.delete(kind);
       }
     });
-    return p;
+    // 首帧返回 null 跳过本滤镜（降级为原图），等异步验证确认管线有效后再从缓存取用。
+    // 否则本帧直接 getBindGroupLayout(0) 会命中 invalid 管线，报
+    // "Invalid RenderPipeline is invalid ... GetBindGroupLayout" 并整会话回退 HTML5。
+    return null;
   };
 
   // ── 初始化设备 + 管线 + canvas 配置 ──
@@ -356,6 +364,9 @@ export function useWebGPUPreview({
         device.addEventListener('uncapturederror', (e: any) => {
           console.error('[WebGPU] uncaptured error:', e.error?.message || e.error);
         });
+        device.lost.then((info: any) => {
+          console.error('[WebGPU] device lost:', info?.message || info);
+        });
 
         const canvas = canvasRef.current;
         if (!canvas) throw new Error('canvas 不存在');
@@ -365,31 +376,51 @@ export function useWebGPUPreview({
         if (!ctx) throw new Error('无法获取 webgpu 上下文');
         ctx.configure({ device, format: 'bgra8unorm', alphaMode: 'premultiplied' });
 
-        const module = device.createShaderModule({ code: WGSL_SHADER });
-        pipelineRef.current = device.createRenderPipeline({
-          layout: 'auto',
-          vertex: { module, entryPoint: 'vs_main' },
-          fragment: {
-            module, entryPoint: 'fs_main',
-            targets: [{
-              format: 'bgra8unorm',
-              // Over 合成：src * srcAlpha + dst * (1 - srcAlpha)
-              blend: {
-                color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
-                alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
-              },
-            }],
-          },
-          primitive: { topology: 'triangle-strip' },
+        // 主管线创建用 error scope 隔离验证错误（与插件滤镜管线一致）。createShaderModule /
+        // createRenderPipeline 编译或校验失败时返回 invalid 对象、不抛 JS 异常；若不隔离，
+        // 会静默 setReady(true)，渲染循环 pipeline.getBindGroupLayout(0) 报
+        // "Invalid RenderPipeline is invalid" 并整会话回退 HTML5，且拿不到真正报错文本。
+        device.pushErrorScope('validation');
+        let module: any;
+        try {
+          module = device.createShaderModule({ code: WGSL_SHADER });
+          pipelineRef.current = device.createRenderPipeline({
+            label: 'main-over',
+            layout: 'auto',
+            vertex: { module, entryPoint: 'vs_main' },
+            fragment: {
+              module, entryPoint: 'fs_main',
+              targets: [{
+                format: 'bgra8unorm',
+                // Over 合成：src * srcAlpha + dst * (1 - srcAlpha)
+                blend: {
+                  color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                  alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+                },
+              }],
+            },
+            primitive: { topology: 'triangle-strip' },
+          });
+        } catch (e: any) {
+          device.popErrorScope().catch(() => {});
+          console.error('[WebGPU] 主渲染管线创建异常:', e?.message || e);
+          setError(e?.message || String(e));
+          return;
+        }
+        device.popErrorScope().then((err: any) => {
+          if (cancelled) return;
+          if (err) {
+            console.error('[WebGPU] 主渲染管线验证失败:', err?.message || err);
+            setError(err?.message || 'WebGPU 主渲染管线创建失败');
+            return;
+          }
+          // 管线有效：预分配 MAX_CLIPS 个 uniform buffer，避免每帧创建/销毁
+          uniformBufsRef.current = Array.from({ length: MAX_CLIPS }, () =>
+            device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+          );
+          samplerRef.current = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+          setReady(true);
         });
-
-        // 预分配 MAX_CLIPS 个 uniform buffer，避免每帧创建/销毁
-        uniformBufsRef.current = Array.from({ length: MAX_CLIPS }, () =>
-          device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
-        );
-        samplerRef.current = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-
-        setReady(true);
       } catch (e: any) {
         setError(e.message || String(e));
       }
@@ -678,6 +709,8 @@ export function useWebGPUPreview({
           const posY = t.y ?? 0.5;
           const scaleX = t.scale_x ?? 1.0;
           const scaleY = t.scale_y ?? 1.0;
+          // 自由裁切（纯裁剪，不放大）：几何不放大，裁切由 fragment 对框外像素置透明实现。
+          const crop = clip.crop || { x: 0, y: 0, w: 1, h: 1 };
           const rotation = ((t.rotation ?? 0) * Math.PI) / 180;
           // 出片段乘转场淡出、入片段乘转场 progress 不透明度
           const opacity = (t.opacity ?? 1.0) * (extraOpacity ?? 1.0);
@@ -703,8 +736,7 @@ export function useWebGPUPreview({
           }
           data[8] = rx0; data[9] = ry0; data[10] = rx1; data[11] = ry1;
           data[12] = mode; data[13] = r; data[14] = feather; data[15] = flipCode;
-          // 自由裁切：归一化源空间 {x,y,w,h}，缺省为整帧 {0,0,1,1}
-          const crop = clip.crop || { x: 0, y: 0, w: 1, h: 1 };
+          // 自由裁切 uniform（片段着色器 UV 重映射用）
           data[16] = crop.x; data[17] = crop.y; data[18] = crop.w; data[19] = crop.h;
           // zoom 转场：把出/入片段的 scale() 折进现有用户 scale
           const zoom = parseScale(item.transform);
