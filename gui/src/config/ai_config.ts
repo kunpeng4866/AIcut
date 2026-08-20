@@ -31,7 +31,7 @@ export interface TTSConfig {
   accessToken: string;
   endpoint: string;
   defaultVoice: string;
-  model?: string; // 百炼模型，cosyvoice 默认 'cosyvoice-v2'
+  model?: string; // 百炼模型，cosyvoice 默认 'cosyvoice-v3.5-flash'
 }
 
 // 渲染设置
@@ -82,7 +82,7 @@ export function getDefaultConfig(): AIcutConfig {
       accessToken: '',
       endpoint: '',
       defaultVoice: '',
-      model: 'cosyvoice-v2',
+      model: 'cosyvoice-v3.5-flash',
     },
     render: {
       ffmpegPath: '',

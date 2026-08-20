@@ -153,7 +153,7 @@ export default function ConfigWizard({ initialConfig, onComplete, onCancel }: Pr
                   <label style={theme.label}>默认音色 voice</label>
                   <input style={theme.input} placeholder="longxiaochun" value={cfg.tts.defaultVoice} onChange={e => updateTTS({ defaultVoice: e.target.value })} />
                   <label style={theme.label}>模型</label>
-                  <input style={theme.input} placeholder="cosyvoice-v2" value={cfg.tts.model} onChange={e => updateTTS({ model: e.target.value })} />
+                  <input style={theme.input} placeholder="cosyvoice-v3.5-flash" value={cfg.tts.model} onChange={e => updateTTS({ model: e.target.value })} />
                 </>
               )}
             </div>

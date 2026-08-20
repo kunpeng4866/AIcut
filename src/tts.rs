@@ -237,12 +237,12 @@ impl TtsProvider for VolcanoTtsClient {
 
 pub const COSYVOICE_ENDPOINT: &str =
     "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-to-audio";
-pub const DEFAULT_COSYVOICE_MODEL: &str = "cosyvoice-v2";
+pub const DEFAULT_COSYVOICE_MODEL: &str = "cosyvoice-v3.5-flash";
 
 /// 阿里云百炼（DashScope）CosyVoice TTS 客户端
 pub struct CosyVoiceClient {
     pub api_key: String,       // DashScope API Key
-    pub model: String,         // 默认 "cosyvoice-v2"
+    pub model: String,         // 默认 "cosyvoice-v3.5-flash"
     pub default_voice: String, // 百炼音色 id，如 "longxiaochun"
 }
 
@@ -255,7 +255,7 @@ impl CosyVoiceClient {
         }
     }
 
-    /// 便捷构造：model 为空时使用默认 "cosyvoice-v2"
+    /// 便捷构造：model 为空时使用默认 "cosyvoice-v3.5-flash"
     pub fn from_config(api_key: &str, model: &str, voice: &str) -> Self {
         Self::new(
             api_key,
@@ -394,7 +394,7 @@ impl TtsProvider for CosyVoiceClient {
 /// - provider: "volcano" | "cosyvoice"（其余按 volcano 处理）
 /// - appid: volcano 传 AppID；cosyvoice 传 DashScope API Key
 /// - token: volcano 传 Access Token；cosyvoice 忽略
-/// - model: cosyvoice 模型名（默认 "cosyvoice-v2"）
+/// - model: cosyvoice 模型名（默认 "cosyvoice-v3.5-flash"）
 pub fn synthesize_provider(
     provider: &str,
     appid: &str,
