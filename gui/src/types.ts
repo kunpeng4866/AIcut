@@ -354,8 +354,8 @@ export interface AicutAPI {
   // AI配置
   getConfig(): Promise<string>;
   setConfig(json: string): Promise<boolean>;
-  // TTS 语音合成
-  ttsSynthesize(text: string, voice: string, outputPath: string): Promise<{ success: boolean; audioPath?: string; error?: string }>;
+  // TTS 语音合成（输出路径由主进程服务端生成）
+  ttsSynthesize(text: string, voice: string): Promise<{ success: boolean; audioPath?: string; error?: string }>;
   ttsVoices(): Promise<string>;
   // AI 自动字幕
   ai: AiAPI;

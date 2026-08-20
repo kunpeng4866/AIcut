@@ -50,8 +50,9 @@ contextBridge.exposeInMainWorld('aicut', {
   },
 
   // ── TTS 语音合成 ──
-  ttsSynthesize: (text: string, voice: string, outputPath: string) =>
-    ipcRenderer.invoke('tts:synthesize', text, voice, outputPath),
+  // 输出路径由主进程服务端生成，前端只传 text + voice
+  ttsSynthesize: (text: string, voice: string) =>
+    ipcRenderer.invoke('tts:synthesize', text, voice),
   ttsVoices: () => ipcRenderer.invoke('tts:voices'),
 
   // ── AI 自动字幕 / 翻译 ──

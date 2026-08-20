@@ -2,6 +2,7 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, session, shell } from 'electron';
 import { spawn } from 'child_process';
 import { readFile, writeFile, mkdir, readdir, unlink, stat } from 'fs/promises';
+import { mkdirSync } from 'fs';
 import { createReadStream } from 'fs';
 import { Readable } from 'stream';
 import { join, dirname, basename } from 'path';
@@ -295,23 +296,57 @@ ipcMain.handle('config:set', async (_e, json: string) => {
 });
 
 // ── TTS 语音合成 ──
-ipcMain.handle('tts:synthesize', async (_e, text: string, voice: string, outputPath: string) => {
+// 前端只传 (text, voice)；输出临时 wav 路径由本 handler 在服务端生成，
+// 按 config.tts.provider 分流到火山引擎 / CosyVoice（百炼）引擎命令。
+ipcMain.handle('tts:synthesize', async (_e, text: string, voice: string) => {
   try {
     const configContent = await readFile(getConfigPath(), 'utf8');
     const config = JSON.parse(configContent);
     const tts = config.tts || {};
-    if (!tts.appId || !tts.accessToken) {
-      return { success: false, error: 'TTS 未配置，请先在设置中填写 AppID 和 Access Token' };
+    const provider = tts.provider;
+
+    if (provider !== 'volcano' && provider !== 'cosyvoice') {
+      return { success: false, error: 'TTS 未配置：请先在设置中选择「火山引擎」或「CosyVoice」服务商' };
     }
-    await callEngine(
-      'tts',
-      '--appid', tts.appId,
-      '--token', tts.accessToken,
-      '--text', text,
-      '--voice', voice || tts.defaultVoice || 'BV002_streaming',
-      '--output', outputPath,
-    );
-    return { success: true, audioPath: outputPath };
+
+    // 服务端生成唯一临时 wav 输出路径（避免前端传路径带来的安全/路径约定问题）
+    const dir = join(app.getPath('temp'), 'aicut-tts');
+    mkdirSync(dir, { recursive: true });
+    const outPath = join(dir, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+
+    const usedVoice = voice || tts.defaultVoice ||
+      (provider === 'cosyvoice' ? 'longxiaochun' : 'BV002_streaming');
+
+    if (provider === 'volcano') {
+      if (!tts.appId || !tts.accessToken) {
+        return { success: false, error: '火山引擎 TTS 未配置：请先在设置填写 AppID 与 Access Token' };
+      }
+      await callEngine(
+        'tts',
+        '--provider', 'volcano',
+        '--appid', tts.appId,
+        '--token', tts.accessToken,
+        '--text', text,
+        '--voice', usedVoice,
+        '--output', outPath,
+      );
+    } else {
+      // cosyvoice：appId 即 DashScope API Key（token 引擎忽略）
+      if (!tts.appId) {
+        return { success: false, error: 'CosyVoice 未配置：请先在设置填写 DashScope API Key' };
+      }
+      await callEngine(
+        'tts',
+        '--provider', 'cosyvoice',
+        '--appid', tts.appId,
+        '--token', '',
+        '--text', text,
+        '--voice', usedVoice,
+        '--output', outPath,
+        '--model', tts.model || 'cosyvoice-v2',
+      );
+    }
+    return { success: true, audioPath: outPath };
   } catch (e: any) {
     return { success: false, error: e.message || String(e) };
   }

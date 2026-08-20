@@ -129,26 +129,31 @@ export default function ConfigWizard({ initialConfig, onComplete, onCancel }: Pr
 
           {step === 2 && (
             <div>
-              <div style={theme.desc}>配置文字转语音(TTS)，用于AI配音生成。可跳过。Edge-TTS免费无需配置。</div>
+              <div style={theme.desc}>配置文字转语音(TTS)，用于AI配音生成。可跳过（下一步）。支持火山引擎与阿里云百炼 CosyVoice。</div>
               <label style={theme.label}>服务商</label>
               <select style={theme.input} value={cfg.tts.provider} onChange={e => updateTTS({ provider: e.target.value as TTSConfig['provider'] })}>
                 <option value="none">未配置</option>
-                <option value="edge-tts">Edge TTS（免费）</option>
                 <option value="volcano">火山引擎</option>
-                <option value="custom">自定义</option>
+                <option value="cosyvoice">阿里云百炼 CosyVoice</option>
               </select>
               {cfg.tts.provider === 'volcano' && (
                 <>
-                  <label style={theme.label}>App ID</label>
+                  <label style={theme.label}>火山 AppID</label>
                   <input style={theme.input} value={cfg.tts.appId} onChange={e => updateTTS({ appId: e.target.value })} />
-                  <label style={theme.label}>Access Token</label>
+                  <label style={theme.label}>火山 Access Token</label>
                   <input style={theme.input} type="password" value={cfg.tts.accessToken} onChange={e => updateTTS({ accessToken: e.target.value })} />
+                  <label style={theme.label}>默认音色 voice</label>
+                  <input style={theme.input} placeholder="BV002_streaming" value={cfg.tts.defaultVoice} onChange={e => updateTTS({ defaultVoice: e.target.value })} />
                 </>
               )}
-              {cfg.tts.provider !== 'none' && (
+              {cfg.tts.provider === 'cosyvoice' && (
                 <>
-                  <label style={theme.label}>默认音色</label>
-                  <input style={theme.input} placeholder="zh-XiaoxiaoNeural" value={cfg.tts.defaultVoice} onChange={e => updateTTS({ defaultVoice: e.target.value })} />
+                  <label style={theme.label}>DashScope API Key</label>
+                  <input style={theme.input} type="password" value={cfg.tts.appId} onChange={e => updateTTS({ appId: e.target.value })} />
+                  <label style={theme.label}>默认音色 voice</label>
+                  <input style={theme.input} placeholder="longxiaochun" value={cfg.tts.defaultVoice} onChange={e => updateTTS({ defaultVoice: e.target.value })} />
+                  <label style={theme.label}>模型</label>
+                  <input style={theme.input} placeholder="cosyvoice-v2" value={cfg.tts.model} onChange={e => updateTTS({ model: e.target.value })} />
                 </>
               )}
             </div>

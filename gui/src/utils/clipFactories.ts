@@ -408,6 +408,30 @@ export function createImageStickerClip(asset: AssetConfig, timelineIn = 0): Clip
   };
 }
 
+// 生成一段音频片段（用于 TTS 配音、导入音频等落到音频轨）。
+// 默认 duration 取素材时长，timelineIn 默认 0；volume 默认 1。
+export function createAudioClip(
+  asset: AssetConfig,
+  opts?: { timelineIn?: number; duration?: number; volume?: number },
+): ClipConfig {
+  const dur = opts?.duration ?? asset.duration ?? 5;
+  const inT = opts?.timelineIn ?? 0;
+  return {
+    id: uid('clip'),
+    assetId: asset.id,
+    src_range: { start: 0, end: dur },
+    timelineIn: inT,
+    timelineOut: inT + dur,
+    transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
+    volume: opts?.volume ?? 1,
+    speed: 1,
+    effects: [],
+    masks: [],
+    filters: [],
+    keyframes: {},
+  };
+}
+
 // 生成一段默认抠像配置（M1 仅 chroma 色度抠图可用）
 export function createDefaultKeying(): KeyingConfig {
   return {

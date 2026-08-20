@@ -21,12 +21,17 @@ export interface ASRConfig {
 }
 
 // TTS（文字转语音）配置（用于配音生成）
+// provider:
+//   'none'    未配置
+//   'volcano' 火山引擎（appId=火山AppID，accessToken=火山Access Token）
+//   'cosyvoice' 阿里云百炼 CosyVoice（appId=DashScope API Key，token 引擎忽略）
 export interface TTSConfig {
-  provider: 'none' | 'volcano' | 'edge-tts' | 'custom';
+  provider: 'none' | 'volcano' | 'cosyvoice';
   appId: string;
   accessToken: string;
   endpoint: string;
   defaultVoice: string;
+  model?: string; // 百炼模型，cosyvoice 默认 'cosyvoice-v2'
 }
 
 // 渲染设置
@@ -77,6 +82,7 @@ export function getDefaultConfig(): AIcutConfig {
       accessToken: '',
       endpoint: '',
       defaultVoice: '',
+      model: 'cosyvoice-v2',
     },
     render: {
       ffmpegPath: '',
@@ -136,7 +142,7 @@ export function isASRConfigured(config: AIcutConfig): boolean {
 export function isTTSConfigured(config: AIcutConfig): boolean {
   const tts = config?.tts;
   if (!tts || tts.provider === 'none') return false;
-  if (tts.provider === 'edge-tts') return true; // 免费无需配置
   if (tts.provider === 'volcano') return !!tts.appId && !!tts.accessToken;
-  return true; // custom
+  if (tts.provider === 'cosyvoice') return !!tts.appId; // DashScope Key
+  return false;
 }

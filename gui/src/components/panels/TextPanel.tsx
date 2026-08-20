@@ -6,8 +6,9 @@ import React, { useCallback, useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
 import { useAiStore } from '../../store/aiStore';
-import { addTextClip, addSubtitleClip, parseSRT, createSubtitleClipFromAsr, createTranslatedTrack } from '../../utils/clipFactories';
-import type { ClipConfig } from '../../types';
+import { useConfigStore } from '../../store/configStore';
+import { addTextClip, addSubtitleClip, parseSRT, createSubtitleClipFromAsr, createTranslatedTrack, createAudioClip, addClipToTrack, uid } from '../../utils/clipFactories';
+import type { ClipConfig, AssetConfig } from '../../types';
 
 const theme = {
   root: {
@@ -120,6 +121,8 @@ export default function TextPanel() {
   const [translateMsg, setTranslateMsg] = useState<string | null>(null);
   const [translateTarget, setTranslateTarget] = useState('en');
   const [translating, setTranslating] = useState(false);
+  const [ttsMsg, setTtsMsg] = useState<string | null>(null);
+  const [ttsProgress, setTtsProgress] = useState<{ i: number; total: number } | null>(null);
 
   // 反查当前选中的片段及其素材（音频/视频才有音轨可转写）
   const refClip: ClipConfig | null = (() => {
@@ -250,6 +253,75 @@ export default function TextPanel() {
     }
   };
 
+  // 文字转语音：把选中字幕片段「所在整条字幕轨」逐句合成配音，按各自时间轴位置落到音频轨。
+  // 每句调用 window.aicut.ttsSynthesize(text, voice)（输出路径由主进程生成），
+  // 合成后用 probe 取真实时长，构造音频素材 + 音频片段并落轨。
+  const handleTextToSpeech = async () => {
+    if (!selectedSubtitleClip) return;
+    const track = tracks.find(
+      (t) => t.type === 'subtitle' && t.clips.some((c) => c.id === selectedSubtitleClip.id),
+    );
+    if (!track) {
+      setTtsMsg('找不到选中字幕所在的轨道');
+      return;
+    }
+    // 同轨所有片段按时间轴顺序排序
+    const sourceClips = [...track.clips].sort((a, b) => a.timelineIn - b.timelineIn);
+    // 收集所有非空字幕 item，并折算其绝对时间起点。
+    // 注意：subtitle clip 通常 speed=1，绝对起点 ≈ clip.timelineIn + item.start（item.start 为相对 clip 偏移秒数）。
+    const items: { text: string; absStart: number }[] = [];
+    sourceClips.forEach((c) => {
+      (c.subtitle?.items ?? []).forEach((it) => {
+        const t = (it.text || '').trim();
+        if (t) {
+          const absStart = c.timelineIn + (it.start || 0);
+          items.push({ text: t, absStart });
+        }
+      });
+    });
+    if (items.length === 0) {
+      setTtsMsg('该字幕轨没有可合成的文字');
+      return;
+    }
+    // 读 TTS 配置（与翻译读配置同源：useConfigStore）
+    const ttsCfg = useConfigStore.getState().config?.tts;
+    if (!ttsCfg || ttsCfg.provider === 'none') {
+      setTtsMsg('TTS 未配置：请先到设置中选择火山引擎或 CosyVoice');
+      return;
+    }
+    const provider = ttsCfg.provider;
+    const voice =
+      ttsCfg.defaultVoice || (provider === 'cosyvoice' ? 'longxiaochun' : 'BV002_streaming');
+
+    for (let i = 0; i < items.length; i++) {
+      setTtsProgress({ i, total: items.length });
+      setTtsMsg(`合成中 ${i + 1}/${items.length}：${(items[i].text || '').slice(0, 12)}${(items[i].text || '').length > 12 ? '…' : ''}`);
+      const { success, audioPath, error } = await window.aicut.ttsSynthesize(items[i].text, voice);
+      if (!success || !audioPath) {
+        setTtsMsg('第' + (i + 1) + '段合成失败: ' + (error ?? '未知错误'));
+        continue;
+      }
+      // probe 取真实时长
+      const probe = await window.aicut.probe(audioPath);
+      const dur = probe?.info?.duration || 2;
+      const asset: AssetConfig = {
+        id: uid('asset'),
+        type: 'audio',
+        path: audioPath,
+        duration: dur,
+        width: 0,
+        height: 0,
+        codec: '',
+        fps: 30,
+      };
+      useProjectStore.getState().addAsset(asset);
+      const clip = createAudioClip(asset, { timelineIn: items[i].absStart, duration: dur });
+      addClipToTrack('audio', clip);
+    }
+    setTtsProgress(null);
+    setTtsMsg('文字转语音完成：共 ' + items.length + ' 段，已落到音频轨');
+  };
+
   // 导入字幕：动态创建隐藏 file input，选择后用 FileReader 读文本并解析
   const handleImportSubtitle = useCallback(() => {
     const input = document.createElement('input');
@@ -346,6 +418,30 @@ export default function TextPanel() {
           </div>
         )}
         {translateMsg && <div style={{ color: '#7bed9f', fontSize: 11, marginTop: 6, lineHeight: 1.4 }}>{translateMsg}</div>}
+      </div>
+
+      {/* 文字转语音：把选中字幕轨逐句合成配音，按时间轴落到音频轨 */}
+      <div style={{ border: '1px solid #2a4a6a', borderRadius: 6, padding: 8, marginBottom: 8, background: '#101a30' }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: '#cfe3ff', marginBottom: 6 }}>文字转语音（配音）</div>
+        {selectedSubtitleClip ? (
+          <>
+            <div style={{ ...theme.secondaryText, marginBottom: 6, wordBreak: 'break-all' }}>
+              选中字幕：{subtitlePreview || '(空)'}
+            </div>
+            <button
+              style={{ ...theme.addBtn, background: '#16a085' }}
+              onClick={handleTextToSpeech}
+              disabled={!!ttsProgress}
+            >
+              {ttsProgress ? `合成中 ${ttsProgress.i + 1}/${ttsProgress.total}` : '文字转语音并落到音频轨'}
+            </button>
+          </>
+        ) : (
+          <div style={{ ...theme.secondaryText }}>
+            请先在时间轴或下方列表选中任意一条字幕片段（将合成其所在整条字幕轨）
+          </div>
+        )}
+        {ttsMsg && <div style={{ color: '#7bed9f', fontSize: 11, marginTop: 6, lineHeight: 1.4 }}>{ttsMsg}</div>}
       </div>
 
       <div style={theme.listWrap}>

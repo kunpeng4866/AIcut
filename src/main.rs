@@ -136,35 +136,38 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&resp).unwrap());
         }
         "tts" => {
-            // aicut-engine tts --appid <id> --token <t> --text "..." --voice BV002 --out out.mp3
+            // aicut-engine tts --provider <volcano|cosyvoice> --appid <id> --token <t>
+            //   --text "..." --voice BV002_streaming --model <cosyvoice model> --output out.mp3
+            // 注：cosyvoice 时 --appid 传 DashScope API Key，--token 忽略。
+            let mut provider = String::from("volcano");
             let mut appid = String::new();
             let mut token = String::new();
             let mut text = String::new();
             let mut voice = String::new();
+            let mut model = String::new();
             let mut output = String::from("tts_output.mp3");
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
+                    "--provider" => { provider = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
                     "--appid" => { appid = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
                     "--token" => { token = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
                     "--text"  => { text  = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
                     "--voice" => { voice = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
+                    "--model" => { model = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
                     "--output"|"-o" => { output = args.get(i+1).cloned().unwrap_or_default(); i += 2; }
                     other => { eprintln!("未知参数: {}", other); process::exit(2); }
                 }
             }
-            if appid.is_empty() || token.is_empty() || text.is_empty() {
-                eprintln!("用法: aicut-engine tts --appid <id> --token <token> --text \"...\" [--voice BV002_streaming] [--output out.mp3]");
+            if appid.is_empty() || text.is_empty() {
+                eprintln!("用法: aicut-engine tts --provider <volcano|cosyvoice> --appid <id> --token <token> --text \"...\" [--voice BV002_streaming] [--model <cosyvoice model>] [--output out.mp3]");
                 process::exit(2);
             }
-            let config = aicut_engine::tts::TtsConfig {
-                appid, access_token: token, ..Default::default()
-            };
-            let client = aicut_engine::tts::VolcanoTtsClient::from_config(&config);
-            let req = aicut_engine::tts::TtsRequest {
-                text, voice_type: voice, ..Default::default()
-            };
-            match client.synthesize_to_file(&req, &output) {
+            if provider != "cosyvoice" && token.is_empty() {
+                eprintln!("用法: provider=volcano 时 --token 不能为空");
+                process::exit(2);
+            }
+            match aicut_engine::tts::synthesize_provider(&provider, &appid, &token, &model, &text, &voice, &output) {
                 Ok(dur) => println!("✅ TTS 合成成功: {} (时长 {:.2}s)", output, dur),
                 Err(e) => { eprintln!("❌ TTS 合成失败: {:#}", e); process::exit(1); }
             }
