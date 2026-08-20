@@ -68,6 +68,8 @@ interface ProjectState {
   project: ProjectConfig;
   isDirty: boolean;
   filePath: string | null;
+  // 复制缓冲区：源轨 + 轨类型 + 片段深拷贝（不参与工程序列化）
+  clipboard: { trackId: string; trackType: string; clip: ClipConfig } | null;
   setProject: (p: ProjectConfig) => void;
   // 设置工程画布尺寸（即画幅比例）。离散动作（下拉选择），走 mutate 压一次快照即可。
   setCanvasSize: (width: number, height: number) => void;
@@ -96,6 +98,9 @@ interface ProjectState {
   updateTrackPanLive: (id: string, pan: number) => void;
   addClip: (trackId: string, clip: ClipConfig) => void;
   removeClip: (trackId: string, clipId: string) => void;
+  // 复制/粘贴：把片段存入剪贴板，再粘贴到指定时间位置（目标轨=源轨或同类型轨）
+  copyClip: (trackId: string, clipId: string) => void;
+  pasteClip: (timelineIn: number) => string | null;
   updateClip: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
   setSpeed: (trackId: string, clipId: string, speed: number) => void;
   // 曲线编辑（拖拽过程）：仅更新曲线，不改时长、不做磁吸重排（避免 X 轴抖动与历史快照爆炸）
@@ -144,6 +149,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     project: { canvas: { width: 1920, height: 1080, fps: 30 }, assets: [], tracks: [{ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true, volume: 1, pan: 0 }] },
     isDirty: false,
     filePath: null,
+    clipboard: null,
     setProject: (p) => {
       // 确保加载的工程有主视频轨
       const tracks = sortTracks(p.tracks);
@@ -276,6 +282,39 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.filter((c) => c.id !== clipId)));
     }),
+    // 复制：把片段深拷贝进剪贴板（不压历史快照，纯 UI 状态）
+    copyClip: (trackId, clipId) => {
+      const track = get().project.tracks.find((t) => t.id === trackId);
+      const clip = track?.clips.find((c) => c.id === clipId);
+      if (!track || !clip) return;
+      set({ clipboard: { trackId, trackType: track.type, clip: JSON.parse(JSON.stringify(clip)) } });
+    },
+    // 粘贴：克隆剪贴板片段，换新 id，放到指定时间位置。
+    // 目标轨优先源轨（仍存在）；否则同类型轨；否则新建同类型轨。过 locked 守卫，返回新 clip id。
+    pasteClip: (timelineIn) => {
+      const { clipboard } = get();
+      if (!clipboard) return null;
+      const p = get().project;
+      let destTrack = p.tracks.find((t) => t.id === clipboard.trackId);
+      if (!destTrack) {
+        destTrack = p.tracks.find((t) => t.type === clipboard.trackType);
+        if (!destTrack) {
+          const newId = get().addTrack(clipboard.trackType as any);
+          destTrack = get().project.tracks.find((t) => t.id === newId);
+        }
+      }
+      if (!destTrack || destTrack.locked) return null;
+      const dur = clipboard.clip.timelineOut - clipboard.clip.timelineIn;
+      const newClip: ClipConfig = {
+        ...JSON.parse(JSON.stringify(clipboard.clip)),
+        id: uid('clip'),
+        timelineIn: Math.max(0, timelineIn),
+        timelineOut: Math.max(0, timelineIn) + dur,
+      };
+      get().addClip(destTrack.id, newClip);
+      useUIStore.getState().selectClip(destTrack.id, newClip.id);
+      return newClip.id;
+    },
     updateClip: (trackId, clipId, updates) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.map((c) => c.id === clipId ? { ...c, ...updates } : c)));

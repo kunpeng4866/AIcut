@@ -224,7 +224,12 @@ pub async fn generate_script(prompt: &str) -> Result<String, String> {
     }
 
     let resp = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(&resp)
+    extract_content(&resp)
+}
+
+/// 从 DeepSeek 完整 API 响应中抽取 choices[0].message.content（纯文本回复）。
+fn extract_content(resp: &str) -> Result<String, String> {
+    let v: serde_json::Value = serde_json::from_str(resp)
         .map_err(|e| format!("DeepSeek 响应不是合法 JSON: {}", e))?;
     let content = v
         .get("choices")
@@ -235,6 +240,80 @@ pub async fn generate_script(prompt: &str) -> Result<String, String> {
         .ok_or_else(|| "DeepSeek 响应缺少 choices[0].message.content".to_string())?
         .to_string();
     Ok(content)
+}
+
+/// 构造逐行翻译 prompt（源句换行拼接 → 译文逐行保序输出）
+fn build_translate_prompt(text: &str, target_lang: &str) -> String {
+    let lang_name = match target_lang {
+        "en" => "英文",
+        "zh" => "中文",
+        "ja" => "日文",
+        "ko" => "韩文",
+        "fr" => "法文",
+        "de" => "德文",
+        "es" => "西班牙文",
+        "ru" => "俄文",
+        "pt" => "葡萄牙文",
+        "it" => "意大利文",
+        other => other,
+    };
+    format!(
+        "把下面每一行文本翻译成{lang_name}。规则：\n\
+1. 逐行翻译，输出的行数与输入完全一致、顺序一致；\n\
+2. 每行只输出该行的译文，不要编号、不要前缀、不要额外解释、不要 markdown 代码块；\n\
+3. 保持原文语气与口语化风格，译文简洁自然。\n\n\
+原文（每行一句）：\n{text}"
+    )
+}
+
+/// 同步翻译：将换行拼接的源句逐行翻译为目标语言，返回换行拼接的译文。
+/// 复用 `extract_content` 取纯文本回复；由渲染层按行拆分后与源句时间戳 zip。
+pub fn translate_sync(text: &str, target_lang: &str) -> Result<String, String> {
+    let key = api_key().ok_or_else(|| "缺少环境变量 DEEPSEEK_API_KEY（请先 export）".to_string())?;
+    if text.trim().is_empty() {
+        return Err("翻译文本为空".to_string());
+    }
+
+    let prompt = build_translate_prompt(text, target_lang);
+    let body = serde_json::json!({
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            { "role": "system", "content": "你是专业字幕翻译，逐行翻译，严格保持行数与顺序，只输出译文本身。" },
+            { "role": "user", "content": prompt }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 4096,
+    });
+    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "-m",
+            "90",
+            "-X",
+            "POST",
+            DEEPSEEK_URL,
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("Authorization: Bearer {}", key),
+            "-d",
+            &body_str,
+        ])
+        .output()
+        .map_err(|e| format!("调用 curl 失败（请确认系统已安装 curl）: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "DeepSeek 请求失败（退出码 {:?}）: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).chars().take(500).collect::<String>()
+        ));
+    }
+
+    let resp = String::from_utf8_lossy(&output.stdout);
+    extract_content(&resp)
 }
 
 #[cfg(test)]

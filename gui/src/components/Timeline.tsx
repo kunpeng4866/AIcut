@@ -669,7 +669,9 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
         </div>
       )}
       <span style={{ position: 'absolute', top: 2, left: 8, fontSize: 11, color: '#eee', pointerEvents: 'none' }}>
-        {clip.assetId}
+        {clip.subtitle
+          ? (clip.subtitle.items[0]?.text || '字幕')
+          : clip.assetId}
       </span>
       {/* 蒙版标记：带启用蒙版的片段右上角显示图标 */}
       {clip.masks && clip.masks.some((m) => m.enabled) && (
@@ -707,8 +709,8 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 }
 
 export default function Timeline() {
-  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
-  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, speechOverlay } = useUIStore();
+  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, copyClip, pasteClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
+  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, setRightView, speechOverlay } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   // 左侧轨道控制列与右侧轨道区共享同一条垂直滚动：左侧自身不出现滚动条，
   // 仅镜像右侧的 scrollTop，确保控制按钮与轨道行始终对齐（避免两侧各滚各的）。
@@ -994,12 +996,27 @@ export default function Timeline() {
   }, []);
 
   // Undo / redo shortcuts: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y.
+  // 复制/粘贴：Ctrl+C / Ctrl+V（粘贴位置=播放头）。
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
+      // 焦点落在输入框/下拉/可编辑区域时放行，交给浏览器处理（复制粘贴/撤销文本），避免拦截。
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); useProjectStore.getState().undo(); }
       else if (e.key === 'z' && e.shiftKey) { e.preventDefault(); useProjectStore.getState().redo(); }
       else if (e.key === 'y') { e.preventDefault(); useProjectStore.getState().redo(); }
+      else if (e.key === 'c') {
+        const ui = useUIStore.getState();
+        if (!ui.selectedTrackId || !ui.selectedClipId) return;
+        e.preventDefault();
+        useProjectStore.getState().copyClip(ui.selectedTrackId, ui.selectedClipId);
+      }
+      else if (e.key === 'v') {
+        const ui = useUIStore.getState();
+        e.preventDefault();
+        useProjectStore.getState().pasteClip(ui.currentTime);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -1041,6 +1058,11 @@ export default function Timeline() {
           if (track?.locked) return;
           removeClip(selectedTrackId, selectedClipId);
         }} style={btnStyle}>删除</button>
+        <button onClick={() => {
+          if (!selectedTrackId || !selectedClipId) return;
+          copyClip(selectedTrackId, selectedClipId);
+        }} style={btnStyle}>复制</button>
+        <button onClick={() => { pasteClip(currentTime); }} style={btnStyle}>粘贴</button>
         {/* Magnetic snap toggle */}
         <button onClick={toggleMagneticSnap} style={{
           ...btnStyle,
@@ -1148,7 +1170,7 @@ export default function Timeline() {
                         selected={selectedClipId === clip.id} zoom={timelineZoom}
                         magneticSnap={magneticSnap} clipSnap={clipSnap} playhead={currentTime} clipsOnTrack={track.clips}
                         sameTypeTrackIds={sameTypeTrackIds}
-                        onSelect={() => selectClip(track.id, clip.id)}
+                        onSelect={() => { selectClip(track.id, clip.id); setRightView('props'); }}
                         onSplit={() => splitClip(track.id, clip.id, currentTime)}
                         onMove={(newIn) => moveClipLive(track.id, clip.id, newIn)}
                         onMoveToTrack={(destTrackId, newIn) => moveClipToTrackLive(track.id, clip.id, destTrackId, newIn)}

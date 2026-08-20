@@ -96,9 +96,10 @@ export default function ConfigWizard({ initialConfig, onComplete, onCancel }: Pr
                   <label style={theme.label}>API Key</label>
                   <input style={theme.input} type="password" placeholder="sk-..." value={cfg.asr.apiKey} onChange={e => updateASR({ apiKey: e.target.value })} />
                   <label style={theme.label}>模型</label>
-                  <select style={theme.input} value={cfg.asr.model || 'paraformer-v1'} onChange={e => updateASR({ model: e.target.value })}>
-                    <option value="paraformer-v1">paraformer-v1（录音文件转写）</option>
-                    <option value="paraformer-realtime-v2">paraformer-realtime-v2（实时）</option>
+                  <select style={theme.input} value={cfg.asr.model || 'qwen-audio-3.0-asr-flash-streaming'} onChange={e => updateASR({ model: e.target.value })}>
+                    <option value="qwen-audio-3.0-asr-flash-streaming">qwen-audio-3.0-asr-flash-streaming（推荐：Qwen-Audio3.0 实时，中英强、带回真实时间戳）</option>
+                    <option value="qwen3-asr-flash-realtime">qwen3-asr-flash-realtime（Qwen3 实时，无原生时间戳）</option>
+                    <option value="paraformer-realtime-v2">paraformer-realtime-v2（实时·词级时间戳，字幕对齐最准）</option>
                     <option value="fun-asr-realtime">fun-asr-realtime（实时）</option>
                   </select>
                   <label style={theme.label}>接口地址（可选）</label>

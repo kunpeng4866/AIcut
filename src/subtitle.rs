@@ -65,6 +65,14 @@ pub struct SubtitleOverlay {
     #[serde(default)] pub stroke_width: Option<f64>,
     #[serde(default)] pub stroke_opacity: Option<f64>,
     #[serde(default)] pub position: Option<String>,
+    #[serde(default)] pub align: Option<String>,
+    // 自由定位：归一化坐标（0..1, y-down），(0.5,0.5)=画布中心，文字以该点居中锚定。
+    // 优先级高于 position/align；与预览端预览拖拽 / X/Y 滑杆对称。
+    #[serde(default)] pub pos_x: Option<f64>,
+    #[serde(default)] pub pos_y: Option<f64>,
+    #[serde(default)] pub background: Option<TextBackground>,
+    #[serde(default)] pub shadow: Option<TextShadow>,
+    #[serde(default)] pub time_offset: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -566,8 +574,11 @@ pub fn build_subtitle_overlay_filters_for_clip(
     height: u32,
     fontfile_dir: &str,
 ) -> Vec<String> {
+    // 时间偏移（提前量）：与预览端 (offset + lead) 严格对称——导出把源时间戳提前 lead 秒，
+    // 使字幕比语音提前出现，补偿 ASR 流式识别的时间戳滞后。
+    let lead = sub.time_offset;
     build_subtitle_overlay_filters_impl(sub, width, height, fontfile_dir, |item| {
-        (source_to_timeline(item.start, clip), source_to_timeline(item.end, clip))
+        (source_to_timeline(item.start - lead, clip), source_to_timeline(item.end - lead, clip))
     })
 }
 
@@ -631,10 +642,30 @@ where
     // 补偿 borderw/2 抵消，保证仅描边粗细变化、文字不动。
     let borderw = if stroke_width > 0.0 { stroke_width.round() as i64 } else { 0 };
     let stroke_comp = borderw / 2; // 整数像素补偿
-    let y_pos = match sub.position.as_deref() {
-        Some("top") => 40i64 + stroke_comp,
-        Some("bottom") => (height as i64) - fontsize as i64 - 40 + stroke_comp,
-        _ => ((height as i64) / 2) - (fontsize as i64) / 2 + stroke_comp, // center 默认
+    // 垂直位置：自由定位 pos_y 优先（文字中心锚定到 pos_y*height），否则回退 position 预设。
+    // ⚠️ WYSIWYG：position 预设必须与预览（PreviewCanvas.tsx）完全一致——预览把文字**中心**锚定在
+    // 归一化比例（top=0.15 / center=0.5 / bottom=0.85），故导出也用 `h*比例 - text_h/2`（drawtext 的
+    // y 是文字**顶部**，减 text_h/2 把中心定到比例处）。旧实现 bottom=`h-fontsize-40`(中心≈0.94h)、
+    // top=`40`(≈0.04h)，与预览 bottom=0.85/top=0.15 相差甚远——双语字幕「中文 bottom + 英文 pos_y=0.91」
+    // 时，预览中文(0.85)在上、导出中文(0.94)反而跑到英文(0.91)下面 → 上下颠倒。
+    let y_expr = if let Some(py) = sub.pos_y {
+        format!("(h*{} - text_h/2)+{}", py.max(0.0).min(1.0), stroke_comp)
+    } else {
+        match sub.position.as_deref() {
+            Some("top") => format!("(h*0.15 - text_h/2)+{}", stroke_comp),
+            Some("bottom") => format!("(h*0.85 - text_h/2)+{}", stroke_comp),
+            _ => format!("(h*0.5 - text_h/2)+{}", stroke_comp), // center 默认
+        }
+    };
+    // 水平位置：自由定位 pos_x 优先（文字中心锚定到 pos_x*width），否则回退 align 预设，与预览端一致
+    let x_expr = if let Some(px) = sub.pos_x {
+        format!("(w*{} - text_w/2)+{}", px.max(0.0).min(1.0), stroke_comp)
+    } else {
+        match sub.align.as_deref().unwrap_or("center") {
+            "left" => format!("20+{}", stroke_comp),
+            "right" => format!("(w-text_w-20)+{}", stroke_comp),
+            _ => format!("(w-text_w)/2+{}", stroke_comp),
+        }
     };
     let _ = width;
     // 字幕无 weight 字段，按 normal 处理（与预览字幕未设字重一致）。
@@ -646,12 +677,30 @@ where
         let escaped = item.text.replace(':', "\\:").replace('\'', "'\\''");
         let (abs_start, abs_end) = time_of(item);
         let mut base = format!(
-            "drawtext=text='{}':fontsize={}:fontcolor={}:x=(w-text_w)/2+{}:y={}:enable='between(t,{},{})'",
-            escaped, fontsize, fontcolor, stroke_comp, y_pos, abs_start, abs_end
+            "drawtext=text='{}':fontsize={}:fontcolor={}:x={}:y={}:enable='between(t,{},{})'",
+            escaped, fontsize, fontcolor, x_expr, y_expr, abs_start, abs_end
         );
         if borderw > 0 {
             let bordercolor = format!("{}@{:.2}", stroke_color, stroke_opacity);
             base.push_str(&format!(":borderw={}:bordercolor={}", borderw, bordercolor));
+        }
+        // 背景：ffmpeg drawtext 原生 box 为矩形（圆角仅前端预览生效）；width/height 取平均作为边框宽度（近似内边距）
+        if let Some(bg) = &sub.background {
+            if bg.enabled {
+                let boxcolor = format!("{}@{:.2}", bg.color, bg.opacity.clamp(0.0, 1.0));
+                let boxborderw = (((bg.width + bg.height) / 2.0) * 100.0).round() as i64;
+                base.push_str(&format!(":box=1:boxcolor={}:boxborderw={}", boxcolor, boxborderw.max(0)));
+            }
+        }
+        // 阴影：drawtext 原生 shadowx/shadowy/shadowcolor（无模糊），与预览观感近似一致
+        if let Some(sh) = &sub.shadow {
+            if sh.enabled {
+                let rad = sh.angle * PI / 180.0;
+                let shadowx = (sh.distance * rad.cos()).round() as i64;
+                let shadowy = (sh.distance * rad.sin()).round() as i64;
+                let shadowcolor = format!("{}@{:.2}", sh.color, sh.opacity.clamp(0.0, 1.0));
+                base.push_str(&format!(":shadowx={}:shadowy={}:shadowcolor={}", shadowx, shadowy, shadowcolor));
+            }
         }
         with_fontfile(base, &fontfile)
     }).collect()
@@ -739,6 +788,50 @@ mod tests {
         let fs = build_subtitle_overlay_filters_for_clip(&s, &clip, 1920, 1080, "");
         assert_eq!(fs.len(), 1);
         assert!(fs[0].contains("between(t,6,7)"), "got: {}", fs[0]);
+    }
+
+    #[test]
+    fn test_subtitle_overlay_style_and_offset() {
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c1","assetId":"a1","src_range":{"start":0,"end":10},"timelineIn":0,"timelineOut":10,"speed":1}"#,
+        ).unwrap();
+        let s = SubtitleOverlay {
+            items: vec![SubtitleItemOverride { start: 2.0, end: 4.0, text: "样式字幕".into() }],
+            align: Some("left".into()),
+            position: Some("bottom".into()),
+            time_offset: 0.5,
+            background: Some(TextBackground { enabled: true, color: "#000000".into(), opacity: 0.9, radius: 0.06, width: 0.2, height: 0.15, offset_x: 0.5, offset_y: 0.5 }),
+            shadow: Some(TextShadow { enabled: true, color: "#ff0000".into(), opacity: 0.9, blur: 0.15, distance: 5.0, angle: -45.0 }),
+            ..Default::default()
+        };
+        let fs = build_subtitle_overlay_filters_for_clip(&s, &clip, 1920, 1080, "");
+        assert_eq!(fs.len(), 1);
+        // 提前量 0.5 → 源时间窗 [2-0.5, 4-0.5) = [1.5, 3.5) → 时间线窗口 (1.5, 3.5)
+        assert!(fs[0].contains("between(t,1.5,3.5)"), "got: {}", fs[0]);
+        // 左对齐
+        assert!(fs[0].contains("x=20+"), "got: {}", fs[0]);
+        // 背景盒
+        assert!(fs[0].contains("box=1:boxcolor=#000000@0.90"), "got: {}", fs[0]);
+        // 阴影
+        assert!(fs[0].contains("shadowcolor=#ff0000@0.90"), "got: {}", fs[0]);
+    }
+
+    #[test]
+    fn test_subtitle_overlay_free_position() {
+        let clip: crate::project::Clip = serde_json::from_str(
+            r#"{"id":"c1","assetId":"a1","src_range":{"start":0,"end":10},"timelineIn":0,"timelineOut":10,"speed":1}"#,
+        ).unwrap();
+        // 自由定位：pos_x=0.3, pos_y=0.25 → x=(w*0.3 - text_w/2), y=(h*0.25 - text_h/2)
+        let s = SubtitleOverlay {
+            items: vec![SubtitleItemOverride { start: 1.0, end: 3.0, text: "自由定位".into() }],
+            pos_x: Some(0.3),
+            pos_y: Some(0.25),
+            ..Default::default()
+        };
+        let fs = build_subtitle_overlay_filters_for_clip(&s, &clip, 1920, 1080, "");
+        assert_eq!(fs.len(), 1);
+        assert!(fs[0].contains("x=(w*0.3 - text_w/2)"), "got: {}", fs[0]);
+        assert!(fs[0].contains("y=(h*0.25 - text_h/2)"), "got: {}", fs[0]);
     }
 
     // 用户验证标准：timeline_in=6.44, src_range.start=0, speed=1, item 0~5

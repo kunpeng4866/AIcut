@@ -17,7 +17,7 @@ export interface ASRConfig {
   apiKey: string;     // API模式的key
   endpoint: string;
   enginePath?: string;  // whisper-cli 可执行文件路径（留空则用引擎侧默认值）
-  model?: string;       // 云端模型名，如 paraformer-v1 / paraformer-realtime-v2 / fun-asr-realtime
+  model?: string;       // 云端模型名，如 qwen3-asr-flash-realtime / paraformer-realtime-v2 / fun-asr-realtime
 }
 
 // TTS（文字转语音）配置（用于配音生成）
@@ -69,7 +69,7 @@ export function getDefaultConfig(): AIcutConfig {
       apiKey: '',
       endpoint: '',
       enginePath: '',
-      model: 'paraformer-realtime-v2',
+      model: 'qwen-audio-3.0-asr-flash-streaming',
     },
     tts: {
       provider: 'none',

@@ -2,11 +2,11 @@
 // 同类型下再分子 tab（如视频「画面」含 基础/抠像/蒙版）。
 // 复用既有渲染函数（TransformTab/KeyingTab/MaskTab/AudioTab/SpeedTab/TransitionTab/
 // ItemsTab/TextTab/SubtitleTab/KeyframesTab），不改变底层数据模型与后端契约。
-import { useState, useEffect, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode, type CSSProperties } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 import type { RightPanel } from '../store/uiStore';
-import type { ClipConfig, TransformConfig, CropConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, WipeMaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig, TextBackground, TextShadow } from '../types';
+import type { ClipConfig, TransformConfig, CropConfig, TransitionConfig, TransitionType, WipeDirection, TransitionEasing, WipeMaskShape, TimeRemapConfig, FreezeConfig, SpeedPointConfig, TextBackground, TextShadow, SubtitleContent } from '../types';
 import { SpeedCurveEditor } from './SpeedCurveEditor';
 import MaskTab from './panels/MaskTab';
 import KeyingTab from './panels/KeyingTab';
@@ -698,45 +698,210 @@ function TextTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   );
 }
 
-// 字幕标签页
+// 字幕标签页（两级编辑：① 整轨统一样式 ② 本句字/词级文字编辑）
 function SubtitleTab({ clip, trackId }: { clip: ClipConfig; trackId: string }) {
   const updateClip = useProjectStore((s) => s.updateClip);
-  const s = clip.subtitle || { items: [], fontSize: 24, color: '#ffffff', strokeColor: '#000000', strokeWidth: 0, strokeOpacity: 1, position: 'bottom' as const };
-  const setStyle = (k: string, v: any) => updateClip(trackId, clip.id, { subtitle: { ...s, [k]: v } } as Partial<ClipConfig>);
+  const { applyToAll, toggleApplyToAll } = useSubtitleEditStore();
+  const s: SubtitleContent = clip.subtitle || { items: [] as any[], fontFamily: undefined, fontSize: 24, color: '#ffffff', strokeColor: '#000000', strokeWidth: 0, strokeOpacity: 1, position: 'bottom' as const };
+  const items: { start: number; end: number; text: string }[] = s.items || [];
+  // 自由定位显示值（与预览回退逻辑一致）：posX/posY 优先，否则由 position/align 推导
+  const curPosX = s.posX ?? (s.align === 'left' ? 0.12 : s.align === 'right' ? 0.88 : 0.5);
+  const curPosY = s.posY ?? (s.position === 'top' ? 0.15 : s.position === 'center' ? 0.5 : 0.85);
+
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
+  // 背景 / 阴影默认值（与 TextTab 一致）
+  const bgDefault: TextBackground = { enabled: false, color: '#000000', opacity: 0.9, radius: 0.06, width: 0.19, height: 0.13, offsetX: 0.5, offsetY: 0.5 };
+  const shDefault: TextShadow = { enabled: false, color: '#000000', opacity: 0.9, blur: 0.15, distance: 5, angle: -45 };
+  const bg = { ...bgDefault, ...(s.background || {}) };
+  const sh = { ...shDefault, ...(s.shadow || {}) };
+  // 嵌套字段（背景/阴影）合并写入；applyToAll 时同步整轨
+  const patchSubtitle = (patch: Partial<SubtitleContent>) => {
+    if (applyToAll) {
+      const track = useProjectStore.getState().project.tracks.find((t) => t.id === trackId);
+      if (track) {
+        track.clips.forEach((c) => {
+          if (c.subtitle) updateClip(trackId, c.id, { subtitle: { ...c.subtitle, ...patch } } as Partial<ClipConfig>);
+        });
+        return;
+      }
+    }
+    updateClip(trackId, clip.id, { subtitle: { ...s, ...patch } } as Partial<ClipConfig>);
+  };
+  const setBg = (partial: Partial<TextBackground>) => patchSubtitle({ background: { ...bgDefault, ...(s.background || {}), ...partial } });
+  const setSh = (partial: Partial<TextShadow>) => patchSubtitle({ shadow: { ...shDefault, ...(s.shadow || {}), ...partial } });
+
+  // ① 整轨统一样式写入：applyToAll 时把同名样式字段同步到「同轨道所有字幕 clip」（不含文字内容）
+  const setStyle = (k: string, v: any) => {
+    if (applyToAll) {
+      const track = useProjectStore.getState().project.tracks.find((t) => t.id === trackId);
+      if (track) {
+        track.clips.forEach((c) => {
+          if (c.subtitle) updateClip(trackId, c.id, { subtitle: { ...c.subtitle, [k]: v } } as Partial<ClipConfig>);
+        });
+        return;
+      }
+    }
+    updateClip(trackId, clip.id, { subtitle: { ...s, [k]: v } } as Partial<ClipConfig>);
+  };
+  const applyPreset = (p: typeof SUBTITLE_STYLE_PRESETS[number]) => {
+    const patch = { fontFamily: p.fontId, color: p.color, strokeColor: p.strokeColor, strokeWidth: p.strokeWidth, strokeOpacity: p.strokeOpacity ?? 1 };
+    if (applyToAll) {
+      const track = useProjectStore.getState().project.tracks.find((t) => t.id === trackId);
+      if (track) {
+        track.clips.forEach((c) => {
+          if (c.subtitle) updateClip(trackId, c.id, { subtitle: { ...c.subtitle, ...patch } } as Partial<ClipConfig>);
+        });
+        return;
+      }
+    }
+    updateClip(trackId, clip.id, { subtitle: { ...s, ...patch } } as Partial<ClipConfig>);
+  };
+
+  // ② 本句字/词级文字编辑：始终只改当前 clip（对应「具体的某个字或词组」）
+  const setItems = (next: typeof items) => updateClip(trackId, clip.id, { subtitle: { ...s, items: next } } as Partial<ClipConfig>);
+  const updateItem = (i: number, patch: Partial<{ start: number; end: number; text: string }>) =>
+    setItems(items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  const deleteItem = (i: number) => setItems(items.filter((_, idx) => idx !== i));
+  const addItem = () => {
+    const lastEnd = items.length ? items[items.length - 1].end : 0;
+    setItems([...items, { start: lastEnd, end: lastEnd + 2, text: '新字幕' }]);
+  };
+
+  // 文字框：撑满可用宽度（修复右侧留白过大）
+  const textareaStyle: CSSProperties = {
+    width: '100%', boxSizing: 'border-box', background: '#0f3460',
+    border: '1px solid #1a1a2e', borderRadius: 4, color: '#eee',
+    padding: '6px 8px', fontSize: 12, resize: 'vertical', minWidth: 0,
+  };
+
   return (
     <div style={{ padding: 8 }}>
-      <div style={{ fontSize: 12, color: '#aaa', marginBottom: 8 }}>共 {s.items.length} 条字幕</div>
-      {s.items.slice(0, 5).map((item, i) => (
-        <div key={i} style={{ marginBottom: 4, padding: 4, background: '#0f3460', borderRadius: 4 }}>
-          <div style={{ fontSize: 10, color: '#888' }}>{item.start.toFixed(1)}s - {item.end.toFixed(1)}s</div>
-          <div style={{ fontSize: 11, color: '#eee' }}>{item.text}</div>
+      {/* 两级编辑开关 */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, padding: '6px 8px', background: '#0f3460', borderRadius: 4, cursor: 'pointer', userSelect: 'none' }}>
+        <input type="checkbox" checked={applyToAll} onChange={toggleApplyToAll} style={{ cursor: 'pointer' }} />
+        <span style={{ fontSize: 12, color: '#ccc' }}>样式应用到本轨道所有字幕</span>
+      </label>
+
+      {/* ① 整轨统一样式 */}
+      <div style={{ ...S.item, marginBottom: 10, border: '1px solid #1a1a2e' }}>
+        <div style={{ fontSize: 12, color: '#7fd1ff', marginBottom: 8, fontWeight: 600 }}>① 统一样式（{applyToAll ? '整轨' : '仅本句'}）</div>
+        <div style={{ marginBottom: 8 }}>
+          <div style={S.label}>字体</div>
+          <FontSelect value={s.fontFamily} onChange={(id) => setStyle('fontFamily', id)} />
         </div>
-      ))}
-      <div style={{ height: 1, background: '#0f3460', margin: '8px 0' }} />
-      <div style={{ marginBottom: 8 }}>
-        <div style={S.label}>字体</div>
-        <FontSelect value={s.fontFamily} onChange={(id) => setStyle('fontFamily', id)} />
+        <StylePresetRow onApply={applyPreset} />
+        <ParamSlider label="字号" value={s.fontSize ?? 24} min={12} max={120} step={1} editable onChange={(v) => setStyle('fontSize', v)} />
+        <div style={S.row}>
+          <span style={S.label}>颜色</span>
+          <input type="color" value={s.color ?? '#ffffff'} onChange={(e) => setStyle('color', e.target.value)}
+            style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+        </div>
+        <div style={S.row}>
+          <span style={S.label}>描边色</span>
+          <input type="color" value={s.strokeColor ?? '#000000'} onChange={(e) => setStyle('strokeColor', e.target.value)}
+            style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+        </div>
+        <ParamSlider label="粗细" value={s.strokeWidth ?? 0} min={0} max={18} step={0.5} editable onChange={(v) => setStyle('strokeWidth', v)} />
+        <ParamSlider label="描边不透明度" value={s.strokeOpacity ?? 1} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setStyle('strokeOpacity', v)} />
+        {/* 自由定位：X/Y 归一化坐标（0..100%，画布中心=50%），支持滑杆 + 数值输入 + 预览拖拽 */}
+        <ParamSlider label="水平位置 X" value={Math.round(curPosX * 100)} min={0} max={100} step={1} unit="%" editable
+          onChange={(v) => patchSubtitle({ posX: v / 100 })} onEditStart={pushHistorySnapshot} />
+        <ParamSlider label="垂直位置 Y" value={Math.round(curPosY * 100)} min={0} max={100} step={1} unit="%" editable
+          onChange={(v) => patchSubtitle({ posY: v / 100 })} onEditStart={pushHistorySnapshot} />
+        {/* 快捷预设：写 posX/posY，等效于旧的上中下/左右（兼容旧档） */}
+        <div style={S.row}>
+          <span style={S.label}>快捷</span>
+          <ToggleBtn active={false} onClick={() => patchSubtitle({ posX: 0.5, posY: 0.85 })}>底部</ToggleBtn>
+          <ToggleBtn active={false} onClick={() => patchSubtitle({ posX: 0.5, posY: 0.5 })}>居中</ToggleBtn>
+          <ToggleBtn active={false} onClick={() => patchSubtitle({ posX: 0.5, posY: 0.15 })}>顶部</ToggleBtn>
+          <ToggleBtn active={false} onClick={() => patchSubtitle({ posX: 0.12 })}>左</ToggleBtn>
+          <ToggleBtn active={false} onClick={() => patchSubtitle({ posX: 0.5 })}>中</ToggleBtn>
+          <ToggleBtn active={false} onClick={() => patchSubtitle({ posX: 0.88 })}>右</ToggleBtn>
+        </div>
+        <ParamSlider label="时间偏移" value={s.timeOffset ?? 0} min={-2} max={2} step={0.05} unit="s" editable
+          format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}s`}
+          onChange={(v) => patchSubtitle({ timeOffset: v })} onEditStart={pushHistorySnapshot} />
+
+        {/* 背景 */}
+        <div style={S.divider} />
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ color: '#eee', fontSize: 12, fontWeight: 600 }}>背景</span>
+            <ToggleBtn active={bg.enabled} onClick={() => setBg({ enabled: !bg.enabled })}>{bg.enabled ? '开' : '关'}</ToggleBtn>
+          </div>
+          {bg.enabled && (<>
+            <div style={S.row}>
+              <span style={S.label}>颜色</span>
+              <input type="color" value={bg.color} onChange={(e) => setBg({ color: e.target.value })}
+                style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+            </div>
+            <ParamSlider label="不透明度" value={bg.opacity} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setBg({ opacity: v })} />
+            <ParamSlider label="宽度" value={bg.width} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setBg({ width: v })} />
+            <ParamSlider label="高度" value={bg.height} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setBg({ height: v })} />
+            <ParamSlider label="圆角" value={bg.radius} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setBg({ radius: v })} />
+            <ParamSlider label="左右偏移" value={bg.offsetX} min={-0.5} max={0.5} step={0.01} editable
+              format={(v) => `${Math.round((v + 0.5) * 100)}%`} onChange={(v) => setBg({ offsetX: v })} />
+            <ParamSlider label="上下偏移" value={bg.offsetY} min={-0.5} max={0.5} step={0.01} editable
+              format={(v) => `${Math.round((v + 0.5) * 100)}%`} onChange={(v) => setBg({ offsetY: v })} />
+          </>)}
+        </div>
+
+        {/* 阴影 */}
+        <div style={S.divider} />
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ color: '#eee', fontSize: 12, fontWeight: 600 }}>阴影</span>
+            <ToggleBtn active={sh.enabled} onClick={() => setSh({ enabled: !sh.enabled })}>{sh.enabled ? '开' : '关'}</ToggleBtn>
+          </div>
+          {sh.enabled && (<>
+            <div style={S.row}>
+              <span style={S.label}>颜色</span>
+              <input type="color" value={sh.color} onChange={(e) => setSh({ color: e.target.value })}
+                style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+            </div>
+            <ParamSlider label="不透明度" value={sh.opacity} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setSh({ opacity: v })} />
+            <ParamSlider label="模糊度" value={sh.blur} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setSh({ blur: v })} />
+            <ParamSlider label="距离" value={sh.distance} min={0} max={100} step={1} editable onChange={(v) => setSh({ distance: v })} />
+            <ParamSlider label="角度" value={sh.angle} min={-180} max={180} step={1} unit="°" editable onChange={(v) => setSh({ angle: v })} />
+          </>)}
+        </div>
       </div>
-      <StylePresetRow onApply={(p) => updateClip(trackId, clip.id, { subtitle: { ...s, fontFamily: p.fontId, color: p.color, strokeColor: p.strokeColor, strokeWidth: p.strokeWidth, strokeOpacity: p.strokeOpacity ?? 1 } } as Partial<ClipConfig>)} />
-      <ParamSlider label="字号" value={s.fontSize ?? 24} min={12} max={80} step={1} editable onChange={(v) => setStyle('fontSize', v)} />
-      <div style={S.row}>
-        <span style={S.label}>颜色</span>
-        <input type="color" value={s.color ?? '#ffffff'} onChange={(e) => setStyle('color', e.target.value)}
-          style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+
+      {/* ② 本句字/词级文字编辑 */}
+      <div style={{ fontSize: 12, color: '#7fd1ff', marginBottom: 4, fontWeight: 600 }}>② 本句文字（逐字 / 词编辑）</div>
+      <div style={{ fontSize: 11, color: '#889', marginBottom: 8, lineHeight: 1.5 }}>选中本轨道上的某条字幕片段即显示其文字，可在下方改错字、增删词（仅影响本句，不改动整轨样式）。</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 12, color: '#aaa' }}>共 {items.length} 条</span>
+        <button style={S.btn} onClick={addItem}>+ 添加字幕条</button>
       </div>
-      <div style={S.row}>
-        <span style={S.label}>描边色</span>
-        <input type="color" value={s.strokeColor ?? '#000000'} onChange={(e) => setStyle('strokeColor', e.target.value)}
-          style={{ width: 40, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
-      </div>
-      <ParamSlider label="粗细" value={s.strokeWidth ?? 0} min={0} max={18} step={0.5} editable onChange={(v) => setStyle('strokeWidth', v)} />
-      <ParamSlider label="描边不透明度" value={s.strokeOpacity ?? 1} min={0} max={1} step={0.01} unit="%" editable onChange={(v) => setStyle('strokeOpacity', v)} />
-      <div style={S.row}>
-        <span style={S.label}>位置</span>
-        {(['bottom', 'center', 'top'] as const).map(p => (
-          <ToggleBtn key={p} active={(s.position ?? 'bottom') === p} onClick={() => setStyle('position', p)}>
-            {p === 'bottom' ? '底部' : p === 'center' ? '居中' : '顶部'}
-          </ToggleBtn>
+      <div style={{ maxHeight: 260, overflowY: 'auto', marginBottom: 8 }}>
+        {items.length === 0 && <div style={{ fontSize: 11, color: '#888' }}>暂无字幕条，点上方「+ 添加字幕条」</div>}
+        {items.map((item, i) => (
+          <div key={i} style={{ ...S.item, border: '1px solid #1a1a2e', marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 4, alignItems: 'center' }}>
+              <input
+                type="number" step="0.1" value={Number(item.start.toFixed(2))}
+                onChange={(e) => updateItem(i, { start: Math.max(0, Number(e.target.value)) })}
+                style={{ ...S.input, width: 62 }}
+                title="开始时间(秒)"
+              />
+              <span style={{ color: '#888', fontSize: 11 }}>→</span>
+              <input
+                type="number" step="0.1" value={Number(item.end.toFixed(2))}
+                onChange={(e) => updateItem(i, { end: Math.max(Number(item.start) + 0.1, Number(e.target.value)) })}
+                style={{ ...S.input, width: 62 }}
+                title="结束时间(秒)"
+              />
+              <button style={{ ...S.btn, marginLeft: 'auto' }} onClick={() => deleteItem(i)}>删除</button>
+            </div>
+            <textarea
+              value={item.text}
+              onChange={(e) => updateItem(i, { text: e.target.value })}
+              rows={2}
+              style={textareaStyle}
+              placeholder="字幕文字（可改具体字 / 词）"
+            />
+          </div>
         ))}
       </div>
     </div>

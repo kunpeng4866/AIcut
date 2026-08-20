@@ -62,7 +62,15 @@ export interface SubtitleContent {
   strokeColor?: string;
   strokeWidth?: number;
   strokeOpacity?: number;
-  position?: 'bottom' | 'top' | 'center';
+  position?: 'bottom' | 'top' | 'center';           // 垂直位置（兼容旧档 / 快捷预设）
+  align?: 'left' | 'center' | 'right';              // 水平对齐（兼容旧档 / 快捷预设）
+  // 自由定位：归一化坐标（0..1, y-down），(0.5,0.5) 为画布中心，文字以该点居中锚定。
+  // 优先级高于 position/align；拖动与 X/Y 滑杆写这里。
+  posX?: number;
+  posY?: number;
+  background?: TextBackground;                       // 背景盒
+  shadow?: TextShadow;                              // 阴影
+  timeOffset?: number;                              // 提前量（秒，正值=比语音提前出现，补偿识别滞后）
 }
 
 // ── 时间重映射（与后端 clip_source_time 一致） ──
@@ -245,10 +253,12 @@ export interface ExportAPI {
   openFolder: (filePath: string) => Promise<void>;
 }
 
-// ── AI 自动字幕 ──
+// ── AI 自动字幕 / 翻译 ──
 export interface AiAPI {
   // 由 DeepSeek 将 ASR 转写文本切分为时间轴字幕，返回 SubtitleGenResult JSON
   generateSubtitles: (transcript: string, lang: string) => Promise<{ success: boolean; data?: SubtitleGenResult; error?: string }>;
+  // 将换行拼接的源句逐行翻译为目标语言，返回换行拼接的译文
+  translate: (text: string, targetLang: string) => Promise<{ success: boolean; data?: { text: string }; error?: string }>;
 }
 
 // ── ASR 本地语音转写（whisper.cpp） ──
@@ -256,7 +266,7 @@ export interface AsrAPI {
   // 本地 whisper.cpp 转写，返回 { text, segments }
   transcribe: (audioPath: string, lang: string) => Promise<{
     success: boolean;
-    data?: { text: string; segments: { start: number; end: number; text: string }[] };
+    data?: { text: string; segments: { start: number; end: number; text: string }[]; word_level?: boolean; pre_grouped?: boolean };
     error?: string;
   }>;
 }

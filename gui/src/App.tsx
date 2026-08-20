@@ -1,5 +1,5 @@
 // AIcut 主布局 — 顶部导航 + 左面板 + 预览 + 右面板 + 时间轴
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { useConfigStore } from './store/configStore';
 import { useUIStore } from './store/uiStore';
 import { useProjectStore } from './store/projectStore';
@@ -20,7 +20,8 @@ import { AIPanel } from './components/AIPanel';
 import Timeline from './components/Timeline';
 import Splitter from './components/Splitter';
 import type { SubtitleGenResult } from './aiTypes';
-import type { SubtitleContent } from './types';
+import type { ClipConfig } from './types';
+import { createSubtitleClipFromAsr } from './utils/clipFactories';
 
 // 深色主题色板
 const C = {
@@ -54,25 +55,28 @@ export default function App() {
     setRightPanelWidth,
     setTimelineHeight,
   } = useUIStore();
-  const [rightView, setRightView] = React.useState<'props' | 'mixer' | 'ai'>('props');
+  const rightView = useUIStore((s) => s.rightView);
+  const setRightView = useUIStore((s) => s.setRightView);
 
-  // AI 字幕生成结果 → 写入当前选中片段的 subtitle 字段（由引擎在导出时通过
-  // drawtext 烧录进视频，时间/位置均正确；此前改为独立 _text 文字轨会被引擎
-  // 当作无时间偏移的合成层、且 y 坐标解释不一致，导致字幕不随视频导出）。
+  // AI 字幕 / ASR 结果 → 生成独立字幕轨 clip，与选中的音/视频片段对齐。
+  // 走「时间轴文字轨」模型：预览(DOM 叠加层) 与导出(subtitle.rs drawtext) 均按
+  // clip 时间线定位，天然一致；多次生成各自占一条轨、可分别编辑。
   const handleApplySubtitles = (result: SubtitleGenResult): string => {
     const { selectedTrackId, selectedClipId } = useUIStore.getState();
-    if (!selectedTrackId || !selectedClipId) {
-      return '请先在时间轴上选中一个片段，再应用字幕';
+    const p = useProjectStore.getState();
+    let refClip: ClipConfig | undefined;
+    if (selectedTrackId && selectedClipId) {
+      refClip = p.project.tracks
+        .find((t) => t.id === selectedTrackId)
+        ?.clips.find((c) => c.id === selectedClipId);
     }
-    const subtitle: SubtitleContent = {
-      items: result.items.map((it) => ({ start: it.start, end: it.end, text: it.text })),
-      fontFamily: result.fontFamily,
-      fontSize: result.fontSize,
-      color: result.color,
-      position: result.position,
-    };
-    useProjectStore.getState().updateClip(selectedTrackId, selectedClipId, { subtitle });
-    return `已应用 ${result.items.length} 条字幕到选中片段`;
+    const n = createSubtitleClipFromAsr(result.items, refClip);
+    if (n === 0) {
+      return refClip
+        ? '字幕落在音频区间外，未生成；请确认选中的是含该语音的片段'
+        : `已生成 0 条字幕（请先在时间轴选中含音频的片段以便对齐）`;
+    }
+    return `已生成 ${n} 条字幕，放入独立文字轨（与音频对齐）`;
   };
 
   // 首次启动：加载配置；若AI未配置则弹出向导

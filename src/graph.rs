@@ -697,11 +697,21 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     let mut video_clips: Vec<(usize, &Clip)> = Vec::new();
     let mut audio_clips: Vec<&Clip> = Vec::new();
     let mut max_timeline_out: f64 = 0.0;
+    // 哨兵字幕/文字轨（无真实素材、带 clip.subtitle / clip.text）：不进主视频合成链，
+    // 改由下方「独立字幕/文字烧录块」统一按 project.tracks 数组序、与预览 1:1 一致地烧录一次。
+    // 若进主链会被 build_video_chain 重复烧一遍；更糟的是同 order 的多 clip（双语 CN/EN 两轨
+    // order 相等时）会被归到同一 group、走多片段 concat 拼接分支，导致「某条字幕仅出现在时间轴
+    // 前半段」的部分缺失 bug（导出「英文部分片段」的根因）。
+    let is_sentinel_overlay = |c: &Clip| -> bool {
+        (c.subtitle.is_some() || c.text.is_some())
+            && (c.asset_id == "_subtitle" || c.asset_id == "_text" || project.asset_by_id(&c.asset_id).is_none())
+    };
     for t in &sorted {
         for c in &t.clips {
-            if t.track_type == "audio" { audio_clips.push(c); }
-            else { video_clips.push((t.order as usize, c)); }
             if c.timeline_out > max_timeline_out { max_timeline_out = c.timeline_out; }
+            if t.track_type == "audio" { audio_clips.push(c); }
+            else if is_sentinel_overlay(c) { /* 见上：交独立烧录块处理，主链跳过 */ }
+            else { video_clips.push((t.order as usize, c)); }
         }
     }
     if max_timeline_out > 0.001 {
@@ -907,6 +917,66 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             }
         }
         vout_label = format!("[{}]", acc);
+    }
+    // ── 独立字幕轨烧录（GUI 导出关键修复）──
+    // 独立字幕/文字轨（assetId='_subtitle' / '_text'，无真实素材）的字幕不再进主视频合成链：
+    // 主链已通过 is_sentinel_overlay 跳过这些 clip（避免 build_video_chain 重复烧录，且避免同
+    // order 多 clip 被当多片段轨 concat 拼接造成部分片段缺失）。此处统一把字幕/文字作为 drawtext
+    // 叠到合成后的视频流，顺序与预览（PreviewCanvas.activeTextOverlays）严格 1:1 一致
+    // （同一 subtitle.rs 构造函数 + 同一时间映射 + 同一 project.tracks 数组序）。
+    {
+        let fontfile_dir = std::env::var("AICUT_FONTS_DIR").unwrap_or_default();
+        // WYSIWYG（所见即所得）：字幕/文字哨兵轨（无真实素材、带 clip.subtitle / clip.text）
+        // 只在此处烧录一次，且烧录顺序与预览（PreviewCanvas.activeTextOverlays）严格 1:1 对齐：
+        //   project.tracks 数组序 → 同轨 clips 数组序 → 同 clip 内「先 text 后 subtitle」→
+        //   每条 drawtext 链式叠加，最后一条在最上层（与「数组末尾轨 / 最后入栈项叠在最上」一致）。
+        let has_overlay = project.tracks.iter().any(|t| {
+            t.visible && t.clips.iter().any(|c| {
+                (c.subtitle.is_some() || c.text.is_some())
+                    && (c.asset_id == "_subtitle" || c.asset_id == "_text" || project.asset_by_id(&c.asset_id).is_none())
+            })
+        });
+        if has_overlay {
+            let mut sub_label = vout_label.clone();
+            // 无视频轨却含字幕/文字：先建黑底，避免滤镜图无输入绑定失败
+            if sub_label.is_empty() {
+                let timeline_dur = cmd.duration.unwrap_or(1e9).max(0.1);
+                nodes.push(format!("color=c=black:s={}x{}:d={}[base]", w, h, fmt(timeline_dur)));
+                sub_label = "[base]".to_string();
+            }
+            let mut sub_idx: usize = 0;
+            for t in &project.tracks {
+                if !t.visible { continue; }
+                for c in &t.clips {
+                    let no_asset = c.asset_id == "_subtitle" || c.asset_id == "_text" || project.asset_by_id(&c.asset_id).is_none();
+                    if !(c.subtitle.is_some() || c.text.is_some()) { continue; }
+                    if !no_asset { continue; } // 有真实素材的 clip：字幕/文字由 build_video_chain 烧录，避免重复
+                    // 同 clip 内顺序：先 text 后 subtitle，与预览 activeTextOverlays 的入栈顺序一致
+                    if let Some(txt) = &c.text {
+                        if let Some(f) = subtitle::build_text_overlay_filter(txt, c.timeline_in, c.timeline_out, w, h, &fontfile_dir) {
+                            let in_lbl = sub_label.clone();
+                            let out_lbl = format!("[sub{}]", sub_idx);
+                            sub_idx += 1;
+                            // in_lbl / out_lbl 均已带方括号，直接拼接，切勿再加 []（否则 [[subN]] 畸形标签 → FFmpeg 解析失败）
+                            nodes.push(format!("{}{}{}", in_lbl, f, out_lbl));
+                            sub_label = out_lbl;
+                        }
+                    }
+                    if let Some(s) = &c.subtitle {
+                        for f in subtitle::build_subtitle_overlay_filters_for_clip(s, c, w, h, &fontfile_dir) {
+                            let in_lbl = sub_label.clone();
+                            let out_lbl = format!("[sub{}]", sub_idx);
+                            sub_idx += 1;
+                            nodes.push(format!("{}{}{}", in_lbl, f, out_lbl));
+                            sub_label = out_lbl;
+                        }
+                    }
+                }
+            }
+            if sub_idx > 0 {
+                vout_label = sub_label;
+            }
+        }
     }
     // 音频滤镜图：per-clip 音频流 + 转场 equal-power 交叉淡化
     // 模型与 export.rs::render_audio_chunk / 预览 transitionUtils.audioCrossfadeEnv 一致：
@@ -1242,12 +1312,163 @@ mod rotation_direction_tests {
             "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
           }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0}]
         }"#;
-        let cmd = render_project_json(json).expect("build command");
-        println!("CMD: {}", cmd);
-        assert!(
-            !cmd.contains("crop="),
-            "full-frame crop must not emit a crop filter; cmd: {}",
-            cmd
-        );
+    let cmd = render_project_json(json).expect("build command");
+    println!("CMD: {}", cmd);
+    assert!(
+        !cmd.contains("crop="),
+        "full-frame crop must not emit a crop filter; cmd: {}",
+        cmd
+    );
+}
+
+/// 独立字幕轨烧录（GUI 导出关键修复）：
+/// 字幕位于独立字幕轨（assetId='_subtitle'，无真实素材），graph.rs 必须把该轨字幕作为
+/// drawtext 叠到合成后的视频流，否则「预览可见、导出不可见」。
+#[test]
+fn test_graph_burns_standalone_subtitle_track() {
+    let json = r##"{
+      "canvas": {"width":1920,"height":1080,"fps":30},
+      "assets": [{"id":"a1","type":"video","path":"E:/dummy.mp4","duration":10.0,"width":1920,"height":1080,"codec":"h264","fps":30}],
+      "tracks":[
+        {"id":"t1","type":"video","order":0,"clips":[{
+          "id":"c1","assetId":"a1","src_range":{"start":0,"end":10.0},
+          "timelineIn":0,"timelineOut":10.0,
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0},
+        {"id":"t2","type":"subtitle","order":1,"clips":[{
+          "id":"c2","assetId":"_subtitle","src_range":{"start":1.0,"end":6.0},
+          "timelineIn":1.0,"timelineOut":6.0,
+          "subtitle":{"items":[{"start":1.0,"end":3.0,"text":"你好世界"},{"start":4.0,"end":6.0,"text":"再见世界"}],"fontSize":24,"color":"#ffffff","position":"bottom","align":"center"},
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":false,"volume":1,"pan":0}
+      ]
+    }"##;
+    let cmd = render_project_json(json).expect("build command");
+    println!("CMD: {}", cmd);
+    assert!(cmd.contains("drawtext"), "standalone subtitle track must be burned via drawtext; cmd: {}", cmd);
+    assert!(cmd.contains("[sub0]"), "standalone subtitle track must produce a [sub0] overlay node; cmd: {}", cmd);
+    assert!(cmd.contains("你好世界"), "subtitle text must appear in the drawtext filter; cmd: {}", cmd);
+    assert!(cmd.contains("between(t,"), "subtitle must have a time-gated enable window; cmd: {}", cmd);
+    // 两条字幕 → 必须链式烧录：[vout]drawtext=...[sub0],[sub0]drawtext=...[sub1]
+    assert!(cmd.contains("[sub0]drawtext"), "second subtitle node must start with [sub0]drawtext=...[sub1]; cmd: {}", cmd);
+    assert!(cmd.contains("[sub1]"), "second subtitle node must end with [sub1]; cmd: {}", cmd);
+    // 标签链绝不可出现 [[subN]] / [subN]] 畸形标签（曾因 format 串多写 [] 导致 FFmpeg 解析失败、导出报错）。
+    assert!(!cmd.contains("[[") && !cmd.contains("]]"),
+        "subtitle label chain must not contain malformed [[ ]] brackets; cmd: {}", cmd);
+}
+
+/// WYSIWYG 回归：多条独立字幕轨（双语 CN/EN）的烧录顺序必须与预览一致——
+/// 预览按 project.tracks 数组序遍历（后者叠在最上层），导出的独立字幕轨烧录块也必须按数组序，
+/// 绝不能按 t.order 排序（否则数组序与 order 不一致时「最上层」字幕颠倒：
+/// 预览中文在上、导出英文在上）。
+/// 构造：数组序 = [video, EN(order=2), CN(order=1)]（CN 在数组末尾=预览最上层），
+/// 但 order 排序 = [video(0), CN(1), EN(2)]（CN 在 order 中间）。
+/// 若导出误用 sorted(order)，独立块会 CN 先([sub0])、EN 后([sub1])；
+/// 正确（数组序）应 EN 先([sub0])、CN 后([sub1]，最上层)，与预览一致。
+#[test]
+fn test_subtitle_burn_order_matches_preview_array_order() {
+    let json = r##"{
+      "canvas": {"width":1920,"height":1080,"fps":30},
+      "assets": [{"id":"a1","type":"video","path":"E:/dummy.mp4","duration":10.0,"width":1920,"height":1080,"codec":"h264","fps":30}],
+      "tracks":[
+        {"id":"tv","type":"video","order":0,"clips":[{
+          "id":"cv","assetId":"a1","src_range":{"start":0,"end":10.0},
+          "timelineIn":0,"timelineOut":10.0,
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0},
+        {"id":"ten","type":"subtitle","order":2,"clips":[{
+          "id":"cen","assetId":"_subtitle","src_range":{"start":1.0,"end":3.0},
+          "timelineIn":1.0,"timelineOut":3.0,
+          "subtitle":{"items":[{"start":1.0,"end":3.0,"text":"Hello"}],"fontSize":24,"color":"#ffffff","position":"bottom","align":"center"},
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":false,"volume":1,"pan":0},
+        {"id":"tcn","type":"subtitle","order":1,"clips":[{
+          "id":"ccn","assetId":"_subtitle","src_range":{"start":1.0,"end":3.0},
+          "timelineIn":1.0,"timelineOut":3.0,
+          "subtitle":{"items":[{"start":1.0,"end":3.0,"text":"你好"}],"fontSize":24,"color":"#ffffff","position":"bottom","align":"center"},
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":false,"volume":1,"pan":0}
+      ]
+    }"##;
+    // 数组序 = [tv, ten(EN), tcn(CN)]；order 排序 = [tv(0), tcn(CN,1), ten(EN,2)]。
+    let cmd = render_project_json(json).expect("build command");
+    let sub0 = cmd.find("[sub0]").expect("standalone subtitle block must produce [sub0]");
+    let sub1 = cmd.find("[sub1]").expect("standalone subtitle block must produce [sub1]");
+    // 独立烧录块：[va3]drawtext=...Hello...[sub0];[sub0]drawtext=...你好...[sub1]
+    // [sub0] 之前必须是 EN(Hello) 的 drawtext（数组序 EN 在前）
+    assert!(cmd[..sub0].contains("drawtext=text='Hello'"),
+        "[sub0] must be preceded by EN(Hello) drawtext (array order EN before CN), cmd: {}", cmd);
+    // [sub0] 与 [sub1] 之间必须是 CN(你好) 的 drawtext（数组序 CN 在后=最上层）
+    assert!(cmd[sub0..sub1].contains("drawtext=text='你好'"),
+        "between [sub0] and [sub1] must be CN(你好) drawtext (array order CN last=top), cmd: {}", cmd);
+    // 最上层节点 [sub1] 之后不得再有 drawtext（证明 [sub1]=CN 是独立烧录块的最终顶层节点），
+    // 与预览「数组序靠后者(CN)在最上层」一致。
+    assert!(!cmd[sub1..].contains("drawtext="),
+        "top node [sub1] must be the final subtitle node (no drawtext after it); cmd: {}", cmd);
+}
+
+/// 回归（修复「英文部分片段」+ 主链重复烧录）：
+/// 两条独立字幕轨（双语 CN/EN）各含 2 条 item，且两轨 order 相同（历史上会触发主链把同 order 多
+/// clip 当多片段轨 concat 拼接，导致某轨仅出现在时间轴前半段 → 导出「英文部分片段」）。
+/// 修复后字幕轨完全不进主链、只由独立块按数组序烧录一次，必须做到：
+///   1) 全部 4 条 item 都出现（无缺失 / 部分片段）
+///   2) filtergraph 中不得出现 concat（证明字幕轨未被拼接）
+///   3) 仅烧录一次：drawtext=text= 出现次数 == 4（无主链重复烧录）
+///   4) 顺序与预览一致：数组序 [video, EN, CN] → EN 先烧(在下)、CN 后烧(最上层)
+#[test]
+fn test_subtitle_no_concat_single_burn_all_segments() {
+    let json = r##"{
+      "canvas": {"width":1920,"height":1080,"fps":30},
+      "assets": [{"id":"a1","type":"video","path":"E:/dummy.mp4","duration":10.0,"width":1920,"height":1080,"codec":"h264","fps":30}],
+      "tracks":[
+        {"id":"tv","type":"video","order":0,"clips":[{
+          "id":"cv","assetId":"a1","src_range":{"start":0,"end":10.0},
+          "timelineIn":0,"timelineOut":10.0,
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":true,"volume":1,"pan":0},
+        {"id":"ten","type":"subtitle","order":5,"clips":[{
+          "id":"cen","assetId":"_subtitle","src_range":{"start":1.0,"end":5.0},
+          "timelineIn":1.0,"timelineOut":5.0,
+          "subtitle":{"items":[{"start":1.0,"end":2.0,"text":"HelloA"},{"start":3.0,"end":5.0,"text":"HelloB"}],"fontSize":24,"color":"#ffffff","position":"bottom","align":"center"},
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":false,"volume":1,"pan":0},
+        {"id":"tcn","type":"subtitle","order":5,"clips":[{
+          "id":"ccn","assetId":"_subtitle","src_range":{"start":1.0,"end":5.0},
+          "timelineIn":1.0,"timelineOut":5.0,
+          "subtitle":{"items":[{"start":1.0,"end":2.0,"text":"你好一"},{"start":3.0,"end":5.0,"text":"你好二"}],"fontSize":24,"color":"#ffffff","position":"bottom","align":"center"},
+          "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+          "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}
+        }],"locked":false,"visible":true,"muted":false,"solo":false,"isMain":false,"volume":1,"pan":0}
+      ]
+    }"##;
+    // 数组序 = [tv, ten(EN), tcn(CN)]（两字幕轨 order 相同=5，故意触发历史上的 concat 分支）
+    let cmd = render_project_json(json).expect("build command");
+    // 1) 全部 4 条 item 都出现，无缺失
+    for t in ["HelloA", "HelloB", "你好一", "你好二"] {
+        assert!(cmd.contains(t), "all subtitle segments must be burned; missing '{}'; cmd: {}", t, cmd);
     }
+    // 2) 字幕轨不得被当多片段轨 concat 拼接（否则某轨仅出现在时间轴前半段）
+    assert!(!cmd.contains("concat"),
+        "subtitle tracks must NOT be concatenated (would split segments across timeline halves); cmd: {}", cmd);
+    // 3) 仅烧录一次：drawtext=text= 出现次数 == 4（无主链重复烧录）
+    let drawtext_count = cmd.matches("drawtext=text=").count();
+    assert_eq!(drawtext_count, 4,
+        "each of the 4 items must be burned exactly once; got {} drawtext=text=; cmd: {}", drawtext_count, cmd);
+    // 4) 顺序与预览一致：数组序 EN 先(在下)、CN 后(最上层)
+    let pos_en = cmd.find("HelloA").expect("EN first segment");
+    let pos_cn = cmd.find("你好一").expect("CN first segment");
+    assert!(pos_en < pos_cn,
+        "array order must burn EN before CN (CN on top, matching preview); cmd: {}", cmd);
+    // 5) 最上层节点之后无更多 drawtext，证明 CN([sub3]) 是顶层
+    let last = cmd.rfind("[sub3]").expect("must have [sub3] as final subtitle node");
+    assert!(!cmd[last..].contains("drawtext="),
+        "top node [sub3] (CN) must be final; cmd: {}", cmd);
+}
 }

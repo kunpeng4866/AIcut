@@ -19,7 +19,7 @@ pub const DEFAULT_FFMPEG: &str = r"E:\codex\codex-tools\bin\ffmpeg.exe";
 const MANAGED_PYTHON: &str =
     "C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe";
 /// 百炼（DashScope）默认转写模型
-pub const DEFAULT_BAILIAN_MODEL: &str = "paraformer-v1";
+pub const DEFAULT_BAILIAN_MODEL: &str = "qwen-audio-3.0-asr-flash-streaming";
 
 // ════════════════════ ASR Provider ════════════════════
 
@@ -28,6 +28,8 @@ pub const DEFAULT_BAILIAN_MODEL: &str = "paraformer-v1";
 pub struct TranscriptResult {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    /// 桥已预分组（双路融合产出剪映式短句，TS 应直接消费、不再重切）
+    pub pre_grouped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +171,7 @@ fn parse_whisper_json(json: &str) -> Result<TranscriptResult, String> {
             text.push_str(&seg_text);
             segments.push(TranscriptSegment { start, end, text: seg_text });
         }
-        return Ok(TranscriptResult { text, segments });
+        return Ok(TranscriptResult { text, segments, pre_grouped: false });
     }
 
     // 兼容：根对象直接含 text / segments（start/end 为秒）的变体
@@ -189,7 +191,7 @@ fn parse_whisper_json(json: &str) -> Result<TranscriptResult, String> {
     if root_text.is_empty() && root_segments.is_empty() {
         return Err("Whisper 返回 JSON 缺少 transcription / text / segments 字段".into());
     }
-    Ok(TranscriptResult { text: root_text, segments: root_segments })
+    Ok(TranscriptResult { text: root_text, segments: root_segments, pre_grouped: false })
 }
 
 // ════════════════════ 百炼 (DashScope) ASR Provider ════════════════════
@@ -367,7 +369,12 @@ impl AsrProvider for BailianAsrProvider {
             return Err("百炼 ASR 返回空结果（text 与 segments 均为空）".into());
         }
 
-        Ok(TranscriptResult { text, segments })
+        let pre_grouped = data
+            .get("pre_grouped")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        Ok(TranscriptResult { text, segments, pre_grouped })
     }
 }
 
@@ -622,6 +629,7 @@ mod tests {
         let result = TranscriptResult {
             text: "Hello world".into(),
             segments: vec![TranscriptSegment { start: 0.0, end: 2.0, text: "Hello world".into() }],
+            pre_grouped: false,
         };
         let srt = transcript_to_srt(&result);
         assert!(srt.contains("Hello world"));

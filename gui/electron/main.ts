@@ -325,7 +325,17 @@ ipcMain.handle('tts:voices', async () => {
   ]);
 });
 
-// ── AI 自动字幕 ──
+// ── AI 自动字幕 / 翻译 ──
+// 读取 config.json 里的 DeepSeek key，注入引擎进程环境变量（engine 的 ai.rs 读 DEEPSEEK_API_KEY）。
+async function injectDeepSeekKey(): Promise<void> {
+  try {
+    const config = JSON.parse(await readFile(getConfigPath(), 'utf8'));
+    process.env.DEEPSEEK_API_KEY = config.ai?.apiKey || '';
+  } catch {
+    process.env.DEEPSEEK_API_KEY = '';
+  }
+}
+
 // 前端把 ASR 转写文本交给后端，由 aicut-engine 调 DeepSeek 切分为时间轴字幕。
 ipcMain.handle('ai:generateSubtitles', async (_e, transcript: string, lang: string) => {
   if (!transcript || !transcript.trim()) {
@@ -333,6 +343,7 @@ ipcMain.handle('ai:generateSubtitles', async (_e, transcript: string, lang: stri
   }
   const tmp = join(app.getPath('temp'), `aicut-ai-${Date.now()}.txt`);
   try {
+    await injectDeepSeekKey();
     await writeFile(tmp, transcript, 'utf8');
     const stdout = await callEngine('ai', 'subtitles', tmp, lang || 'zh');
     const data = JSON.parse(stdout);
@@ -347,12 +358,34 @@ ipcMain.handle('ai:generateSubtitles', async (_e, transcript: string, lang: stri
   }
 });
 
+// 前端把源句（换行拼接）交给后端翻译，返回换行拼接的译文（逐行保序）。
+ipcMain.handle('ai:translate', async (_e, text: string, targetLang: string) => {
+  if (!text || !text.trim()) {
+    return { success: false, error: '翻译文本为空' };
+  }
+  const tmp = join(app.getPath('temp'), `aicut-translate-${Date.now()}.txt`);
+  try {
+    await injectDeepSeekKey();
+    await writeFile(tmp, text, 'utf8');
+    const translated = await callEngine('ai', 'translate', tmp, targetLang || 'en');
+    if (!translated || !translated.trim()) {
+      return { success: false, error: 'AI 返回空译文' };
+    }
+    return { success: true, data: { text: translated } };
+  } catch (e: any) {
+    return { success: false, error: e?.message ?? String(e) };
+  } finally {
+    unlink(tmp).catch(() => {});
+  }
+});
+
 // ── ASR 语音转写 ──
 // provider = 'bailian' → aicut-engine 走百炼（DashScope）云端转写；
 // 其余（空 / whisper-local / whisper-api / custom）→ whisper.cpp 本地兜底（ffmpeg 抽轨 → whisper-cli -oj）。
 // 参数顺序必须与 Rust CLI 约定严格一致：
 //   asr transcribe <audio> <lang> <provider> <enginePath> <modelPath> <apiKey> <endpoint> <model>
 ipcMain.handle('asr:transcribe', async (_e, audioPath: string, lang: string) => {
+  const engineArgs: string[] = [];
   try {
     const configContent = await readFile(getConfigPath(), 'utf8');
     const config = JSON.parse(configContent);
@@ -363,12 +396,8 @@ ipcMain.handle('asr:transcribe', async (_e, audioPath: string, lang: string) => 
     const apiKey = asr.apiKey || '';
     const endpoint = asr.endpoint || '';
     const model = asr.model || '';
-    const stdout = await callEngine(
-      'asr', 'transcribe',
-      audioPath, lang || 'zh',
-      provider, enginePath, modelPath,
-      apiKey, endpoint, model,
-    );
+    engineArgs.push('asr', 'transcribe', audioPath, lang || 'zh', provider, enginePath, modelPath, apiKey, endpoint, model);
+    const stdout = await callEngine(...engineArgs);
     const data = JSON.parse(stdout);
     return { success: true, data };
   } catch (e: any) {
@@ -702,7 +731,7 @@ function getDefaultConfig() {
   return {
     version: '1.0',
     ai: { provider: 'none', apiKey: '', endpoint: '', model: '' },
-    asr: { provider: 'bailian', enginePath: '', modelPath: '', ffmpegPath: '', apiKey: '', endpoint: '', model: 'paraformer-realtime-v2' },
+    asr: { provider: 'bailian', enginePath: '', modelPath: '', ffmpegPath: '', apiKey: '', endpoint: '', model: 'qwen-audio-3.0-asr-flash-streaming' },
     tts: { provider: 'none', appId: '', accessToken: '', endpoint: '', defaultVoice: '' },
     render: { ffmpegPath: '', defaultResolution: '1080p', defaultFps: 30, defaultBitrate: 8 },
     plugins: { vfxDirectory: '', enabledPlugins: [] },

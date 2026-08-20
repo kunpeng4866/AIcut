@@ -54,10 +54,12 @@ contextBridge.exposeInMainWorld('aicut', {
     ipcRenderer.invoke('tts:synthesize', text, voice, outputPath),
   ttsVoices: () => ipcRenderer.invoke('tts:voices'),
 
-  // ── AI 自动字幕 ──
+  // ── AI 自动字幕 / 翻译 ──
   ai: {
     generateSubtitles: (transcript: string, lang: string) =>
       ipcRenderer.invoke('ai:generateSubtitles', transcript, lang),
+    translate: (text: string, targetLang: string) =>
+      ipcRenderer.invoke('ai:translate', text, targetLang),
   },
 
   // ── ASR 本地语音转写 ──

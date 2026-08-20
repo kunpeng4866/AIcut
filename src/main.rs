@@ -171,9 +171,10 @@ fn main() {
         }
         "ai" => {
             // aicut-engine ai subtitles <transcript_file> <lang>
-            // transcript 经临时文件传入，避免长文本/中文在命令行参数中的转义与编码问题。
+            // aicut-engine ai translate  <text_file> <target_lang>
+            // 文本经临时文件传入，避免长文本/中文在命令行参数中的转义与编码问题。
             if args.len() < 4 {
-                eprintln!("用法: aicut-engine ai subtitles <transcript_file> <lang>");
+                eprintln!("用法: aicut-engine ai subtitles <transcript_file> <lang> | ai translate <text_file> <target_lang>");
                 process::exit(2);
             }
             match args[2].as_str() {
@@ -188,8 +189,19 @@ fn main() {
                         Err(e) => { eprintln!("AI 字幕生成失败: {}", e); process::exit(1); }
                     }
                 }
+                "translate" => {
+                    let text = fs::read_to_string(&args[3]).unwrap_or_else(|e| {
+                        eprintln!("无法读取翻译文本文件 {}: {}", args[3], e);
+                        process::exit(1);
+                    });
+                    let target_lang = args.get(4).map(|s| s.as_str()).unwrap_or("en");
+                    match aicut_engine::ai::translate_sync(&text, target_lang) {
+                        Ok(translated) => println!("{}", translated),
+                        Err(e) => { eprintln!("AI 翻译失败: {}", e); process::exit(1); }
+                    }
+                }
                 other => {
-                    eprintln!("未知 ai 子命令: {} (可用: subtitles)", other);
+                    eprintln!("未知 ai 子命令: {} (可用: subtitles, translate)", other);
                     process::exit(2);
                 }
             }

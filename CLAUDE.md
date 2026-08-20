@@ -277,7 +277,7 @@ aicut-engine new <name> [WxH]               # 创建新工程
 1. **读文件前先读 CLAUDE.md** — 用本文件的摘要代替全量读取
 2. **单次代码生成 ≤ 600 行** — 避免上下文爆仓
 3. **每完成一个文件立即 Write/Edit** — 不要攒到一起
-4. **编译优先** — 写完一个模块就 `cargo check --offline` / `npx tsc --noEmit`
+4. **编译优先** — 写完一个模块就 `cargo check --offline` / `npx tsc --noEmit`；改 Rust 落定必须 `cargo build`，改 renderer 必须 `vite build`，改后彻底退出 Electron 重开
 5. **错误处理统一** — Rust 用 `anyhow::Result` + `thiserror`；TS 用 try/catch + Result 类型
 6. **调研先行** — 新功能开发前先读 `docs/调研报告/` 对应报告
 7. **子代理并行** — 大任务拆分给子代理，各写文件，防主上下文爆仓。每组子代理读图≤7张
@@ -293,3 +293,4 @@ aicut-engine new <name> [WxH]               # 创建新工程
 17. **★ 开发环境** — 软件装 E 盘；pip 用清华镜像；HuggingFace 用 hf-mirror.com（需设 HF_HUB_DISABLE_XET=1）；Rust 测试用 `cargo test --offline`
 18. **★ 子代理任务拆分** — 不同任务（按功能/文件拆分）必须用独立子代理并行处理，避免主上下文爆仓。子代理之间不共享文件（不同任务→不同文件），每个子代理只改自己的目标文件。跨文件的同类改动可合并到一个子代理中
 19. **★ 插件技能注册** — `claude plugin install` 安装后，需运行 `bash scripts/link-plugin-skills.sh` 将技能目录链接到 `~/.claude/skills/`，否则技能无法被发现（当前版本已知问题）
+20. **★ 导出双路径对称** — 导出双路径（graph.rs / compositor.rs、WebGPU / HTML5 回退）必须对称实现，不得为精简删其一

@@ -11,11 +11,13 @@ import type { AiState, SubtitleGenResult } from '../aiTypes';
 interface AiStore extends AiState {
   isTranscribing: boolean;
   // 存储 ASR 完整结果（含每句精确时间戳），用于"用语音时间戳直接生成字幕"
-  asrResult: { text: string; segments: { start: number; end: number; text: string }[] } | null;
+  asrResult: { text: string; segments: { start: number; end: number; text: string }[]; word_level?: boolean; pre_grouped?: boolean } | null;
   setTranscript: (t: string) => void;
   setLang: (l: string) => void;
   generateSubtitles: (transcript: string, lang: string) => Promise<void>;
   transcribe: (audioPath: string, lang: string) => Promise<void>;
+  // 翻译：把源句数组逐行翻译为目标语言，返回译文行数组（与源句等长/有序）
+  translate: (sourceTexts: string[], targetLang: string) => Promise<string[]>;
   clearResult: () => void;
 }
 
@@ -25,7 +27,7 @@ export const useAiStore = create<AiStore>((set) => ({
   result: null,
   error: null,
   transcript: '',
-  lang: 'zh',
+  lang: 'auto',
   asrResult: null,
 
   setTranscript: (t) => set({ transcript: t }),
@@ -71,4 +73,17 @@ export const useAiStore = create<AiStore>((set) => ({
   },
 
   clearResult: () => set({ result: null, error: null }),
+
+  // 翻译：把源句数组换行拼接后交给后端 DeepSeek 逐行翻译，返回译文行数组（按序与源句对应）。
+  // 行数不齐由调用方（createTranslatedClipFromClip）逐项回退原文处理。
+  translate: async (sourceTexts, targetLang) => {
+    const src = sourceTexts.map((s) => s.trim()).filter(Boolean);
+    if (src.length === 0) throw new Error('没有可翻译的文本');
+    const resp = await window.aicut.ai.translate(src.join('\n'), targetLang);
+    if (!resp.success || !resp.data) throw new Error(resp.error || '翻译失败');
+    return resp.data.text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  },
 }));

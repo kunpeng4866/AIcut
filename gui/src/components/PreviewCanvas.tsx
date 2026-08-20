@@ -352,6 +352,40 @@ export default function PreviewCanvas() {
   const project = useProjectStore((s) => s.project);
   const setCanvasSize = useProjectStore((s) => s.setCanvasSize);
   const { currentTime, isPlaying, togglePlay, setCurrentTime } = useUIStore();
+  const updateClipLive = useProjectStore((s) => s.updateClipLive);
+  const pushHistorySnapshot = useProjectStore((s) => s.pushHistorySnapshot);
+  const selectedTrackId = useUIStore((s) => s.selectedTrackId);
+  const selectedClipId = useUIStore((s) => s.selectedClipId);
+  // 字幕自由定位拖拽：记录正在拖动的字幕 clip，move 时按画布框比例写 posX/posY
+  const subDragRef = useRef<{ trackId: string; clipId: string } | null>(null);
+  const onSubtitlePointerDown = (e: React.PointerEvent, trackId: string, clipId: string) => {
+    e.stopPropagation();
+    const ui = useUIStore.getState();
+    if (ui.selectedClipId !== clipId || ui.selectedTrackId !== trackId) {
+      ui.selectClip(trackId, clipId); // 先选中，下一次按下再拖
+      return;
+    }
+    pushHistorySnapshot();
+    subDragRef.current = { trackId, clipId };
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch (_) { /* 忽略 */ }
+  };
+  const onSubtitlePointerMove = (e: React.PointerEvent) => {
+    const d = subDragRef.current;
+    if (!d) return;
+    const frame = (e.currentTarget as HTMLElement).parentElement;
+    if (!frame) return;
+    const rect = frame.getBoundingClientRect();
+    const px = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const py = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    const st = useProjectStore.getState();
+    const clip = st.project.tracks.find((t) => t.id === d.trackId)?.clips.find((c) => c.id === d.clipId);
+    if (!clip || !clip.subtitle) return;
+    st.updateClipLive(d.trackId, d.clipId, { subtitle: { ...clip.subtitle, posX: px, posY: py } } as any);
+  };
+  const onSubtitlePointerUp = (e: React.PointerEvent) => {
+    if (subDragRef.current) { try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch (_) {} }
+    subDragRef.current = null;
+  };
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // 当前帧率：播放头所在主视频轨 clip 优先取其素材 fps，否则回退到工程画布 fps
@@ -601,31 +635,67 @@ export default function PreviewCanvas() {
           const s = clip.subtitle;
           // 字幕时间戳与音视频源时间一致：使用同一份 clipSourceTime 映射（含倒放/冻结/曲线）
           const { srcT: offset } = clipSourceTime(currentTime, clip);
-          const item = s.items.find(i => offset >= i.start && offset < i.end);
+          // 时间偏移（提前量）：lead>0 时让字幕比语音提前出现，补偿 ASR 识别滞后；
+          // 与导出端 source_to_timeline(item.start - lead) 严格对称。
+          const lead = s.timeOffset || 0;
+          const item = s.items.find(i => (offset + lead) >= i.start && (offset + lead) < i.end);
           if (item) {
-            const isCenter = s.position === 'center';
+            const pos = s.position || 'bottom';
+            const align = s.align || 'center';
+            // 自由定位：posX/posY 优先（文字以该点居中锚定）；否则回退 position/align 预设。
+            const posX = s.posX ?? (align === 'left' ? 0.12 : align === 'right' ? 0.88 : 0.5);
+            const posY = s.posY ?? (pos === 'top' ? 0.15 : pos === 'center' ? 0.5 : 0.85);
+            const isSelectedSub = track.id === selectedTrackId && clip.id === selectedClipId;
             const subWrapper: React.CSSProperties = {
-              position: 'absolute', left: '50%',
-              bottom: s.position === 'bottom' ? 40 : undefined,
-              top: s.position === 'top' ? 40 : isCenter ? '50%' : undefined,
-              transform: isCenter ? 'translate(-50%, -50%)' : 'translateX(-50%)',
-              zIndex: 101, pointerEvents: 'none', maxWidth: '90%',
+              position: 'absolute',
+              left: `${posX * 100}%`,
+              top: `${posY * 100}%`,
+              transform: 'translate(-50%, -50%)',
+              transformOrigin: 'center',
+              zIndex: 101,
+              pointerEvents: 'auto',
+              cursor: isSelectedSub ? 'move' : 'pointer',
+              maxWidth: '90%', textAlign: 'center' as any,
             };
             const subText: React.CSSProperties = {
               color: s.color || '#fff', fontSize: (s.fontSize || 24) * frameScale,
-              fontFamily: findFontCss(s.fontFamily), textAlign: 'center' as any,
-              textShadow: '0 0 10px rgba(0,0,0,0.8)', whiteSpace: 'pre-wrap' as any,
+              fontFamily: findFontCss(s.fontFamily), textAlign: align as any,
+              whiteSpace: 'pre-wrap' as any,
             };
             if (s.strokeWidth && s.strokeWidth > 0) {
               const subStrokeColor = hexToRgba(s.strokeColor || '#000', s.strokeOpacity ?? 1);
               subText.WebkitTextStroke = `${s.strokeWidth * frameScale}px ${subStrokeColor}`;
               subText.paintOrder = 'stroke fill';
             }
-            const subBgStyle: React.CSSProperties | null = isCenter ? null : {
-              position: 'absolute', inset: 0,
-              background: 'rgba(0,0,0,0.5)', padding: '4px 16px', borderRadius: 4,
-              zIndex: -1,
-            };
+            // 阴影（drawtext 导出无模糊，预览用近似模糊保持观感一致）
+            const sh = s.shadow;
+            if (sh?.enabled) {
+              const rad = (sh.angle ?? -45) * Math.PI / 180;
+              const d = (sh.distance ?? 5) * frameScale;
+              const dx = Math.round(d * Math.cos(rad));
+              const dy = Math.round(d * Math.sin(rad));
+              const blur = Math.round((sh.blur ?? 0.15) * 30 * frameScale);
+              subText.textShadow = `${dx}px ${dy}px ${blur}px ${hexToRgba(sh.color || '#000', sh.opacity ?? 0.9)}`;
+            } else {
+              subText.textShadow = '0 0 10px rgba(0,0,0,0.8)';
+            }
+            // 背景盒（相对文字偏移，绝不移动文字定位；由配置开关控制，默认关闭）
+            let subBgStyle: React.CSSProperties | null = null;
+            const bg = s.background;
+            if (bg?.enabled) {
+              const padH = Math.round((bg.width ?? 0.19) * 100);
+              const padV = Math.round((bg.height ?? 0.13) * 100);
+              const radius = Math.round((bg.radius ?? 0.06) * 50);
+              const offX = Math.round(((bg.offsetX ?? 0.5) - 0.5) * 200);
+              const offY = Math.round(((bg.offsetY ?? 0.5) - 0.5) * 200);
+              subBgStyle = {
+                position: 'absolute', left: '50%', top: '50%',
+                width: `calc(100% + ${2 * padH}px)`, height: `calc(100% + ${2 * padV}px)`,
+                transform: `translate(-50%, -50%) translate(${offX}px, ${offY}px)`,
+                background: hexToRgba(bg.color || '#000', bg.opacity ?? 0.9),
+                borderRadius: `${radius}px`, pointerEvents: 'none', zIndex: -1,
+              };
+            }
             result.push({
               text: item.text,
               kind: 'subtitle',
@@ -1378,11 +1448,16 @@ export default function PreviewCanvas() {
             }} />
           )}
           {/* 文字/字幕叠加层 */}
-          {activeTextOverlays.map((item, idx) => (
+          {activeTextOverlays.map((item, idx) => {
+            const isSub = item.kind === 'subtitle';
+            return (
             <div
               key={idx}
               style={item.wrapperStyle}
-              title="单击选中 · 双击编辑文字"
+              title="单击选中 · 拖动可移动位置 · 双击编辑文字"
+              onPointerDown={isSub ? (e) => onSubtitlePointerDown(e, item.trackId, item.clipId) : undefined}
+              onPointerMove={isSub ? onSubtitlePointerMove : undefined}
+              onPointerUp={isSub ? onSubtitlePointerUp : undefined}
               onClick={() => useUIStore.getState().selectClip(item.trackId, item.clipId)}
               onDoubleClick={() => {
                 useUIStore.getState().selectClip(item.trackId, item.clipId);
@@ -1392,7 +1467,8 @@ export default function PreviewCanvas() {
               {item.bgStyle && <div style={item.bgStyle} />}
               {renderTextBody(item.text, item.textStyle)}
             </div>
-          ))}
+            );
+          })}
 
           {/* 贴纸图片叠加层（DOM <img>，跨 WebGPU/HTML5 通用） */}
           {activeStickerOverlays.map((item, idx) => (

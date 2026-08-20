@@ -22,6 +22,9 @@ interface UIState {
 
   activeLeftPanel: LeftPanel;
   activeRightPanel: RightPanel;
+  // 右侧面板顶级切换：属性 / 混音器 / AI（提升为全局，便于时间轴选中片段时自动切到属性）
+  rightView: 'props' | 'mixer' | 'ai';
+  setRightView: (v: 'props' | 'mixer' | 'ai') => void;
 
   previewWidth: number;
   previewHeight: number;
@@ -74,6 +77,8 @@ export const useUIStore = create<UIState>((set) => ({
 
   activeLeftPanel: 'media',
   activeRightPanel: 'visual',
+  rightView: 'props',
+  setRightView: (v) => set({ rightView: v }),
 
   previewWidth: 1920,
   previewHeight: 1080,
