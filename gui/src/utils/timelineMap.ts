@@ -14,6 +14,7 @@
 //     故此处不特殊处理冻结，沿用线性公式即可。
 
 import type { ClipConfig, SpeedPointConfig } from '../types';
+import { rawSpeedIntegral } from './speedCurve';
 
 /**
  * 速度曲线积分（绝对速度）：把「速度曲线」积分为源素材时间。
@@ -82,4 +83,53 @@ export function sourceToTimeline(clip: ClipConfig, src: number): number {
     off = (src - srcStart) / speed;
   }
   return timelineIn + off;
+}
+
+/**
+ * 字幕 item 在时间线上的「实际显示起点」（与 PreviewCanvas 逐字节一致，且裁剪进 clip
+ * 的活跃窗口 [timelineIn, timelineOut)）。TTS 配音必须落在这里，否则：
+ *   - 倒放/曲线变速时 source_to_timeline(item.start) 不等于字幕显示的起点（倒放会把 item
+ *     的起点 source 时间映射到时间线末尾），导致配音整体滞后；
+ *   - 设了「时间偏移 lead」且 item 起点被 lead 推到 clip 起点之前时，旧写法
+ *     source_to_timeline(item.start - lead) 会算出负的 timelineIn，使开场句（如"大家看一下"）
+ *     落在时间线原点之前 → 音频片段不可见（"漏掉"）。
+ * 本函数直接复刻 PreviewCanvas 的判定：
+ *   显示当 (srcT(t) + lead) ∈ [item.start, item.end) 且 t ∈ [timelineIn, timelineOut)。
+ *   返回满足条件的最小 t（即显示起点）。冻结(freeze)在字幕路径本就被忽略，此处同样忽略。
+ */
+export function subtitleItemDisplayStart(
+  clip: ClipConfig,
+  item: { start: number; end: number },
+  lead = 0,
+): number {
+  const timelineIn = clip.timelineIn;
+  const timelineOut = clip.timelineOut;
+  const dur = timelineOut - timelineIn;
+  const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
+  const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+  const srcStart = clip.src_range?.start ?? 0;
+  const srcEnd = clip.src_range?.end ?? srcStart + dur;
+
+  const srcTAt = (t: number): number => {
+    const off = t - timelineIn;
+    if (remap.curve && remap.curve.length > 0) {
+      const offNorm = dur > 1e-6 ? off / dur : 0;
+      const s = srcStart + dur * rawSpeedIntegral(remap.curve, offNorm);
+      return Math.max(srcStart, Math.min(srcEnd, s));
+    }
+    const s = remap.reverse
+      ? srcStart + (dur - off) * speed
+      : srcStart + off * speed;
+    return s;
+  };
+
+  // 细扫时间线，找「显示窗口」起点（monotonic：线性/曲线递增、倒放递减，起点即首个满足条件的 t）。
+  const step = Math.max(0.0005, dur / 8000);
+  for (let t = timelineIn; t < timelineOut - 1e-9; t += step) {
+    const s = srcTAt(t) + lead;
+    if (s >= item.start - 1e-9 && s < item.end - 1e-9) return t;
+  }
+  // 兜底：item 源区间不完全落在本 clip 内时，退化为裁剪后的 source_to_timeline。
+  const approx = sourceToTimeline(clip, item.start - lead);
+  return Math.max(timelineIn, Math.min(timelineOut, approx));
 }

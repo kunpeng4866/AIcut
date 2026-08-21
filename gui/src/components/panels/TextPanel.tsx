@@ -8,7 +8,7 @@ import { useUIStore } from '../../store/uiStore';
 import { useAiStore } from '../../store/aiStore';
 import { useConfigStore } from '../../store/configStore';
 import { addTextClip, addSubtitleClip, parseSRT, createSubtitleClipFromAsr, createTranslatedTrack, createAudioClip, addClipToTrack, uid } from '../../utils/clipFactories';
-import { sourceToTimeline } from '../../utils/timelineMap';
+import { subtitleItemDisplayStart } from '../../utils/timelineMap';
 import type { ClipConfig, AssetConfig } from '../../types';
 
 const theme = {
@@ -269,22 +269,25 @@ export default function TextPanel() {
     // 同轨所有片段按时间轴顺序排序
     const sourceClips = [...track.clips].sort((a, b) => a.timelineIn - b.timelineIn);
     // 收集所有非空字幕 item，并折算其绝对时间起点。
-    // ⚠️ 必须与导出/预览同一套坐标：src/subtitle.rs::source_to_timeline
-    // （曲线变速→二分反解，倒放→对称公式，线性→除 speed）。
-    // 字幕 item.start 是「素材源时间戳」，必须经 source_to_timeline 映射回时间线，
-    // 否则曲线变速/倒放场景音频起点会与字幕显示位置错位；ASR 生成的字幕
-    // (每行=独立 clip，src_range.start===item.start)在线性场景下也会因重复计数整体右移。
-    const items: { text: string; absStart: number }[] = [];
+    // ⚠️ 落点必须与「字幕在时间线上的实际显示起点」逐字节一致（见 PreviewCanvas）：
+    // 显示当 (srcT(t) + lead) ∈ [item.start, item.end) 且 t ∈ [clip.timelineIn, clip.timelineOut)。
+    // 旧写法 source_to_timeline(item.start - lead) 有两个硬伤：
+    //   1) 倒放/曲线变速下不等于字幕显示起点（倒放会把 item 源起点映射到时间线末尾）→ 配音滞后；
+    //   2) 设了时间偏移 lead 且 item 起点被 lead 推到 clip 起点之前时，算出负 timelineIn →
+    //      开场句("大家看一下")落在时间线原点之前 → 音频片段不可见（"漏掉"）。
+    // 故改用语幕显示起点函数（裁剪进 clip 活跃窗口），保证对齐且不越界。
+    const ttsItems: { text: string; absStart: number }[] = [];
     sourceClips.forEach((c) => {
+      const lead = c.subtitle?.timeOffset || 0;
       (c.subtitle?.items ?? []).forEach((it) => {
         const t = (it.text || '').trim();
         if (t) {
-          const absStart = sourceToTimeline(c, it.start);
-          items.push({ text: t, absStart });
+          const absStart = subtitleItemDisplayStart(c, it, lead);
+          ttsItems.push({ text: t, absStart });
         }
       });
     });
-    if (items.length === 0) {
+    if (ttsItems.length === 0) {
       setTtsMsg('该字幕轨没有可合成的文字');
       return;
     }
@@ -298,21 +301,30 @@ export default function TextPanel() {
     const voice =
       ttsCfg.defaultVoice || (provider === 'cosyvoice' ? 'longxiaochun' : 'BV002_streaming');
 
-    for (let i = 0; i < items.length; i++) {
-      setTtsProgress({ i, total: items.length });
-      setTtsMsg(`合成中 ${i + 1}/${items.length}：${(items[i].text || '').slice(0, 12)}${(items[i].text || '').length > 12 ? '…' : ''}`);
-      const { success, audioPath, error } = await window.aicut.ttsSynthesize(items[i].text, voice);
-      if (!success || !audioPath) {
-        setTtsMsg('第' + (i + 1) + '段合成失败: ' + (error ?? '未知错误'));
+    // 逐段合成：失败重试一次（百炼/火山首调偶发冷启动失败），并真实记录失败段，
+    // 绝不用「完成 N 段」覆盖掉失败提示（旧逻辑会把漏掉的片段静默吞掉）。
+    const failed: string[] = [];
+    let okCount = 0;
+    for (let i = 0; i < ttsItems.length; i++) {
+      const text = ttsItems[i].text;
+      const absStart = ttsItems[i].absStart;
+      setTtsProgress({ i, total: ttsItems.length });
+      setTtsMsg(`合成中 ${i + 1}/${ttsItems.length}：${text.slice(0, 12)}${text.length > 12 ? '…' : ''}`);
+      let res = await window.aicut.ttsSynthesize(text, voice);
+      if (!res.success || !res.audioPath) {
+        res = await window.aicut.ttsSynthesize(text, voice); // 重试一次
+      }
+      if (!res.success || !res.audioPath) {
+        failed.push(text);
         continue;
       }
       // probe 取真实时长
-      const probe = await window.aicut.probe(audioPath);
+      const probe = await window.aicut.probe(res.audioPath);
       const dur = probe?.info?.duration || 2;
       const asset: AssetConfig = {
         id: uid('asset'),
         type: 'audio',
-        path: audioPath,
+        path: res.audioPath,
         duration: dur,
         width: 0,
         height: 0,
@@ -320,11 +332,19 @@ export default function TextPanel() {
         fps: 30,
       };
       useProjectStore.getState().addAsset(asset);
-      const clip = createAudioClip(asset, { timelineIn: items[i].absStart, duration: dur });
+      const clip = createAudioClip(asset, { timelineIn: absStart, duration: dur });
       addClipToTrack('audio', clip);
+      okCount++;
     }
     setTtsProgress(null);
-    setTtsMsg('文字转语音完成：共 ' + items.length + ' 段，已落到音频轨');
+    if (failed.length === 0) {
+      setTtsMsg('文字转语音完成：共 ' + okCount + ' 段，已落到音频轨');
+    } else {
+      setTtsMsg(
+        '文字转语音完成 ' + okCount + '/' + ttsItems.length + ' 段；失败 ' + failed.length +
+        ' 段：' + failed.map((f) => '「' + f.slice(0, 10) + (f.length > 10 ? '…' : '') + '」').join(' '),
+      );
+    }
   };
 
   // 导入字幕：动态创建隐藏 file input，选择后用 FileReader 读文本并解析
