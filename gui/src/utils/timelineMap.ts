@@ -133,3 +133,46 @@ export function subtitleItemDisplayStart(
   const approx = sourceToTimeline(clip, item.start - lead);
   return Math.max(timelineIn, Math.min(timelineOut, approx));
 }
+
+/**
+ * 字幕 item 在时间线上的「实际显示末端」（subtitleItemDisplayStart 的对称）。
+ * 与 PreviewCanvas 判定一致：返回满足 (srcT(t)+lead)∈[item.start,item.end) 且
+ * t∈[timelineIn,timelineOut) 的**最后一个** t（含 step 粒度误差，量级 dur/8000，可忽略）。
+ * TTS 用它拿「字幕显示窗口时长」= displayEnd - displayStart，从而让配音 speed = L/窗口
+ * 精确填满字幕窗口（不依赖 TTS 语速≈原语速的假设）。
+ */
+export function subtitleItemDisplayEnd(
+  clip: ClipConfig,
+  item: { start: number; end: number },
+  lead = 0,
+): number {
+  const timelineIn = clip.timelineIn;
+  const timelineOut = clip.timelineOut;
+  const dur = timelineOut - timelineIn;
+  const remap = clip.time_remap ?? { reverse: false, freeze: null, curve: [] as SpeedPointConfig[] };
+  const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+  const srcStart = clip.src_range?.start ?? 0;
+  const srcEnd = clip.src_range?.end ?? srcStart + dur;
+
+  const srcTAt = (t: number): number => {
+    const off = t - timelineIn;
+    if (remap.curve && remap.curve.length > 0) {
+      const offNorm = dur > 1e-6 ? off / dur : 0;
+      const s = srcStart + dur * rawSpeedIntegral(remap.curve, offNorm);
+      return Math.max(srcStart, Math.min(srcEnd, s));
+    }
+    const s = remap.reverse
+      ? srcStart + (dur - off) * speed
+      : srcStart + off * speed;
+    return s;
+  };
+
+  const step = Math.max(0.0005, dur / 8000);
+  let last = timelineIn;
+  for (let t = timelineIn; t < timelineOut - 1e-9; t += step) {
+    const s = srcTAt(t) + lead;
+    if (s >= item.start - 1e-9 && s < item.end - 1e-9) last = t;
+  }
+  // 半开区间 [start, end) 的末端：最后一个满足条件的 t 再补一个 step，保证窗口覆盖到 item 结束。
+  return Math.min(timelineOut, last + step);
+}

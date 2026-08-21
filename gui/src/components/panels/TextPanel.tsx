@@ -8,7 +8,7 @@ import { useUIStore } from '../../store/uiStore';
 import { useAiStore } from '../../store/aiStore';
 import { useConfigStore } from '../../store/configStore';
 import { addTextClip, addSubtitleClip, parseSRT, createSubtitleClipFromAsr, createTranslatedTrack, createAudioClip, addClipToTrack, uid } from '../../utils/clipFactories';
-import { subtitleItemDisplayStart } from '../../utils/timelineMap';
+import { subtitleItemDisplayStart, subtitleItemDisplayEnd } from '../../utils/timelineMap';
 import type { ClipConfig, AssetConfig, TimeRemapConfig } from '../../types';
 
 const theme = {
@@ -268,27 +268,23 @@ export default function TextPanel() {
     }
     // 同轨所有片段按时间轴顺序排序
     const sourceClips = [...track.clips].sort((a, b) => a.timelineIn - b.timelineIn);
-    // 收集所有非空字幕 item，并折算其绝对时间起点。
-    // ⚠️ 落点必须与「字幕在时间线上的实际显示起点」逐字节一致（见 PreviewCanvas）：
-    // 显示当 (srcT(t) + lead) ∈ [item.start, item.end) 且 t ∈ [clip.timelineIn, clip.timelineOut)。
-    // 旧写法 source_to_timeline(item.start - lead) 有两个硬伤：
-    //   1) 倒放/曲线变速下不等于字幕显示起点（倒放会把 item 源起点映射到时间线末尾）→ 配音滞后；
-    //   2) 设了时间偏移 lead 且 item 起点被 lead 推到 clip 起点之前时，算出负 timelineIn →
-    //      开场句("大家看一下")落在时间线原点之前 → 音频片段不可见（"漏掉"）。
-    // 故改用语幕显示起点函数（裁剪进 clip 活跃窗口），保证对齐且不越界。
-    // ⚠️ 同时必须把字幕 clip 的变速（speed / time_remap）一并带给音频 clip：字幕在时间轴上
-    //   是「变速后」显示的（窗口 = 源时长/speed），而 TTS 音频是「整句原速念出来的」。
-    //   若音频不继承变速（speed 恒 1），变速场景下音频窗口被拉长、逐句累积滞后 →
-    //   表现为"丢开头字、末尾句整句丢"。所以逐句记录 speed/time_remap，落轨时传给音频。
-    const ttsItems: { text: string; absStart: number; speed: number; timeRemap?: TimeRemapConfig }[] = [];
+    // 收集所有非空字幕 item，并折算其绝对时间起点 + 显示窗口时长。
+    // 第一性原理：字幕 clip 在时间轴上就是「文字 + 时间段 [T_in, T_out]」，变速的影响已在这
+    // 一步之前固化进 T_in/T_out（变速只是压缩/拉伸了窗口 W = T_out - T_in）。所以 TTS 只需要：
+    //   落点 = T_in（字幕显示起点，与变速无关），窗口 = W（与变速无关）。
+    // 唯一仍"有关"的是：TTS 语音是原速念的，自然时长 L 一般 ≠ W，故配音必须变速
+    //   speed = L / W 来精确填满字幕窗口。这样不依赖「TTS 语速≈原语速」的假设，
+    //   也比"继承字幕 speed"更精确（那会假设 L=源时长，语速差异导致轻微错位）。
+    const ttsItems: { text: string; absStart: number; window: number; timeRemap?: TimeRemapConfig }[] = [];
     sourceClips.forEach((c) => {
       const lead = c.subtitle?.timeOffset || 0;
-      const speed = c.speed && c.speed > 0 ? c.speed : 1;
       (c.subtitle?.items ?? []).forEach((it) => {
         const t = (it.text || '').trim();
         if (t) {
           const absStart = subtitleItemDisplayStart(c, it, lead);
-          ttsItems.push({ text: t, absStart, speed, timeRemap: c.time_remap });
+          const end = subtitleItemDisplayEnd(c, it, lead);
+          const window = Math.max(end - absStart, 1e-3);
+          ttsItems.push({ text: t, absStart, window, timeRemap: c.time_remap });
         }
       });
     });
@@ -337,7 +333,9 @@ export default function TextPanel() {
         fps: 30,
       };
       useProjectStore.getState().addAsset(asset);
-      const clip = createAudioClip(asset, { timelineIn: absStart, duration: dur, speed: ttsItems[i].speed, timeRemap: ttsItems[i].timeRemap });
+      // speed = 语音自然时长 / 字幕显示窗口，让配音精确填满字幕时间段（第一性原理，与变速解耦）
+      const speed = dur / ttsItems[i].window;
+      const clip = createAudioClip(asset, { timelineIn: absStart, duration: dur, speed, timeRemap: ttsItems[i].timeRemap });
       addClipToTrack('audio', clip);
       okCount++;
     }
