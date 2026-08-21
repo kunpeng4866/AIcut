@@ -8,6 +8,7 @@ import { useUIStore } from '../../store/uiStore';
 import { useAiStore } from '../../store/aiStore';
 import { useConfigStore } from '../../store/configStore';
 import { addTextClip, addSubtitleClip, parseSRT, createSubtitleClipFromAsr, createTranslatedTrack, createAudioClip, addClipToTrack, uid } from '../../utils/clipFactories';
+import { sourceToTimeline } from '../../utils/timelineMap';
 import type { ClipConfig, AssetConfig } from '../../types';
 
 const theme = {
@@ -268,13 +269,17 @@ export default function TextPanel() {
     // 同轨所有片段按时间轴顺序排序
     const sourceClips = [...track.clips].sort((a, b) => a.timelineIn - b.timelineIn);
     // 收集所有非空字幕 item，并折算其绝对时间起点。
-    // 注意：subtitle clip 通常 speed=1，绝对起点 ≈ clip.timelineIn + item.start（item.start 为相对 clip 偏移秒数）。
+    // ⚠️ 必须与导出/预览同一套坐标：src/subtitle.rs::source_to_timeline
+    // （曲线变速→二分反解，倒放→对称公式，线性→除 speed）。
+    // 字幕 item.start 是「素材源时间戳」，必须经 source_to_timeline 映射回时间线，
+    // 否则曲线变速/倒放场景音频起点会与字幕显示位置错位；ASR 生成的字幕
+    // (每行=独立 clip，src_range.start===item.start)在线性场景下也会因重复计数整体右移。
     const items: { text: string; absStart: number }[] = [];
     sourceClips.forEach((c) => {
       (c.subtitle?.items ?? []).forEach((it) => {
         const t = (it.text || '').trim();
         if (t) {
-          const absStart = c.timelineIn + (it.start || 0);
+          const absStart = sourceToTimeline(c, it.start);
           items.push({ text: t, absStart });
         }
       });
