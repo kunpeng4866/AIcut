@@ -236,14 +236,14 @@ impl TtsProvider for VolcanoTtsClient {
 // ── 阿里云百炼 CosyVoice ──
 
 pub const COSYVOICE_ENDPOINT: &str =
-    "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/text-to-audio";
-pub const DEFAULT_COSYVOICE_MODEL: &str = "cosyvoice-v3.5-flash";
+    "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer";
+pub const DEFAULT_COSYVOICE_MODEL: &str = "cosyvoice-v3.5-plus";
 
 /// 阿里云百炼（DashScope）CosyVoice TTS 客户端
 pub struct CosyVoiceClient {
     pub api_key: String,       // DashScope API Key
-    pub model: String,         // 默认 "cosyvoice-v3.5-flash"
-    pub default_voice: String, // 百炼音色 id，如 "longxiaochun"
+    pub model: String,         // 默认 "cosyvoice-v3.5-plus"
+    pub default_voice: String, // 百炼音色 id（复刻/设计音色，如 cosyvoice-v3.5-plus-bailian-xxx）
 }
 
 impl CosyVoiceClient {
@@ -255,7 +255,7 @@ impl CosyVoiceClient {
         }
     }
 
-    /// 便捷构造：model 为空时使用默认 "cosyvoice-v3.5-flash"
+    /// 便捷构造：model 为空时使用默认 "cosyvoice-v3.5-plus"
     pub fn from_config(api_key: &str, model: &str, voice: &str) -> Self {
         Self::new(
             api_key,
@@ -268,27 +268,21 @@ impl CosyVoiceClient {
 #[derive(Serialize)]
 struct CosyInput<'a> {
     text: &'a str,
-}
-
-#[derive(Serialize)]
-struct CosyParameters<'a> {
     voice: &'a str,
     format: &'a str,
     sample_rate: i64,
-    volume: i64,
-    rate: f64,
-    pitch: f64,
 }
 
 #[derive(Serialize)]
 struct CosyRequest<'a> {
     model: &'a str,
     input: CosyInput<'a>,
-    parameters: CosyParameters<'a>,
 }
 
 #[derive(Deserialize)]
 struct CosyAudio {
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     data: Option<String>,
 }
@@ -310,7 +304,7 @@ struct CosyResponse {
 }
 
 impl TtsProvider for CosyVoiceClient {
-    /// 合成语音 → 返回音频字节（CosyVoice 不直接返回时长，duration 返回 0.0）
+    /// 合成语音 → 返回音频字节（CosyVoice HTTP API 返回音频 URL，需二次下载；duration 返回 0.0）
     fn synthesize(&self, request: &TtsRequest) -> Result<TtsResponse> {
         if self.api_key.is_empty() {
             return Err(anyhow!("CosyVoice 未配置：api_key 为空"));
@@ -327,14 +321,11 @@ impl TtsProvider for CosyVoiceClient {
 
         let body = CosyRequest {
             model: &self.model,
-            input: CosyInput { text: &request.text },
-            parameters: CosyParameters {
+            input: CosyInput {
+                text: &request.text,
                 voice,
                 format: "wav",
                 sample_rate: 24000,
-                volume: 50,
-                rate: 1.0,
-                pitch: 1.0,
             },
         };
 
@@ -352,12 +343,15 @@ impl TtsProvider for CosyVoiceClient {
 
         let code = api.code.clone();
         let message = api.message.clone();
-        let data_uri = api
+
+        // 非流式 HTTP API 返回音频 URL（output.audio.url），data 字段为空。
+        let audio_url = api
             .output
             .and_then(|o| o.audio)
-            .and_then(|a| a.data)
+            .and_then(|a| a.url)
+            .filter(|u| !u.is_empty())
             .ok_or_else(|| {
-                let mut msg = "CosyVoice 响应缺少 output.audio.data".to_string();
+                let mut msg = "CosyVoice 响应缺少 output.audio.url".to_string();
                 if let (Some(c), Some(m)) = (&code, &message) {
                     msg.push_str(&format!(" (code={}, message={})", c, m));
                 } else if let Some(m) = &message {
@@ -366,18 +360,7 @@ impl TtsProvider for CosyVoiceClient {
                 anyhow!(msg)
             })?;
 
-        // data URI 可能为 "data:audio/wav;base64,xxxxx"，也可能为纯 base64。
-        // 以 "data:" 开头时取第一个逗号之后的部分，否则整段当 base64。
-        let b64 = if data_uri.starts_with("data:") {
-            data_uri.split_once(',').map(|(_, b)| b).unwrap_or("")
-        } else {
-            data_uri.as_str()
-        };
-        if b64.is_empty() {
-            return Err(anyhow!("CosyVoice 响应 data 为空，无法解码音频"));
-        }
-
-        let audio = base64_decode(b64)?;
+        let audio = http_get(&audio_url)?;
 
         Ok(TtsResponse {
             audio,
@@ -394,7 +377,7 @@ impl TtsProvider for CosyVoiceClient {
 /// - provider: "volcano" | "cosyvoice"（其余按 volcano 处理）
 /// - appid: volcano 传 AppID；cosyvoice 传 DashScope API Key
 /// - token: volcano 传 Access Token；cosyvoice 忽略
-/// - model: cosyvoice 模型名（默认 "cosyvoice-v3.5-flash"）
+/// - model: cosyvoice 模型名（默认 "cosyvoice-v3.5-plus"）
 pub fn synthesize_provider(
     provider: &str,
     appid: &str,
@@ -455,6 +438,27 @@ fn http_post_json(url: &str, auth_header: &str, body: &str) -> Result<String> {
 
     String::from_utf8(output.stdout)
         .map_err(|e| anyhow!("响应非 UTF-8: {}", e))
+}
+
+/// 通过 curl 发送 GET 请求，返回响应体字节（用于下载 CosyVoice 返回的音频 URL）
+fn http_get(url: &str) -> Result<Vec<u8>> {
+    let output = Command::new("curl")
+        .args([
+            "-s",           // 静默模式
+            "-S",           // 出错时显示错误
+            "--max-time", "60",
+            "-L",           // 跟随重定向
+            url,
+        ])
+        .output()
+        .map_err(|e| anyhow!("curl 启动失败: {}（请确认 curl 在 PATH 中）", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("curl 下载失败: {}", stderr.trim()));
+    }
+
+    Ok(output.stdout)
 }
 
 /// 生成请求 ID（时间戳 + 随机数，32 位十六进制）

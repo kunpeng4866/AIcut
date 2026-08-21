@@ -343,7 +343,7 @@ ipcMain.handle('tts:synthesize', async (_e, text: string, voice: string) => {
         '--text', text,
         '--voice', usedVoice,
         '--output', outPath,
-        '--model', tts.model || 'cosyvoice-v3.5-flash',
+        '--model', tts.model || 'cosyvoice-v3.5-plus',
       );
     }
     return { success: true, audioPath: outPath };
