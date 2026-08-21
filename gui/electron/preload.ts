@@ -83,6 +83,14 @@ contextBridge.exposeInMainWorld('aicut', {
   keying: {
     generate: (input: string, optsJson: string) =>
       ipcRenderer.invoke('keying:generate', input, optsJson),
+    onProgress: (callback: (p: any) => void) => {
+      ipcRenderer.removeAllListeners('keying:progress');
+      ipcRenderer.on('keying:progress', (_, p: any) => callback(p));
+    },
+    onError: (callback: (err: string) => void) => {
+      ipcRenderer.removeAllListeners('keying:error');
+      ipcRenderer.on('keying:error', (_, err: string) => callback(err));
+    },
   },
 
   // ── 视频超清增强（导出级后处理）──

@@ -472,18 +472,57 @@ ipcMain.handle('speech:separate', async (_e, input: string, optsJson: string) =>
 });
 
 // ── 智能抠像 ──
-ipcMain.handle('keying:generate', async (_e, input: string, optsJson: string) => {
-  try {
+// 与超清(sr:generate)同构：spawn 引擎子进程，解析其 stderr 上的 KEYPROG: 进度行，
+// 通过 event.sender.send('keying:progress', ...) 实时推给渲染层；最终 JSON 结果仍走 stdout。
+ipcMain.handle('keying:generate', (event, input: string, optsJson: string) => {
+  return new Promise((resolve) => {
     // GUI 路径：前端已在 optsJson 内塞入真实 mode（matte/manual），
     // 绝不可像旧版那样硬编码 'matte' 覆盖，否则 manual 会被当成智能抠像、guide 被忽略。
-    const opts = JSON.parse(optsJson ?? '{}');
-    const mode = opts?.mode ?? 'matte';
-    const stdout = await callEngine('keying', '--mode', mode, '--input', input ?? '', '--opts', optsJson ?? '');
-    const data = JSON.parse(stdout);
-    return { success: true, data };
-  } catch (e: any) {
-    return { success: false, error: e?.message ?? String(e) };
-  }
+    let mode = 'matte';
+    try { mode = JSON.parse(optsJson ?? '{}')?.mode ?? 'matte'; } catch { /* 用默认 */ }
+    const child = spawn(ENGINE_BIN, ['keying', '--mode', mode, '--input', input ?? '', '--opts', optsJson ?? ''], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d: Buffer) => {
+      const text = d.toString();
+      stderr += text;
+      // 解析 KEYPROG: 前缀的进度行，向渲染层推送 keying:progress 事件（含 stage/frame/total/fps/eta_sec）
+      for (const raw of text.split('\n')) {
+        const m = raw.match(/^KEYPROG:(.*)$/);
+        if (m) {
+          try { event.sender.send('keying:progress', JSON.parse(m[1])); } catch { /* 忽略坏行 */ }
+        }
+      }
+    });
+    child.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const data = JSON.parse(stdout.trim());
+          // 收尾：推送 100% 完成事件，前端据此收起进度条
+          event.sender.send('keying:progress', {
+            stage: 'done', frame: data.frames ?? 0, total: data.frames ?? 0, done: true,
+          });
+          resolve({ success: true, data });
+        } catch (e: any) {
+          const msg = '抠像结果解析失败: ' + (e?.message ?? String(e));
+          event.sender.send('keying:error', msg);
+          resolve({ success: false, error: msg });
+        }
+      } else {
+        const errMsg = stderr || `引擎退出码 ${code}`;
+        event.sender.send('keying:error', errMsg);
+        resolve({ success: false, error: errMsg });
+      }
+    });
+    child.on('error', (e: any) => {
+      const msg = e?.message ?? String(e);
+      event.sender.send('keying:error', msg);
+      resolve({ success: false, error: msg });
+    });
+  });
 });
 
 // ── 视频超清增强：逐帧 ONNX 超分，产出放大后的视频 ──

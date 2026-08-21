@@ -204,9 +204,9 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
     out
 }
 
-fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32, target_w: Option<u32>, target_h: Option<u32>) -> (Option<String>, u32, u32) {
+fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32, target_w: Option<u32>, target_h: Option<u32>, video_input_idx: &HashSet<usize>) -> (Option<String>, u32, u32) {
     let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
-    let input = match resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur) {
+    let input = match resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur, video_input_idx) {
         Some(i) => i,
         None => return (None, 0, 0),
     };
@@ -239,8 +239,17 @@ fn resolve_clip_input(
     fps: u32,
     nodes: &mut Vec<String>,
     base_dur: f64,
+    video_input_idx: &HashSet<usize>,
 ) -> Option<String> {
     if let Some(i) = asset_to_idx.get(&c.asset_id) {
+        // 素材有 asset 但可能无视频流（纯音频 mp4 / 语音剪辑产物被放到视频轨）。
+        // 此时不可引用 [i:v]，否则 ffmpeg 报 "Stream specifier 'N:v' matches no streams"。
+        // 改用透明黑底源：该 clip 在视频合成中表现为空白（透出底层），其音频仍由 [i:a] 正常取用。
+        if !video_input_idx.contains(i) {
+            let base = format!("vb{}", vci);
+            nodes.push(format!("color=c=black@0:s={}x{}:r={}:d={},format=rgba[{}]", w, h, fps, fmt(base_dur), base));
+            return Some(format!("[{}]", base));
+        }
         return Some(format!("[{}:v]", i));
     }
     if c.text.is_some() || c.subtitle.is_some() {
@@ -277,22 +286,30 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
     let mut nodes: Vec<String> = Vec::new();
 
-    // 1) 预抠像链：scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
+    // 1) 预抠像链：trim src_range + scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
+    // 源 trim 到 src_range：clip 只显示源视频 [src_start, src_end] 秒。此前静态路径
+    // （speed=1 / 线性变速）不 trim，clip 从源第 0 秒起播、时长=源全长，与预览 / ExportPipeline
+    // 的 clip_source_time 不一致；抠图 alphamerge 时 matte 全长会把 clip 可见时长拉成源全长
+    // （"1 秒抠图导出变 5 秒" 的根因）。trim 后 setpts=PTS-STARTPTS 把源时间重置为 0 起，
+    // 使后续变速 setpts（线性 1/speed·PTS 或曲线表达式）作用于 trim 后的 0..src_dur 域。
+    let src_start = c.src_range.start;
+    let src_dur = (c.src_range.end - c.src_range.start).max(0.01);
+    let trim_src = format!("trim=start={}:duration={},setpts=PTS-STARTPTS", fmt(src_start), fmt(src_dur));
     let mut pre_label = format!("{}p", label);
     let mut pre = match (&sx_a, &sy_a) {
         (Some(ex), Some(ey)) => format!(
-            "{}scale=w='trunc(({})*{}/2)*2':h='trunc(({})*{}/2)*2':eval=frame",
-            input, ex, base_w, ey, base_h
+            "{}{},scale=w='trunc(({})*{}/2)*2':h='trunc(({})*{}/2)*2':eval=frame",
+            input, trim_src, ex, base_w, ey, base_h
         ),
         (Some(ex), None) => format!(
-            "{}scale=w='trunc(({})*{}/2)*2':h={}:eval=frame",
-            input, ex, base_w, sh
+            "{}{},scale=w='trunc(({})*{}/2)*2':h={}:eval=frame",
+            input, trim_src, ex, base_w, sh
         ),
         (None, Some(ey)) => format!(
-            "{}scale=w={}:h='trunc(({})*{}/2)*2':eval=frame",
-            input, sw, ey, base_h
+            "{}{},scale=w={}:h='trunc(({})*{}/2)*2':eval=frame",
+            input, trim_src, sw, ey, base_h
         ),
-        (None, None) => format!("{}scale={}:{}", input, sw, sh),
+        (None, None) => format!("{}{},scale={}:{}", input, trim_src, sw, sh),
     };
     // setsar=1：scale 后强制正方形像素。非 1:1 SAR 素材 scale 会保留 SAR 导致显示尺寸≠sw×sh，
     // 非均匀缩放 (scale_x≠scale_y) 也会引入 SAR，此处归零保证输出即为 sw×sh 的方形像素。
@@ -316,7 +333,9 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     }
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
-    if let Some(expr) = build_speed_curve_expr(curve, c.src_range.start, dur) {
+    // 源已在上方 trim 到 src_range 并 setpts=PTS-STARTPTS（时间从 0 起），
+    // 故曲线 setpts 的源基准偏移改传 0（原 src_range.start 会与 trim 双重偏移）。
+    if let Some(expr) = build_speed_curve_expr(curve, 0.0, dur) {
         pre.push_str(&format!(",setpts={}", expr));
     } else if (c.speed - 1.0).abs() > 0.001 {
         pre.push_str(&format!(",setpts={}*PTS", fmt(1.0 / c.speed)));
@@ -467,9 +486,14 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
             // [0,seg_dur] 而非正确的 [s0,s1]，导致逐帧变化的真实 matte（rmbg/modnet）在
             // 段边界之后严重时间错位（实测段1 较静态参考 PSNR 仅 ~30dB）。此处对 matte 同样
             // trim+setpts，使其与源段严格对齐。
+            // 注意：matte 是完整源视频（帧号从源第 0 帧起），而源 pre 链已在上方 trim 到
+            // src_range（clip 相对帧），故 matte 的帧区间须加 src_start*fps 偏移。
+            let msf = ((src_start + *s0) * (fps as f64)).round() as i64;
+            let mut mef = ((src_start + *s1) * (fps as f64)).round() as i64;
+            if mef <= msf { mef = msf + 1; }
             nodes.push(format!(
                 "[{mi}:v]trim=start_frame={sf}:end_frame={ef},setpts=PTS-STARTPTS,scale={sw}:{sh},geq=lum='{geq_expr}'{clip_flip}[{mt}]",
-                mi = matte_idx.unwrap(), sf = sf, ef = ef, sw = sw, sh = sh, clip_flip = clip_flip
+                mi = matte_idx.unwrap(), sf = msf, ef = mef, sw = sw, sh = sh, clip_flip = clip_flip
             ));
             // trim+setpts 后的源再 alphamerge 时，必须显式转成 yuva420p，否则 ffmpeg 会
             // 丢失/损坏 alpha，导致背景色偏色（实测变成粉色）。
@@ -565,9 +589,12 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
             t = fmt(thr), g = fmt(gain)
         );
         let mt_label = format!("{}mt", label);
-        // matte 输入先缩放到与源一致尺寸（灰度 mp4 与源同分辨率；显式 scale 防尺寸偏差），
-        // 再用 geq 把 luma 经 threshold/softness 映射为 alpha 层（luma=alpha）。
-        nodes.push(format!("[{mi}:v]scale={sw}:{sh},geq=lum='{geq_expr}'{clip_flip}[{mt_label}]", sw = sw, sh = sh, clip_flip = clip_flip));
+        // matte 输入先 trim 到与源一致的 src_range（关键：matte 是对整个源视频生成的，
+        // 若 clip 只取源 [src_start, src_end]，matte 必须同步 trim，否则 alphamerge 时
+        // matte 全长会把 clip 可见时长拉成源全长——"1 秒抠图导出变 5 秒" 的 matte 侧根因），
+        // 再缩放到与源一致尺寸、geq 把 luma 经 threshold/softness 映射为 alpha 层。
+        nodes.push(format!("[{mi}:v]trim=start={}:duration={},setpts=PTS-STARTPTS,scale={sw}:{sh},geq=lum='{geq_expr}'{clip_flip}[{mt_label}]",
+            fmt(src_start), fmt(src_dur), sw = sw, sh = sh, clip_flip = clip_flip));
         let va = format!("{}va", label);
         // alphamerge 取第二个输入（matte）的 luma 作为 alpha；源(可能 RGBA/YUV)叠加 alpha → 透明视频。
         nodes.push(format!("[{pre_tail}][{mt_label}]alphamerge[{va}]"));
@@ -685,6 +712,32 @@ fn input_has_audio(path: &str) -> bool {
     true
 }
 
+/// 探测输入文件是否含有视频流。
+///
+/// 用于视频回退：无视频流的素材（如纯音频 mp4 / AI 语音剪辑产物被放到视频轨）
+/// 不应被当作视频源，否则会生成 `[idx:v]` 指向不存在的流，导致 ffmpeg 报
+/// "Stream specifier 'N:v' matches no streams" → 导出失败。
+///
+/// 探测失败（ffprobe 缺失 / 路径异常 / 非本地文件）时保守返回 `true`，
+/// 保持原行为（不跳过），避免误删本应有视频的素材。
+fn input_has_video(path: &str) -> bool {
+    if let Ok(out) = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-select_streams", "v",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            path,
+        ])
+        .output()
+    {
+        if out.status.success() {
+            return !String::from_utf8_lossy(&out.stdout).trim().is_empty();
+        }
+    }
+    true
+}
+
 /// 核心：构建 RenderCommand
 pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     let mut cmd = ffmpeg::RenderCommand::default();
@@ -734,6 +787,12 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
     // 修复：无音轨视频（如静音 speech 叠加）被回退当音源 → `[idx:a]` 指向不存在的流 → 导出失败。
     let audio_input_idx: HashSet<usize> = (0..cmd.inputs.len())
         .filter(|&i| input_has_audio(&cmd.inputs[i].path))
+        .collect();
+    // 预探测每个输入文件是否含视频流，供视频节点构建时跳过无视频流素材。
+    // 修复：纯音频素材（如语音剪辑产物）被放到视频轨时，引用其 [idx:v] 会因流不存在
+    // 导致 ffmpeg "Stream specifier 'N:v' matches no streams" → 导出失败；改为透明黑底代替。
+    let video_input_idx: HashSet<usize> = (0..cmd.inputs.len())
+        .filter(|&i| input_has_video(&cmd.inputs[i].path))
         .collect();
     // 智能/手动抠像(smart/manual)的 matte 素材：作为额外输入加入本次导出（独立 -i），
     // 记录其全局输入索引供 build_video_chain 引用 [idx:v]。两者共用同一条 alphamerge 路径。
@@ -796,7 +855,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             if clips.len() == 1 {
                 let c = clips[0];
                 let src = format!("vs{}", vci);
-                let Some(input) = resolve_clip_input(c, vci, &asset_to_idx, w, h, project.canvas.fps, &mut nodes, 1e9) else { vci += 1; continue; };
+                let Some(input) = resolve_clip_input(c, vci, &asset_to_idx, w, h, project.canvas.fps, &mut nodes, 1e9, &video_input_idx) else { vci += 1; continue; };
                 // contain 适配：预览对每个视频 clip 先按源宽高比等比缩进画布（留黑边），
                 // 再乘用户缩放。导出此前直接按画布尺寸缩放（比例失真 + 叠加错位），
                 // 与预览不一致（# 问题②：窄素材被拉伸铺满、与预览看到的不同）。
@@ -837,7 +896,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c0sy = keyframed(c0, "transform.scaleY", c0.transform.scale_y).max(0.01);
                 let c0sw = (c0fit_w as f64 * c0sx).round().max(2.0) as u32;
                 let c0sh = (c0fit_h as f64 * c0sy).round().max(2.0) as u32;
-                let (Some(mut track_acc), tacc_w, tacc_h) = build_clip_chain(c0, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(c0sw), Some(c0sh)) else { vci += 1; continue; };
+                let (Some(mut track_acc), tacc_w, tacc_h) = build_clip_chain(c0, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(c0sw), Some(c0sh), &video_input_idx) else { vci += 1; continue; };
                 // 归一化首片段到画布尺寸（菱形居中到 transform.(x,y)）
                 let c0dur = (c0.timeline_out - c0.timeline_in).max(0.1);
                 let c0cv = format!("cv{}", vci);
@@ -862,7 +921,7 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let csy = keyframed(curr, "transform.scaleY", curr.transform.scale_y).max(0.01);
                     let csw = (cfit_w as f64 * csx).round().max(2.0) as u32;
                     let csh = (cfit_h as f64 * csy).round().max(2.0) as u32;
-                    let (Some(curr_label), cur_w, cur_h) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(csw), Some(csh)) else { vci += 1; continue; };
+                    let (Some(curr_label), cur_w, cur_h) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(csw), Some(csh), &video_input_idx) else { vci += 1; continue; };
                     vci += 1;
                     // 归一化当前片段到画布尺寸（菱形居中到 transform.(x,y)）
                     let cdur = (curr.timeline_out - curr.timeline_in).max(0.1);

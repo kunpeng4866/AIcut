@@ -135,6 +135,17 @@ export interface SRProgress {
   eta_sec?: number;   // 预计剩余秒数
   done?: boolean;     // 是否为收尾 100% 事件
 }
+// 智能抠像实时进度（由 python/keying/core.py 经 Rust keying.rs → Electron 转发，逐帧上报）
+export interface KeyingProgress {
+  stage?: 'load' | 'infer' | 'done' | string; // 当前阶段：模型加载/逐帧推理/完成
+  frame?: number;     // 已处理帧数
+  total?: number;     // 总帧数（0=未知，前端显示不确定进度）
+  fps?: number;       // 当前推理速度（帧/秒）
+  eta_sec?: number;   // 预计剩余秒数
+  model?: string;     // 模型标识（modnet / rmbg2 / manual）
+  use_real?: boolean; // 是否加载了真实模型（false=占位 matte）
+  done?: boolean;     // 是否为收尾 100% 事件
+}
 // 转场配置（与后端 Transition 结构对应）
 export type TransitionType =
   | 'none'
@@ -368,6 +379,12 @@ export interface AicutAPI {
     generate(input: string, optsJson: string): Promise<{ success: boolean; data?: SRResult; error?: string }>;
     onProgress(callback: (p: SRProgress) => void): void;
     onDone(callback: () => void): void;
+    onError(callback: (err: string) => void): void;
+  };
+  // 智能抠像（生成灰度 matte 视频）
+  keying: {
+    generate(input: string, optsJson: string): Promise<{ success?: boolean; data?: { mattePath: string; duration: number; width: number; height: number; fps: number; frames: number; model?: string; mode?: string; error?: string }; error?: string }>;
+    onProgress(callback: (p: KeyingProgress) => void): void;
     onError(callback: (err: string) => void): void;
   };
   // 插件

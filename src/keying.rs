@@ -7,8 +7,11 @@
 //! 错误统一用 `crate::AppError::Render(String)` 返回，保持与 `speech_analyze` 一致的风格。
 
 use serde_json::Value;
+use std::io::{BufRead, Read};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use crate::AppError;
 
@@ -54,7 +57,7 @@ pub fn keying_generate(input: &str, opts_json: &str) -> Result<Value, AppError> 
         .unwrap_or(false);
     let omp_threads = if is_rmbg2 { "8" } else { "1" };
 
-    let output = Command::new(&py)
+    let mut child = Command::new(&py)
         .env("PYTHONIOENCODING", "utf-8") // Windows 下管道 stdout 默认按本地 codepage，中文会乱码/解析失败
         .env("PYTHONUTF8", "1")
         // 限单线程，避免 OpenMP/多线程在部分环境下的不稳定（rmbg2 除外，见上）
@@ -63,19 +66,62 @@ pub fn keying_generate(input: &str, opts_json: &str) -> Result<Value, AppError> 
         .arg(bridge_str)
         .arg(input)
         .arg(opts_json)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| AppError::Render(format!("无法启动 Python ({})：{}", py, e)))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // 后台线程读 bridge.py stderr：进度 JSON 行（含 stage 或 frame+total）加 KEYPROG: 前缀
+    // 转发到本进程 stderr，供上层（main.ts）解析后向渲染层推送 keying:progress 事件；
+    // 其余日志行（[core] 日志 / 错误回溯）收集进 err_buf 供失败时上报。
+    let stderr_child = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Render("无法获取 Python stderr 管道".into()))?;
+    let err_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let err_buf_fwd = Arc::clone(&err_buf);
+    let forwarder = thread::spawn(move || {
+        let reader = std::io::BufReader::new(stderr_child);
+        for line in reader.lines().flatten() {
+            let trimmed = line.trim();
+            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                // 进度行：带 stage 字段，或同时含 frame/total（与 core.py _report_progress 约定对齐）
+                if v.get("stage").is_some()
+                    || (v.get("frame").is_some() && v.get("total").is_some())
+                {
+                    eprintln!("KEYPROG:{}", trimmed);
+                    continue;
+                }
+            }
+            // 非进度行：保留为错误上下文
+            if let Ok(mut g) = err_buf_fwd.lock() {
+                g.push_str(&line);
+                g.push('\n');
+            }
+        }
+    });
+
+    // 主线程读最终 JSON 结果（stdout）
+    let mut stdout_buf = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut stdout_buf)
+            .map_err(|e| AppError::Render(format!("读取 Python 输出失败: {}", e)))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| AppError::Render(format!("等待 Python 进程失败: {}", e)))?;
+    let _ = forwarder.join();
+
+    if !status.success() {
+        let err_ctx = err_buf.lock().map(|g| g.clone()).unwrap_or_default();
         return Err(AppError::Render(format!(
             "keying generate 失败 (退出码 {:?}): {}",
-            output.status.code(),
-            stderr.chars().take(1000).collect::<String>()
+            status.code(),
+            err_ctx.chars().take(1000).collect::<String>()
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout_buf;
     let v: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
         AppError::Render(format!(
             "keying generate 输出不是合法 JSON: {} (原始前 200 字符: {})",

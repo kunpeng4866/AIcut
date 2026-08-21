@@ -193,6 +193,19 @@ def _ensure_rmbg2_model(log) -> str | None:
     return None
 
 
+def _report_progress(d: dict) -> None:
+    """把进度字典以**纯 JSON 行**写入 stderr，供上层（Rust/Electron）解析并推送前端。
+
+    注意：必须是无前缀的纯 JSON 行，区别于 `[core]` 前缀的普通日志行；
+    Rust 侧（keying.rs）据此把进度行以 `KEYPROG:` 前缀转发。
+    字段约定：stage(load/infer/done) / frame / total / fps / eta_sec / model。
+    """
+    try:
+        sys.stderr.write(json.dumps(d, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # ───────────────────────── 推理器 ─────────────────────────
 
@@ -225,6 +238,9 @@ class _Predictor:
             try:
                 import onnxruntime as ort  # type: ignore
                 import numpy as np  # type: ignore
+                # 抑制 onnxruntime 内部告警（如动态 shape 的 buffer 复用 shape-mismatch 告警）：
+                # 这些告警刷屏 stderr，会淹没进度 JSON 行、干扰上层（Rust/Electron）的进度解析。
+                ort.set_default_logger_severity(3)
                 self.np = np
                 so = ort.SessionOptions()
                 # MODNet 轻量，单线程避免与其他进程争核；BiRefNet(RMBG-2.0) 极重，
@@ -418,6 +434,10 @@ def generate_matte(input_path: str, opts: dict) -> dict:
     refine = bool(opts.get("refine", True))
     temporal = bool(opts.get("temporal", True))
     infer_size = int(opts.get("infer_size", 0) or 0)
+    # 总帧数（duration 缺失时为 0，前端据此显示「不确定进度」）
+    total_frames = int(round(probe["duration"] * fps)) if probe["duration"] > 0 else 0
+    _report_progress({"stage": "load", "model": model_kind, "total": total_frames,
+                      "use_real": bool(model_path)})
     predictor = _Predictor(model_path, log, model_kind, infer_size)
 
     ff = _ffmpeg_exe()
@@ -463,6 +483,7 @@ def generate_matte(input_path: str, opts: dict) -> dict:
 
     read_n = 0
     written = 0
+    infer_t0 = time.time()
     try:
         while True:
             raw = reader.stdout.read(frame_bytes)
@@ -474,6 +495,14 @@ def generate_matte(input_path: str, opts: dict) -> dict:
                 matte = _refine_alpha(rgb, matte, min_side)
             ring.append(matte)
             read_n += 1
+            # 进度上报：每 5 帧（或首帧）写一行纯 JSON 进度到 stderr
+            if read_n == 1 or read_n % 5 == 0:
+                el = time.time() - infer_t0
+                fps_i = read_n / el if el > 0 else 0.0
+                remain = max(0, total_frames - read_n) if total_frames > 0 else 0
+                eta = remain / fps_i if fps_i > 0 else 0.0
+                _report_progress({"stage": "infer", "frame": read_n, "total": total_frames,
+                                  "fps": round(fps_i, 2), "eta_sec": round(eta, 1)})
             L = len(ring)
             if L >= 1 and read_n > delay:
                 # 输出「延迟 delay 帧之前」的那一帧（居中窗中心）
@@ -690,6 +719,8 @@ def generate_manual_matte(input_path: str, opts: dict) -> dict:
          "-an", "-c:v", "libx264", "-pix_fmt", "gray", output_path],
         stdin=subprocess.PIPE,
     )
+    _report_progress({"stage": "load", "model": "manual", "total": N})
+    manual_t0 = time.time()
     try:
         for i in range(N):
             base_i = _base_for_frame(i)
@@ -705,6 +736,13 @@ def generate_manual_matte(input_path: str, opts: dict) -> dict:
             ) / 255.0
             gray = (np.clip(alpha_full, 0, 1) * 255).astype(np.uint8)
             writer.stdin.write(gray.tobytes())
+            if (i + 1) == 1 or (i + 1) % 5 == 0:
+                el = time.time() - manual_t0
+                fps_i = (i + 1) / el if el > 0 else 0.0
+                remain = max(0, N - (i + 1))
+                eta = remain / fps_i if fps_i > 0 else 0.0
+                _report_progress({"stage": "infer", "frame": i + 1, "total": N,
+                                  "fps": round(fps_i, 2), "eta_sec": round(eta, 1)})
     finally:
         if writer.stdin:
             writer.stdin.close()

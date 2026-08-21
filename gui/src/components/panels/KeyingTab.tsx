@@ -6,7 +6,7 @@ import { useState, useRef, useEffect } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { createDefaultKeying, uid } from '../../utils/clipFactories';
-import type { ClipConfig, KeyingConfig, KeyingMode, BackgroundType, KeyingBackground } from '../../types';
+import type { ClipConfig, KeyingConfig, KeyingMode, BackgroundType, KeyingBackground, KeyingProgress } from '../../types';
 
 // 本地 pathToUrl（与 WebGPUPreview/PreviewCanvas 内实现一致，避免循环依赖）
 const pathToUrl = (path: string): string => {
@@ -112,6 +112,42 @@ function GenerateButton({ processing, disabled, onClick, children }: {
   );
 }
 
+// 抠像实时进度条：显示阶段 / 帧 / 速度 / 预计剩余（与 SRTab 同范式）
+const KEYING_STAGE_LABEL: Record<string, string> = { load: '模型加载中', infer: '逐帧推理中', done: '完成' };
+function keyingProgressPct(p: KeyingProgress | null): number {
+  if (!p) return 0;
+  if (p.done) return 100;
+  if (p.total && p.total > 0 && typeof p.frame === 'number') {
+    return Math.min(100, Math.round((p.frame / p.total) * 100));
+  }
+  return -1; // 总帧未知 → 不确定进度
+}
+function KeyingProgressBar({ p }: { p: KeyingProgress | null }) {
+  if (!p) return null;
+  const pct = keyingProgressPct(p);
+  const label = (p.stage && KEYING_STAGE_LABEL[p.stage]) || '处理中';
+  const detail = [
+    typeof p.frame === 'number' && p.total ? `${p.frame}/${p.total} 帧` : (typeof p.frame === 'number' ? `${p.frame} 帧` : ''),
+    p.fps ? `${p.fps.toFixed(1)} 帧/秒` : '',
+    p.eta_sec && p.eta_sec > 0 ? `预计剩余 ${Math.round(p.eta_sec)} 秒` : '',
+  ].filter(Boolean).join(' · ');
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#aaa', fontSize: 11, marginBottom: 4 }}>
+        <span>{label}{detail ? ` · ${detail}` : ''}</span>
+        {pct >= 0 && <span>{pct}%</span>}
+      </div>
+      <div style={{ height: 4, background: '#0f3460', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{
+          width: pct >= 0 ? `${pct}%` : '100%', height: '100%',
+          background: '#e94560', borderRadius: 2,
+          ...(pct < 0 ? { animation: 'none', opacity: 0.4 } : {}),
+        }} />
+      </div>
+    </div>
+  );
+}
+
 const MODES: { value: KeyingMode; label: string }[] = [
   { value: 'chroma', label: '色度' },
   { value: 'smart', label: '智能' },
@@ -155,7 +191,7 @@ function matteOutputPath(assetPath: string): string {
 //   前景涂抹 = 不透明白色 (R=255,A=255)；背景涂抹 = 不透明黑色 (R=0,A=255)；未涂抹 = A=0 透明。
 type Brush = 'fg' | 'bg' | 'erase';
 function ManualPaintCanvas({ videoPath, canvasRef, videoRef, currentFrame, fps, frameCount, onFrameChange, savedGuide, onCapture, onClearFrame, guidesRef }: {
-  videoPath: string; canvasRef: React.RefObject<HTMLCanvasElement>; videoRef: React.RefObject<HTMLVideoElement>;
+  videoPath?: string; canvasRef: React.RefObject<HTMLCanvasElement>; videoRef: React.RefObject<HTMLVideoElement>;
   currentFrame: number; fps: number; frameCount: number; onFrameChange: (f: number) => void;
   savedGuide: string | null; onCapture: (f: number, url: string) => void; onClearFrame: (f: number) => void;
   guidesRef: React.MutableRefObject<Map<number, string>>;
@@ -224,14 +260,20 @@ function ManualPaintCanvas({ videoPath, canvasRef, videoRef, currentFrame, fps, 
   const maxFrame = Math.max(0, frameCount - 1);
   return (
     <div>
-      <div style={{ position: 'relative', width: '100%', aspectRatio: String(aspect), background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 8 }}>
-        <video ref={videoRef} src={videoPath} muted playsInline
-          onLoadedMetadata={setupCanvas}
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 1, pointerEvents: 'none' }} />
-        <canvas ref={canvasRef}
-          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', cursor: 'crosshair', touchAction: 'none', zIndex: 2, pointerEvents: 'auto' }} />
-      </div>
+      {videoPath ? (
+        <div style={{ position: 'relative', width: '100%', aspectRatio: String(aspect), background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 8 }}>
+          <video ref={videoRef} src={videoPath} muted playsInline
+            onLoadedMetadata={setupCanvas}
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 1, pointerEvents: 'none' }} />
+          <canvas ref={canvasRef}
+            onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', cursor: 'crosshair', touchAction: 'none', zIndex: 2, pointerEvents: 'auto' }} />
+        </div>
+      ) : (
+        <div style={{ width: '100%', aspectRatio: '16 / 9', background: '#0f0f1a', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#e9a23b', fontSize: 11, textAlign: 'center', padding: 12, marginBottom: 8 }}>
+          源视频不可用，无法在画布上涂抹（请确认素材已正确导入且路径有效）
+        </div>
+      )}
 
       {/* 帧导航 */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 6, alignItems: 'center' }}>
@@ -283,10 +325,17 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
   const commit = (next: KeyingConfig | undefined) => updateClip(trackId, clip.id, { keying: next });
   const commitLive = (next: KeyingConfig) => updateClipLive(trackId, clip.id, { keying: next });
 
-  // 智能/手动抠像（P1/P2）专属状态：处理中 + 错误提示
+  // 智能/手动抠像（P1/P2）专属状态：处理中 + 错误提示 + 实时进度
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<KeyingProgress | null>(null);
   const paintCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // 订阅抠像进度/错误事件（与 SRTab 同范式：挂载时注册，组件生命周期内持续生效）
+  useEffect(() => {
+    window.aicut.keying.onProgress((p: KeyingProgress) => setProgress(p));
+    window.aicut.keying.onError((err: string) => setError(err));
+  }, []);
 
   // 逐帧 refine（前端）：按帧采集 guide 并打包成 guides 数组
   const guidesRef = useRef<Map<number, string>>(new Map()); // frameIndex -> dataURL
@@ -407,13 +456,14 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     const threshold = keying.threshold ?? 0.5;
     const output = matteOutputPath(assetPath); // 绝对路径 <stem>_matte.mp4
     setError(null);
+    setProgress(null);
     setProcessing(true);
     try {
       // 结构变更：先压一次历史快照（生成会 addAsset + updateClip，二者内部亦各压快照）
       pushHistorySnapshot();
       // 与 speech:* 一致的 IPC 契约：handler 返回 { success, data, error } 对象，
       // 不可对返回值再做 JSON.parse（否则会得到 "[object Object]" is not valid JSON）。
-      const res = await (window as unknown as { aicut: { keying: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.keying.generate(
+      const res = await window.aicut.keying.generate(
         assetPath,
         JSON.stringify({ mode: 'matte', model, threshold, fps: asset.fps ?? 30, output })
       );
@@ -465,10 +515,11 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
     const base = matteOutputPath(assetPath).replace(/_matte\.mp4$/, '');
     const output = `${base}_manual_matte.mp4`;
     setError(null);
+    setProgress(null);
     setProcessing(true);
     try {
       pushHistorySnapshot();
-      const res = await (window as unknown as { aicut: { keying: { generate(p: string, cfg: string): Promise<{ success?: boolean; error?: string; data?: unknown }> } } }).aicut.keying.generate(
+      const res = await window.aicut.keying.generate(
         assetPath,
         JSON.stringify({ mode: 'manual', guides, smartMattePath, threshold, softness, fps: asset.fps ?? 30, output })
       );
@@ -557,6 +608,8 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
 
           {keying.matteAssetId && MatteAdjust}
 
+          {processing && <KeyingProgressBar p={progress} />}
+
           <GenerateButton processing={processing} disabled={disabled} onClick={runSmartKeying}>
             {processing ? '智能抠像处理中…' : (keying.matteAssetId ? '重新生成蒙版' : '开始智能抠像')}
           </GenerateButton>
@@ -576,21 +629,19 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
             {keying.matteAssetId ? '当前基于已有蒙版修正边缘。' : '建议先做智能抠像，再手动修补边缘。'}
           </div>
 
-          {srcAsset?.path && (
-            <ManualPaintCanvas
-              videoPath={pathToUrl(srcAsset.path)}
-              canvasRef={paintCanvasRef}
-              videoRef={videoRef}
-              currentFrame={currentFrame}
-              fps={fps}
-              frameCount={frameCount}
-              onFrameChange={setCurrentFrame}
-              savedGuide={guidesRef.current.get(currentFrame) ?? null}
-              onCapture={handleCapture}
-              onClearFrame={handleClearFrame}
-              guidesRef={guidesRef}
-            />
-          )}
+          <ManualPaintCanvas
+            videoPath={srcAsset?.path ? pathToUrl(srcAsset.path) : undefined}
+            canvasRef={paintCanvasRef}
+            videoRef={videoRef}
+            currentFrame={currentFrame}
+            fps={fps}
+            frameCount={frameCount}
+            onFrameChange={setCurrentFrame}
+            savedGuide={guidesRef.current.get(currentFrame) ?? null}
+            onCapture={handleCapture}
+            onClearFrame={handleClearFrame}
+            guidesRef={guidesRef}
+          />
 
           {keying.matteAssetId ? (
             <div style={{ color: '#7CFC9A', fontSize: 11, marginBottom: 8 }}>已生成蒙版，可重新涂抹后生成</div>
@@ -599,6 +650,8 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
           )}
 
           {keying.matteAssetId && MatteAdjust}
+
+          {processing && <KeyingProgressBar p={progress} />}
 
           <GenerateButton processing={processing} disabled={disabled} onClick={runManualKeying}>
             {processing ? '处理中…' : (keying.matteAssetId ? '重新生成蒙版' : '生成蒙版')}
