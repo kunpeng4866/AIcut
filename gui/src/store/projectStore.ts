@@ -68,8 +68,8 @@ interface ProjectState {
   project: ProjectConfig;
   isDirty: boolean;
   filePath: string | null;
-  // 复制缓冲区：源轨 + 轨类型 + 片段深拷贝（不参与工程序列化）
-  clipboard: { trackId: string; trackType: string; clip: ClipConfig } | null;
+  // 复制缓冲区：支持多片段（源轨 + 轨类型 + 片段深拷贝，不参与工程序列化）
+  clipboard: { trackId: string; trackType: string; clip: ClipConfig }[];
   setProject: (p: ProjectConfig) => void;
   // 设置工程画布尺寸（即画幅比例）。离散动作（下拉选择），走 mutate 压一次快照即可。
   setCanvasSize: (width: number, height: number) => void;
@@ -100,7 +100,9 @@ interface ProjectState {
   removeClip: (trackId: string, clipId: string) => void;
   // 复制/粘贴：把片段存入剪贴板，再粘贴到指定时间位置（目标轨=源轨或同类型轨）
   copyClip: (trackId: string, clipId: string) => void;
+  copyClips: (entries: { trackId: string; clipId: string }[]) => void;
   pasteClip: (timelineIn: number) => string | null;
+  pasteClips: (timelineIn?: number) => string[];
   updateClip: (trackId: string, clipId: string, updates: Partial<ClipConfig>) => void;
   setSpeed: (trackId: string, clipId: string, speed: number) => void;
   // 曲线编辑（拖拽过程）：仅更新曲线，不改时长、不做磁吸重排（避免 X 轴抖动与历史快照爆炸）
@@ -149,7 +151,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     project: { canvas: { width: 1920, height: 1080, fps: 30 }, assets: [], tracks: [{ id: uid('track'), type: 'video', order: 0, clips: [], locked: false, visible: true, muted: false, solo: false, isMain: true, volume: 1, pan: 0 }] },
     isDirty: false,
     filePath: null,
-    clipboard: null,
+    clipboard: [],
     setProject: (p) => {
       // 确保加载的工程有主视频轨
       const tracks = sortTracks(p.tracks);
@@ -282,38 +284,58 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
       return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.filter((c) => c.id !== clipId)));
     }),
-    // 复制：把片段深拷贝进剪贴板（不压历史快照，纯 UI 状态）
-    copyClip: (trackId, clipId) => {
-      const track = get().project.tracks.find((t) => t.id === trackId);
-      const clip = track?.clips.find((c) => c.id === clipId);
-      if (!track || !clip) return;
-      set({ clipboard: { trackId, trackType: track.type, clip: JSON.parse(JSON.stringify(clip)) } });
-    },
-    // 粘贴：克隆剪贴板片段，换新 id，放到指定时间位置。
-    // 目标轨优先源轨（仍存在）；否则同类型轨；否则新建同类型轨。过 locked 守卫，返回新 clip id。
-    pasteClip: (timelineIn) => {
-      const { clipboard } = get();
-      if (!clipboard) return null;
+    // 复制单片段（向后兼容）：内部走 copyClips
+    copyClip: (trackId, clipId) => { get().copyClips([{ trackId, clipId }]); },
+    // 复制多个：收集每个 id 所在轨与片段深拷贝，批量入剪贴板（不压历史快照，纯 UI 状态）
+    copyClips: (entries) => {
       const p = get().project;
-      let destTrack = p.tracks.find((t) => t.id === clipboard.trackId);
-      if (!destTrack) {
-        destTrack = p.tracks.find((t) => t.type === clipboard.trackType);
+      const collected = entries
+        .map(({ trackId, clipId }) => {
+          const track = p.tracks.find((t) => t.id === trackId);
+          const clip = track?.clips.find((c) => c.id === clipId);
+          return clip && track ? { trackId, trackType: track.type, clip: JSON.parse(JSON.stringify(clip)) as ClipConfig } : null;
+        })
+        .filter((x): x is { trackId: string; trackType: string; clip: ClipConfig } => x !== null);
+      if (collected.length) set({ clipboard: collected });
+    },
+    // 粘贴单个（向后兼容）：粘贴剪贴板全部条目，返回首个新 id
+    pasteClip: (timelineIn) => { const ids = get().pasteClips(timelineIn); return ids[0] ?? null; },
+    // 粘贴多个：保持相对位置整体右移粘贴到目标轨（源轨仍存在则优先，否则同类型轨，否则新建）。
+    // 目标时间 = timelineIn（默认相对原位置 +1s），各条目按最小原起点对齐偏移；过 locked 守卫。
+    pasteClips: (timelineIn) => {
+      const { clipboard } = get();
+      if (!clipboard.length) return [];
+      const p = get().project;
+      const minOrigIn = Math.min(...clipboard.map((c) => c.clip.timelineIn));
+      const baseIn = timelineIn ?? minOrigIn + 1;
+      const offset = baseIn - minOrigIn;
+      const newIds: string[] = [];
+      for (const item of clipboard) {
+        let destTrack = p.tracks.find((t) => t.id === item.trackId);
         if (!destTrack) {
-          const newId = get().addTrack(clipboard.trackType as any);
-          destTrack = get().project.tracks.find((t) => t.id === newId);
+          destTrack = p.tracks.find((t) => t.type === item.trackType);
+          if (!destTrack) {
+            const newId = get().addTrack(item.trackType as any);
+            destTrack = get().project.tracks.find((t) => t.id === newId);
+          }
         }
+        if (!destTrack || destTrack.locked) continue;
+        const dur = item.clip.timelineOut - item.clip.timelineIn;
+        const newIn = Math.max(0, item.clip.timelineIn + offset);
+        const newClip: ClipConfig = {
+          ...JSON.parse(JSON.stringify(item.clip)),
+          id: uid('clip'),
+          timelineIn: newIn,
+          timelineOut: newIn + dur,
+        };
+        get().addClip(destTrack.id, newClip);
+        newIds.push(newClip.id);
       }
-      if (!destTrack || destTrack.locked) return null;
-      const dur = clipboard.clip.timelineOut - clipboard.clip.timelineIn;
-      const newClip: ClipConfig = {
-        ...JSON.parse(JSON.stringify(clipboard.clip)),
-        id: uid('clip'),
-        timelineIn: Math.max(0, timelineIn),
-        timelineOut: Math.max(0, timelineIn) + dur,
-      };
-      get().addClip(destTrack.id, newClip);
-      useUIStore.getState().selectClip(destTrack.id, newClip.id);
-      return newClip.id;
+      if (newIds.length) {
+        const last = clipboard[clipboard.length - 1];
+        useUIStore.getState().setSelection(last.trackId, newIds);
+      }
+      return newIds;
     },
     updateClip: (trackId, clipId, updates) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;

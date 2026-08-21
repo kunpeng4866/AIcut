@@ -10,6 +10,7 @@ export type RightPanel = 'transform' | 'filters' | 'effects' | 'audio' | 'keyfra
 interface UIState {
   selectedTrackId: string | null;
   selectedClipId: string | null;
+  selectedClipIds: string[];
 
   currentTime: number;       // 播放头位置（秒）
   isPlaying: boolean;
@@ -47,7 +48,8 @@ interface UIState {
   rightPanelWidth: number;   // 右面板宽度（默认 280）
   timelineHeight: number;    // 时间轴高度（默认 220）
 
-  selectClip: (trackId: string, clipId: string) => void;
+  selectClip: (trackId: string, clipId: string, mode?: 'replace' | 'toggle') => void;
+  setSelection: (trackId: string | null, ids: string[]) => void;
   clearSelection: () => void;
   setCurrentTime: (t: number) => void;
   togglePlay: () => void;
@@ -65,6 +67,7 @@ interface UIState {
 export const useUIStore = create<UIState>((set) => ({
   selectedTrackId: null,
   selectedClipId: null,
+  selectedClipIds: [],
 
   currentTime: 0,
   isPlaying: false,
@@ -105,8 +108,21 @@ export const useUIStore = create<UIState>((set) => ({
   rightPanelWidth: 280,
   timelineHeight: 220,
 
-  selectClip: (trackId, clipId) => set({ selectedTrackId: trackId, selectedClipId: clipId }),
-  clearSelection: () => set({ selectedTrackId: null, selectedClipId: null }),
+  selectClip: (trackId, clipId, mode = 'replace') => set((s) => {
+    if (mode === 'toggle') {
+      const ids = s.selectedClipIds.includes(clipId)
+        ? s.selectedClipIds.filter((id) => id !== clipId)
+        : [...s.selectedClipIds, clipId];
+      return { selectedTrackId: trackId, selectedClipId: clipId, selectedClipIds: ids };
+    }
+    return { selectedTrackId: trackId, selectedClipId: clipId, selectedClipIds: [clipId] };
+  }),
+  setSelection: (trackId, ids) => set({
+    selectedTrackId: trackId,
+    selectedClipId: ids.length ? ids[ids.length - 1] : null,
+    selectedClipIds: ids,
+  }),
+  clearSelection: () => set({ selectedTrackId: null, selectedClipId: null, selectedClipIds: [] }),
   setCurrentTime: (t) => set({ currentTime: Math.max(0, t) }),
   togglePlay: () => set((s) => ({ isPlaying: !s.isPlaying })),
   setTimelineZoom: (z) => set({ timelineZoom: Math.max(5, Math.min(500, z)) }),

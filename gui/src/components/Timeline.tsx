@@ -168,10 +168,10 @@ function WaveformCanvas({ peaks, width, height, startTime, endTime, totalDuratio
 
 // Clip item props.
 interface ClipItemProps {
-  clip: ClipConfig; track: TrackConfig; color: string; selected: boolean; zoom: number;
+  clip: ClipConfig; track: TrackConfig; color: string; selected: boolean; zoom: number; onSelect: (additive?: boolean) => void;
   magneticSnap: boolean; clipSnap: boolean; playhead: number; clipsOnTrack: ClipConfig[];
   sameTypeTrackIds: string[];
-  onSelect: () => void; onSplit: () => void;
+  onSplit: () => void;
   onMove: (newIn: number) => void;
   onMoveToTrack: (destTrackId: string, newIn: number) => void;
   onResize: (newIn: number, newOut: number) => void; onContext: (e: React.MouseEvent) => void;
@@ -471,7 +471,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
   // Begin a move / left-resize / right-resize drag operation.
   const startDrag = (e: React.MouseEvent, mode: 'move' | 'left' | 'right') => {
     e.stopPropagation();
-    onSelect();
+    onSelect(e.shiftKey || e.ctrlKey || e.metaKey);
     if (track.locked) return; // locked tracks can't be edited
     let startX = e.clientX;
     let startIn = clip.timelineIn;
@@ -709,8 +709,10 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 }
 
 export default function Timeline() {
-  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, copyClip, pasteClip, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
-  const { selectedTrackId, selectedClipId, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, setRightView, speechOverlay } = useUIStore();
+  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, copyClips, pasteClips, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
+  const { selectedTrackId, selectedClipId, selectedClipIds, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, setSelection, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, setRightView, speechOverlay } = useUIStore();
+  // 框选（rubber-band）临时状态：仅作用于单条轨道
+  const [marquee, setMarquee] = useState<{ trackId: string; left: number; width: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 左侧轨道控制列与右侧轨道区共享同一条垂直滚动：左侧自身不出现滚动条，
   // 仅镜像右侧的 scrollTop，确保控制按钮与轨道行始终对齐（避免两侧各滚各的）。
@@ -999,23 +1001,39 @@ export default function Timeline() {
   // 复制/粘贴：Ctrl+C / Ctrl+V（粘贴位置=播放头）。
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
       // 焦点落在输入框/下拉/可编辑区域时放行，交给浏览器处理（复制粘贴/撤销文本），避免拦截。
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      const ui = useUIStore.getState();
+      // Delete / Backspace：删除所有选中的片段（一次撤销）
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (!ui.selectedClipIds.length) return;
+        e.preventDefault();
+        const proj = useProjectStore.getState();
+        proj.pushHistorySnapshot();
+        for (const id of ui.selectedClipIds) {
+          const tr = proj.project.tracks.find(tk => tk.clips.some(c => c.id === id));
+          if (tr && !tr.locked) proj.removeClip(tr.id, id);
+        }
+        ui.clearSelection();
+        return;
+      }
+      if (!(e.ctrlKey || e.metaKey)) return;
       if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); useProjectStore.getState().undo(); }
       else if (e.key === 'z' && e.shiftKey) { e.preventDefault(); useProjectStore.getState().redo(); }
       else if (e.key === 'y') { e.preventDefault(); useProjectStore.getState().redo(); }
       else if (e.key === 'c') {
-        const ui = useUIStore.getState();
-        if (!ui.selectedTrackId || !ui.selectedClipId) return;
+        if (!ui.selectedClipIds.length) return;
         e.preventDefault();
-        useProjectStore.getState().copyClip(ui.selectedTrackId, ui.selectedClipId);
+        const proj = useProjectStore.getState();
+        useProjectStore.getState().copyClips(ui.selectedClipIds.map((id) => {
+          const tr = proj.project.tracks.find(tk => tk.clips.some(c => c.id === id))!;
+          return { trackId: tr.id, clipId: id };
+        }));
       }
       else if (e.key === 'v') {
-        const ui = useUIStore.getState();
         e.preventDefault();
-        useProjectStore.getState().pasteClip(ui.currentTime);
+        useProjectStore.getState().pasteClips(ui.currentTime);
       }
     };
     window.addEventListener('keydown', handler);
@@ -1033,6 +1051,39 @@ export default function Timeline() {
       ...c, id: `clip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
       timelineIn: c.timelineOut + 0.1, timelineOut: c.timelineOut + 0.1 + dur,
     });
+  };
+
+  // 同轨框选（rubber-band）：在轨道空白处左键拖拽，选中该轨道内与框相交的所有片段。
+  // 仅作用于单条轨道（用户需求：同一轨道多选）。点击片段本身不触发（ClipItem 已 stopPropagation，且本函数守卫 e.target===currentTarget）。
+  const onTrackMouseDown = (e: React.MouseEvent, track: TrackConfig) => {
+    if (e.button !== 0) return;
+    if (e.target !== e.currentTarget) return; // 点在片段上则交给片段自己的拖拽
+    if (track.locked) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const startX = e.clientX;
+    clearSelection();
+    const onMove = (ev: MouseEvent) => {
+      const l = Math.min(startX, ev.clientX) - rect.left;
+      const r = Math.max(startX, ev.clientX) - rect.left;
+      setMarquee({ trackId: track.id, left: l, width: Math.max(0, r - l) });
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      const mLeft = Math.min(startX, ev.clientX) - rect.left;
+      const mRight = Math.max(startX, ev.clientX) - rect.left;
+      const ids = track.clips
+        .filter((c) => {
+          const cl = c.timelineIn * timelineZoom;
+          const cr = c.timelineOut * timelineZoom;
+          return cr > mLeft && cl < mRight; // 与框水平相交即选中
+        })
+        .map((c) => c.id);
+      setMarquee(null);
+      if (ids.length) useUIStore.getState().setSelection(track.id, ids);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
   // Whether any track is in solo mode (used for the indicator badge).
@@ -1053,16 +1104,26 @@ export default function Timeline() {
           splitClip(selectedTrackId, selectedClipId, currentTime);
         }} style={btnStyle}>分割</button>
         <button onClick={() => {
-          if (!selectedTrackId || !selectedClipId) return;
-          const track = useProjectStore.getState().project.tracks.find(t => t.id === selectedTrackId);
-          if (track?.locked) return;
-          removeClip(selectedTrackId, selectedClipId);
+          const ui = useUIStore.getState();
+          if (!ui.selectedClipIds.length) return;
+          const proj = useProjectStore.getState();
+          proj.pushHistorySnapshot();
+          for (const id of ui.selectedClipIds) {
+            const tr = proj.project.tracks.find(tk => tk.clips.some(c => c.id === id));
+            if (tr && !tr.locked) proj.removeClip(tr.id, id);
+          }
+          ui.clearSelection();
         }} style={btnStyle}>删除</button>
         <button onClick={() => {
-          if (!selectedTrackId || !selectedClipId) return;
-          copyClip(selectedTrackId, selectedClipId);
+          const ui = useUIStore.getState();
+          if (!ui.selectedClipIds.length) return;
+          const proj = useProjectStore.getState();
+          proj.copyClips(ui.selectedClipIds.map((id) => {
+            const tr = proj.project.tracks.find(tk => tk.clips.some(c => c.id === id))!;
+            return { trackId: tr.id, clipId: id };
+          }));
         }} style={btnStyle}>复制</button>
-        <button onClick={() => { pasteClip(currentTime); }} style={btnStyle}>粘贴</button>
+        <button onClick={() => { useProjectStore.getState().pasteClips(currentTime); }} style={btnStyle}>粘贴</button>
         {/* Magnetic snap toggle */}
         <button onClick={toggleMagneticSnap} style={{
           ...btnStyle,
@@ -1162,15 +1223,17 @@ export default function Timeline() {
                   transition: 'background 0.15s',
                   borderTop: showInsertLine && dragOver!.yInTrack < BOUNDARY_THRESHOLD ? '2px solid #4caf50' : '1px solid rgba(255,255,255,0.05)',
                   borderBottom: showInsertLine && dragOver!.yInTrack > TRACK_HEIGHT - BOUNDARY_THRESHOLD ? '2px solid #4caf50' : '1px solid rgba(255,255,255,0.05)',
-                }}>
+                }}
+                  onMouseDown={(e) => onTrackMouseDown(e, track)}
+                  onClick={(e) => e.stopPropagation()}>
 
                   {track.clips.map(clip => (
                     <React.Fragment key={clip.id}>
                       <ClipItem clip={clip} track={track} color={TRACK_COLORS[track.type] || '#0f3460'}
-                        selected={selectedClipId === clip.id} zoom={timelineZoom}
+                        selected={selectedClipIds.includes(clip.id)} zoom={timelineZoom}
                         magneticSnap={magneticSnap} clipSnap={clipSnap} playhead={currentTime} clipsOnTrack={track.clips}
                         sameTypeTrackIds={sameTypeTrackIds}
-                        onSelect={() => { selectClip(track.id, clip.id); setRightView('props'); }}
+                        onSelect={(additive) => { selectClip(track.id, clip.id, additive ? 'toggle' : 'replace'); setRightView('props'); }}
                         onSplit={() => splitClip(track.id, clip.id, currentTime)}
                         onMove={(newIn) => moveClipLive(track.id, clip.id, newIn)}
                         onMoveToTrack={(destTrackId, newIn) => moveClipToTrackLive(track.id, clip.id, destTrackId, newIn)}
@@ -1187,6 +1250,14 @@ export default function Timeline() {
                       )}
                     </React.Fragment>
                   ))}
+                  {/* 框选矩形（仅作用于当前轨道） */}
+                  {marquee && marquee.trackId === track.id && (
+                    <div style={{
+                      position: 'absolute', left: marquee.left, top: 0, width: marquee.width, height: TRACK_HEIGHT,
+                      background: 'rgba(76,175,80,0.22)', border: '1px solid #4caf50',
+                      pointerEvents: 'none', zIndex: 5,
+                    }} />
+                  )}
                 </div>
               );
             })}
