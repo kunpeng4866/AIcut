@@ -9,7 +9,7 @@ import { useAiStore } from '../../store/aiStore';
 import { useConfigStore } from '../../store/configStore';
 import { addTextClip, addSubtitleClip, parseSRT, createSubtitleClipFromAsr, createTranslatedTrack, createAudioClip, addClipToTrack, uid } from '../../utils/clipFactories';
 import { subtitleItemDisplayStart } from '../../utils/timelineMap';
-import type { ClipConfig, AssetConfig } from '../../types';
+import type { ClipConfig, AssetConfig, TimeRemapConfig } from '../../types';
 
 const theme = {
   root: {
@@ -276,14 +276,19 @@ export default function TextPanel() {
     //   2) 设了时间偏移 lead 且 item 起点被 lead 推到 clip 起点之前时，算出负 timelineIn →
     //      开场句("大家看一下")落在时间线原点之前 → 音频片段不可见（"漏掉"）。
     // 故改用语幕显示起点函数（裁剪进 clip 活跃窗口），保证对齐且不越界。
-    const ttsItems: { text: string; absStart: number }[] = [];
+    // ⚠️ 同时必须把字幕 clip 的变速（speed / time_remap）一并带给音频 clip：字幕在时间轴上
+    //   是「变速后」显示的（窗口 = 源时长/speed），而 TTS 音频是「整句原速念出来的」。
+    //   若音频不继承变速（speed 恒 1），变速场景下音频窗口被拉长、逐句累积滞后 →
+    //   表现为"丢开头字、末尾句整句丢"。所以逐句记录 speed/time_remap，落轨时传给音频。
+    const ttsItems: { text: string; absStart: number; speed: number; timeRemap?: TimeRemapConfig }[] = [];
     sourceClips.forEach((c) => {
       const lead = c.subtitle?.timeOffset || 0;
+      const speed = c.speed && c.speed > 0 ? c.speed : 1;
       (c.subtitle?.items ?? []).forEach((it) => {
         const t = (it.text || '').trim();
         if (t) {
           const absStart = subtitleItemDisplayStart(c, it, lead);
-          ttsItems.push({ text: t, absStart });
+          ttsItems.push({ text: t, absStart, speed, timeRemap: c.time_remap });
         }
       });
     });
@@ -332,7 +337,7 @@ export default function TextPanel() {
         fps: 30,
       };
       useProjectStore.getState().addAsset(asset);
-      const clip = createAudioClip(asset, { timelineIn: absStart, duration: dur });
+      const clip = createAudioClip(asset, { timelineIn: absStart, duration: dur, speed: ttsItems[i].speed, timeRemap: ttsItems[i].timeRemap });
       addClipToTrack('audio', clip);
       okCount++;
     }

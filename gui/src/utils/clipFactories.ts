@@ -1,6 +1,6 @@
 // 共享片段工厂：把"建轨 + 加片段 + 选中"等重复逻辑集中，供左侧面板各组件复用。
 // 所有函数直接读/写 project store 与 ui store，调用方无需关心轨道查找细节。
-import type { AssetConfig, ClipConfig, KeyingConfig, MaskConfig } from '../types';
+import type { AssetConfig, ClipConfig, KeyingConfig, MaskConfig, TimeRemapConfig } from '../types';
 import { useProjectStore } from '../store/projectStore';
 import { useUIStore } from '../store/uiStore';
 
@@ -410,21 +410,29 @@ export function createImageStickerClip(asset: AssetConfig, timelineIn = 0): Clip
 
 // 生成一段音频片段（用于 TTS 配音、导入音频等落到音频轨）。
 // 默认 duration 取素材时长，timelineIn 默认 0；volume 默认 1。
+// speed / timeRemap：可选继承「字幕/参考片段」的变速，使音频在时间轴上经历与字幕完全相同的
+// 变速（加速/减速/倒放/曲线）。不传则 speed=1（原速）。timelineOut = timelineIn + srcDur/speed，
+// 与字幕 clip 的构建公式（buildSubtitleClips：timelineOut = refIn + relEnd/speed）严格一致。
 export function createAudioClip(
   asset: AssetConfig,
-  opts?: { timelineIn?: number; duration?: number; volume?: number },
+  opts?: { timelineIn?: number; duration?: number; volume?: number; speed?: number; timeRemap?: TimeRemapConfig },
 ): ClipConfig {
   const dur = opts?.duration ?? asset.duration ?? 5;
   const inT = opts?.timelineIn ?? 0;
+  const speed = opts?.speed && opts.speed > 0 ? opts.speed : 1;
+  const timeRemap = opts?.timeRemap
+    ? { ...opts.timeRemap, curve: opts.timeRemap.curve ? [...opts.timeRemap.curve] : undefined, freeze: opts.timeRemap.freeze ? { ...opts.timeRemap.freeze } : null }
+    : undefined;
   return {
     id: uid('clip'),
     assetId: asset.id,
     src_range: { start: 0, end: dur },
     timelineIn: inT,
-    timelineOut: inT + dur,
+    timelineOut: inT + dur / speed,
     transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
     volume: opts?.volume ?? 1,
-    speed: 1,
+    speed,
+    time_remap: timeRemap,
     effects: [],
     masks: [],
     filters: [],
