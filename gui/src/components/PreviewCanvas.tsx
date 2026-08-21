@@ -617,6 +617,7 @@ export default function PreviewCanvas() {
   const activeTextOverlays: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; wrapperStyle: React.CSSProperties; bgStyle: React.CSSProperties | null; textStyle: React.CSSProperties }[] = (() => {
     const result: { text: string; kind: 'text' | 'subtitle'; trackId: string; clipId: string; wrapperStyle: React.CSSProperties; bgStyle: React.CSSProperties | null; textStyle: React.CSSProperties }[] = [];
     for (const track of project.tracks) {
+      if (track.visible === false) continue;  // 隐藏轨不出预览，所见即所得（与导出一致）
       for (const clip of track.clips) {
         if (!(currentTime >= clip.timelineIn && currentTime < clip.timelineOut)) continue;
         if (clip.text) {
@@ -717,6 +718,7 @@ export default function PreviewCanvas() {
     const result: { src: string; style: React.CSSProperties }[] = [];
     const stageW = project.canvas?.width || 1920;
     for (const track of project.tracks) {
+      if (track.visible === false) continue;  // 隐藏轨不出预览，与导出一致
       if (track.type !== 'sticker') continue;
       for (const clip of track.clips) {
         if (!(currentTime >= clip.timelineIn && currentTime < clip.timelineOut)) continue;

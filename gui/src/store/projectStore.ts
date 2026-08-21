@@ -40,6 +40,20 @@ const calcInsertIndex = (tracks: TrackConfig[], type: string): number => {
   return 0;
 };
 
+// 片段「必须」归属的轨道类型（严禁乱放）：按素材真实媒体类型 / 哨兵素材推导。
+// 音频→audio、视频→video、图片→sticker、'_text'→text、'_subtitle'→subtitle；
+// 无法判定（素材缺失）返回 null，调用方不强制。
+const clipRequiredTrackType = (clip: ClipConfig, assets: AssetConfig[]): string | null => {
+  if (clip.assetId === '_text') return 'text';
+  if (clip.assetId === '_subtitle') return 'subtitle';
+  const asset = assets.find((a) => a.id === clip.assetId);
+  if (!asset) return null;
+  if (asset.type === 'audio') return 'audio';
+  if (asset.type === 'video') return 'video';
+  if (asset.type === 'image') return 'sticker';
+  return null;
+};
+
 // 主轨左对齐重排：片段按 timelineIn 排序后依次紧贴排列（cursor 累加），时间从 0 起
 // 仅在 magneticSnap 开启时调用
 const realignMainTrack = (tracks: TrackConfig[]): TrackConfig[] => {
@@ -277,8 +291,28 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     updateTrackVolumeLive: (id, volume) => set((state) => ({ project: { ...state.project, tracks: state.project.tracks.map((t) => t.id === id ? { ...t, volume } : t) }, isDirty: true })),
     updateTrackPanLive: (id, pan) => set((state) => ({ project: { ...state.project, tracks: state.project.tracks.map((t) => t.id === id ? { ...t, pan } : t) }, isDirty: true })),
     addClip: (trackId, clip) => mutate((p) => {
-      if (p.tracks.find(t => t.id === trackId)?.locked) return p;
-      return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => [...clips, clip]));
+      // 严禁乱放：素材必须落在对应类型轨道。类型不符时自动改投同类型轨（无则新建），
+      // 保证音频/视频/文字/字幕/贴纸绝不串轨（纯音频文件不会被放上视频轨）。
+      let targetId = trackId;
+      const track = p.tracks.find(t => t.id === trackId);
+      const required = clipRequiredTrackType(clip, p.assets);
+      if (track && required && track.type !== required) {
+        // 视频优先落到主视频轨（与 MediaPanel/SpeechPanel 约定一致），其余类型取第一条同类轨。
+        const match = required === 'video'
+          ? (p.tracks.find((t) => t.type === 'video' && t.isMain && !t.locked) ?? p.tracks.find((t) => t.type === 'video' && !t.locked))
+          : p.tracks.find((t) => t.type === required && !t.locked);
+        if (match) {
+          targetId = match.id;
+        } else {
+          const newId = uid('track');
+          const insertAt = calcInsertIndex(p.tracks, required);
+          const newTrack: TrackConfig = { id: newId, type: required, order: p.tracks.length, clips: [], locked: false, visible: true, muted: false, solo: false, volume: 1, pan: 0 };
+          p = { ...p, tracks: [...p.tracks.slice(0, insertAt), newTrack, ...p.tracks.slice(insertAt)] };
+          targetId = newId;
+        }
+      }
+      if (p.tracks.find(t => t.id === targetId)?.locked) return p;
+      return withMainTrackRealign(mapTrackClips(p, targetId, (clips) => [...clips, clip]));
     }),
     removeClip: (trackId, clipId) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
@@ -471,6 +505,9 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (srcTrack.locked || destTrack.locked) return p;
       const clip = srcTrack.clips.find(c => c.id === clipId);
       if (!clip) return p;
+      // 严禁乱放：禁止把片段移入与素材类型不符的轨道（音频→仅音频轨、视频→仅视频轨、文字/字幕/贴纸→各自轨）。
+      const required = clipRequiredTrackType(clip, p.assets);
+      if (required && destTrack.type !== required) return p;
       const dur = clip.timelineOut - clip.timelineIn;
       const movedClip = { ...clip, timelineIn: Math.max(0, newTimelineIn), timelineOut: Math.max(0, newTimelineIn) + dur };
       // 从源轨道移除，添加到目标轨道
@@ -554,6 +591,9 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       if (!srcTrack || !destTrack || srcTrack.locked || destTrack.locked) return state;
       const clip = srcTrack.clips.find((c) => c.id === clipId);
       if (!clip) return state;
+      // 严禁乱放：禁止跨类型移轨（音频→仅音频轨、视频→仅视频轨、文字/字幕/贴纸→各自轨）。
+      const required = clipRequiredTrackType(clip, state.project.assets);
+      if (required && destTrack.type !== required) return state;
       // 同源同轨：只改时间位置，禁止先删后加（否则 src===dest 时会被整体移除，导致片段凭空消失）。
       if (srcTrackId === destTrackId) {
         const dur = clip.timelineOut - clip.timelineIn;

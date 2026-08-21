@@ -341,7 +341,16 @@ export default function SpeechPanel() {
           fps: original.fps,
         };
         useProjectStore.getState().addAsset(asset);
-        const track = useProjectStore.getState().getMainVideoTrack();
+        // 严禁乱放：按素材类型落轨——音频源产物落音频轨、视频源产物落主视频轨。
+        // 口播清洗对纯音频源（如 m4a）产出的 _speechcut.mp4 是纯音频，必须落音频轨，绝不能放视频轨。
+        const st = useProjectStore.getState();
+        let track = original.type === 'audio'
+          ? st.project.tracks.find((t) => t.type === 'audio')
+          : st.getMainVideoTrack();
+        if (!track) {
+          const tid = st.addTrack(original.type === 'audio' ? 'audio' : 'video');
+          track = st.project.tracks.find((t) => t.id === tid);
+        }
         if (track) {
           const lastClip = track.clips[track.clips.length - 1];
           const start = lastClip ? lastClip.timelineOut : 0;
@@ -360,7 +369,7 @@ export default function SpeechPanel() {
             filters: [],
             keyframes: {},
           };
-          useProjectStore.getState().addClip(track.id, clip);
+          st.addClip(track.id, clip);
         }
         setMsg('已生成清洗片段并加入时间轴（原片段保留，可对比）。');
       } else {

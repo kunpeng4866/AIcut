@@ -3,7 +3,7 @@
 // magnetic snapping, cross-track drag, audio waveforms, text/subtitle tracks
 // and keyframe markers.
 
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useLayoutEffect, useCallback } from 'react';
 
 import { useProjectStore } from '../store/projectStore';
 
@@ -489,7 +489,12 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
       const groupIdxs = tracks.map((t, i) => (t.type === type ? i : -1)).filter((i) => i >= 0);
       if (groupIdxs.length === 0) return -1; // 该类型尚无轨道：由调用方回退到按类型分组的插入
       const lo = groupIdxs[0];
-      const hi = groupIdxs[groupIdxs.length - 1] + 1;
+      let hi = groupIdxs[groupIdxs.length - 1] + 1;
+      // 主视频轨永远位于所有视频轨的最下面：video 新轨只能插到主轨之前（上方），禁止插到主轨之下。
+      if (type === 'video') {
+        const mainIdx = tracks.findIndex(t => t.type === 'video' && t.isMain);
+        if (mainIdx >= 0) hi = Math.min(hi, mainIdx);
+      }
       return Math.max(lo, Math.min(index, hi));
     };
 
@@ -718,9 +723,43 @@ export default function Timeline() {
   // 仅镜像右侧的 scrollTop，确保控制按钮与轨道行始终对齐（避免两侧各滚各的）。
   const leftRef = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; clipId: string } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [subMenu, setSubMenu] = useState<{ x: number; y: number } | null>(null);
   const [separating, setSeparating] = useState(false);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
+  const subMenuRef = useRef<HTMLDivElement>(null);
+  const [subMenuPos, setSubMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+
+  // 二级子菜单（声音分离 ▸）同样 clamp 进视口：向右/向下展开可能超出右/下边界
+  useLayoutEffect(() => {
+    if (!subMenu || !subMenuRef.current) { setSubMenuPos(null); return; }
+    const rect = subMenuRef.current.getBoundingClientRect();
+    const m = 8;
+    let x = subMenu.x;
+    let y = subMenu.y;
+    if (x + rect.width > window.innerWidth - m) x = Math.max(m, window.innerWidth - rect.width - m);
+    if (y + rect.height > window.innerHeight - m) y = Math.max(m, window.innerHeight - rect.height - m);
+    if (x < m) x = m;
+    if (y < m) y = m;
+    setSubMenuPos({ x, y });
+  }, [subMenu, menu]);
+
+  // 点击菜单外任意位置（仅左键）关闭所有弹出菜单，修复“点别处菜单不消失”
+  useEffect(() => {
+    if (!menu && !subMenu && !addMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;  // 仅左键；右键由各 onContext 自行处理
+      const t = e.target as Node;
+      if (menuRef.current?.contains(t)) return;
+      if (subMenuRef.current?.contains(t)) return;
+      if (addMenuRef.current?.contains(t)) return;
+      setMenu(null); setSubMenu(null); setAddMenu(null);
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [menu, subMenu, addMenu]);
   const [dragOver, setDragOver] = useState<{ time: number; trackIndex: number; yInTrack: number } | null>(null);
 
   // Timeline duration is at least 30s.
@@ -902,6 +941,20 @@ export default function Timeline() {
     selectClip(trackId, clipId);
     setMenu({ x: e.clientX, y: e.clientY, trackId, clipId });
   };
+
+  // 右键菜单定位：渲染后用真实尺寸 clamp 进视口，避免底部/右侧超出被裁掉（复制、删除点不到）
+  useLayoutEffect(() => {
+    if (!menu || !menuRef.current) { setMenuPos(null); return; }
+    const rect = menuRef.current.getBoundingClientRect();
+    const m = 8;
+    let x = menu.x;
+    let y = menu.y;
+    if (x + rect.width > window.innerWidth - m) x = Math.max(m, window.innerWidth - rect.width - m);
+    if (y + rect.height > window.innerHeight - m) y = Math.max(m, window.innerHeight - rect.height - m);
+    if (x < m) x = m;
+    if (y < m) y = m;
+    setMenuPos({ x, y });
+  }, [menu]);
 
   // 音频分离（av）：把视频片段拆成「仅视频」素材 + 一条「仅音频」轨道片段。
   async function handleSeparateAV(trackId: string, clipId: string) {
@@ -1299,7 +1352,7 @@ export default function Timeline() {
         const trackType = menuTrack?.type;
         const dis = (locked: boolean) => ({ ...menuItem, opacity: (locked || separating) ? 0.4 : 1, cursor: (locked || separating) ? 'not-allowed' : 'pointer' });
         return (
-          <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 100, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
+          <div ref={menuRef} onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: menuPos ? menuPos.x : menu.x, top: menuPos ? menuPos.y : menu.y, zIndex: 1000, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
             {trackType === 'video' && (
               <div onClick={() => { if (!isLocked && !separating) { handleSeparateAV(menu.trackId, menu.clipId); } setMenu(null); }} style={dis(!!isLocked)}>
                 {separating ? '分离中…' : '音频分离'}
@@ -1321,7 +1374,7 @@ export default function Timeline() {
         const isLocked = menuTrack?.locked;
         const subDis = (locked: boolean) => ({ ...menuItem, opacity: (locked || separating) ? 0.4 : 1, cursor: (locked || separating) ? 'not-allowed' : 'pointer' });
         return (
-          <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: subMenu.x, top: subMenu.y, zIndex: 101, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
+          <div ref={subMenuRef} onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: subMenuPos ? subMenuPos.x : subMenu.x, top: subMenuPos ? subMenuPos.y : subMenu.y, zIndex: 1001, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
             <div onClick={() => { if (!separating) { handleVocalSplit(menu!.trackId, menu!.clipId, 'vocals'); setSubMenu(null); setMenu(null); } }} style={subDis(false)}>
               {separating ? '处理中…' : '仅保留人声'}
             </div>
@@ -1334,7 +1387,7 @@ export default function Timeline() {
 
       {/* Add-track menu */}
       {addMenu && (
-        <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: addMenu.x, top: addMenu.y, zIndex: 100, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
+        <div ref={addMenuRef} onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: addMenu.x, top: addMenu.y, zIndex: 1000, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
           {(['video', 'audio', 'text', 'sticker'] as const).map(type => (
             <div key={type} onClick={() => { addTrack(type); setAddMenu(null); }} style={menuItem}>
               {Gu[type]} {type}

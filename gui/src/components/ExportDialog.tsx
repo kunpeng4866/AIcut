@@ -78,6 +78,7 @@ const C = {
   errorBox: {
     background: 'rgba(233,69,96,0.1)', border: '1px solid #e94560', borderRadius: 4,
     padding: 12, marginBottom: 16, fontSize: 12, color: '#e94560', wordBreak: 'break-word',
+    maxHeight: 220, overflowY: 'auto',
   } as React.CSSProperties,
   warnText: { fontSize: 12, color: '#aaa', marginBottom: 16 } as React.CSSProperties,
 };
@@ -260,7 +261,13 @@ export default function ExportDialog({ project, onClose }: Props) {
 
           {status === 'error' && (
             <div style={C.errorBox}>
-              <strong>导出失败：</strong>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <strong>导出失败：</strong>
+                <button
+                  style={{ ...C.btn, padding: '2px 10px', fontSize: 11 }}
+                  onClick={() => { navigator.clipboard?.writeText(errorMsg).catch(() => {}); }}
+                >复制错误</button>
+              </div>
               <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>{errorMsg}</div>
             </div>
           )}
