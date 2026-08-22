@@ -1,5 +1,5 @@
 // Electron main process — AIcut Desktop
-import { app, BrowserWindow, ipcMain, dialog, protocol, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, session, shell, clipboard } from 'electron';
 import { spawn } from 'child_process';
 import { readFile, writeFile, mkdir, readdir, unlink, stat } from 'fs/promises';
 import { mkdirSync } from 'fs';
@@ -7,7 +7,7 @@ import { createReadStream } from 'fs';
 import { Readable } from 'stream';
 import { join, dirname, basename } from 'path';
 import { pathToFileURL } from 'url';
-import { applyExportOptions, parseShellArgs, type ExportOptionsParam } from './exportOptions';
+import { applyExportOptions, applyAudioExport, buildSubtitleExport, parseShellArgs, type ExportOptionsParam } from './exportOptions';
 
 let mainWindow: BrowserWindow | null = null;
 const ENGINE_BIN = join(__dirname, '../../target/debug/aicut-engine.exe');
@@ -227,7 +227,7 @@ ipcMain.handle('engine:validate', async (_e, projectJson: string) => {
 ipcMain.handle('dialog:openFiles', async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Media', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'wma', 'ac3', 'aiff', 'opus', 'jpg', 'png', 'webp', 'bmp', 'gif'] }],
+    filters: [{ name: 'Media', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'wma', 'ac3', 'aiff', 'opus', 'jpg', 'png', 'webp', 'bmp', 'gif', 'srt', 'ass', 'vtt'] }],
   });
   return result.filePaths;
 });
@@ -252,16 +252,32 @@ ipcMain.handle('dialog:saveFile', async (_e, defaultName?: string) => {
   return result.canceled ? null : result.filePath;
 });
 
-ipcMain.handle('dialog:exportFile', async (_e, defaultName?: string) => {
-  const result = await dialog.showSaveDialog(mainWindow!, {
-    defaultPath: defaultName || 'output.mp4',
-    filters: [
+ipcMain.handle('dialog:exportFile', async (_e, params?: { kind?: string; defaultName?: string }) => {
+  const kind = params?.kind || 'video';
+  const defaultName = params?.defaultName || 'output.mp4';
+
+  // 「保存类型」下拉按导出类型动态生成，避免字幕/音频找不到对应扩展名
+  const filtersByKind: Record<string, { name: string; extensions: string[] }[]> = {
+    video: [
       { name: 'MP4 Video', extensions: ['mp4'] },
       { name: 'MOV Video', extensions: ['mov'] },
       { name: 'MKV Video', extensions: ['mkv'] },
       { name: 'WebM Video', extensions: ['webm'] },
-      { name: 'MP3 Audio', extensions: ['mp3'] },
     ],
+    audio: [
+      { name: 'MP3 Audio', extensions: ['mp3'] },
+      { name: 'WAV Audio', extensions: ['wav'] },
+      { name: 'M4A Audio', extensions: ['m4a'] },
+    ],
+    subtitle: [
+      { name: 'SRT 字幕', extensions: ['srt'] },
+      { name: 'ASS 字幕', extensions: ['ass'] },
+      { name: 'VTT 字幕', extensions: ['vtt'] },
+    ],
+  };
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    defaultPath: defaultName,
+    filters: [...(filtersByKind[kind] || filtersByKind.video), { name: 'All Files', extensions: ['*'] }],
   });
   return result.canceled ? null : result.filePath;
 });
@@ -272,6 +288,11 @@ ipcMain.handle('file:saveProject', async (_e, path: string, content: string) => 
 });
 
 ipcMain.handle('file:loadProject', async (_e, path: string) => {
+  return await readFile(path, 'utf8');
+});
+
+// 读取任意文本文件内容（字幕 .srt/.ass/.vtt 导入时在渲染层解析用）
+ipcMain.handle('file:readText', async (_e, path: string) => {
   return await readFile(path, 'utf8');
 });
 
@@ -644,6 +665,26 @@ let currentExportProcess: ReturnType<typeof spawn> | null = null;
 
 ipcMain.handle('export:start', async (event, params: { project: any; outputPath: string; options: ExportOptionsParam }) => {
   const { project, outputPath, options } = params;
+
+  // ── 字幕导出：纯 JS 从工程 JSON 生成，不走 ffmpeg ──
+  if (options.kind === 'subtitle') {
+    try {
+      const content = buildSubtitleExport(project, options.subtitleFormat || 'srt');
+      if (!content || content.trim() === '') {
+        const msg = '工程中没有可导出的字幕。请先在时间轴添加字幕片段（如用 ASR 生成字幕轨）。';
+        event.sender.send('export:error', msg);
+        return { success: false, error: msg };
+      }
+      await writeFile(outputPath, content, 'utf8');
+      event.sender.send('export:done');
+      return { success: true };
+    } catch (e: any) {
+      const msg = `字幕导出失败: ${e?.message || e}`;
+      event.sender.send('export:error', msg);
+      return { success: false, error: msg };
+    }
+  }
+
   const tmpProject = join(app.getPath('temp'), `aicut-export-${Date.now()}.json`);
   await writeFile(tmpProject, JSON.stringify(project), 'utf8');
 
@@ -653,20 +694,33 @@ ipcMain.handle('export:start', async (event, params: { project: any; outputPath:
     let ffmpegCmd = cmd.startsWith('ffmpeg') ? cmd.slice(6).trim() : cmd.trim();
     let args = parseShellArgs(ffmpegCmd);
 
-    // 2. 应用导出选项（分辨率/格式/质量）
-    args = applyExportOptions(args, options);
-
-    // 3. 替换输出路径为用户选择的路径
-    if (args.length > 0) {
-      args[args.length - 1] = outputPath;
-    } else {
+    // 2. 应用导出选项
+    if (options.kind === 'audio') {
+      // 音频：复用已有音频滤镜图，改造为仅导出音轨
+      try {
+        args = applyAudioExport(args, options);
+      } catch (e: any) {
+        const msg = e?.message === 'NO_AUDIO'
+          ? '工程中没有音频可导出。请先添加带声音的素材或音频轨。'
+          : `音频导出失败: ${e?.message || e}`;
+        event.sender.send('export:error', msg);
+        return { success: false, error: msg };
+      }
       args.push(outputPath);
+    } else {
+      // 视频：分辨率/格式/质量
+      args = applyExportOptions(args, options);
+      if (args.length > 0) {
+        args[args.length - 1] = outputPath;
+      } else {
+        args.push(outputPath);
+      }
     }
 
-    // 4. 计算工程总时长（用于进度计算）
+    // 3. 计算工程总时长（用于进度计算）
     const totalDuration = computeProjectDuration(project);
 
-    // 5. 启动 FFmpeg 进程
+    // 4. 启动 FFmpeg 进程
     return new Promise((resolve) => {
       currentExportProcess = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
       let stderr = '';
@@ -725,6 +779,16 @@ ipcMain.handle('export:openFolder', async (_e, filePath: string) => {
     shell.showItemInFolder(filePath);
   }
   return true;
+});
+
+// 复制文本到系统剪贴板（替代前端 navigator.clipboard，避免 Electron 渲染进程无焦点/无权限时失效）
+ipcMain.handle('clipboard:writeText', async (_e, text: string) => {
+  try {
+    clipboard.writeText(text || '');
+    return true;
+  } catch {
+    return false;
+  }
 });
 
 // ── 4K 源素材代理生成（预览用 720p 代理，保证 4K 源流畅） ──

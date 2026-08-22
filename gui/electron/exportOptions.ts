@@ -2,9 +2,13 @@
 // 由 main.ts 的 export:start 调用，也可被测试脚本直接 import 验证。
 
 export interface ExportOptionsParam {
+  kind: 'video' | 'audio' | 'subtitle';
   resolution: 'original' | '2160p' | '1080p' | '720p' | '480p';
   format: 'mp4-h264' | 'mp4-h265' | 'mov';
   quality: 'high' | 'medium' | 'low';
+  audioFormat: 'mp3' | 'wav' | 'm4a';
+  audioQuality: 'high' | 'medium' | 'low';
+  subtitleFormat: 'srt' | 'ass' | 'vtt';
 }
 
 /** 简单的 shell 参数解析（处理引号） */
@@ -153,4 +157,191 @@ export function applyExportOptions(args: string[], options: ExportOptionsParam):
   }
 
   return result;
+}
+
+/**
+ * 将引擎渲染命令（含完整音频混合滤镜图）改造为「仅导出音频」。
+ * 复用 graph.rs 已生成的音频滤镜图（per-clip 音量/淡入淡出 + amix + alimiter），
+ * 仅保留输入文件、-filter_complex、音频 -map，丢弃全部视频/编码/分辨率参数，
+ * 追加 -vn 与音频编码器。无需重新实现音频混合逻辑。
+ *
+ * @throws 当工程无任何音频流（找不到 [a...] 输出标签）时抛 'NO_AUDIO'
+ */
+
+/**
+ * 从完整 -filter_complex 中抽取「输出标签为音频」的链段，丢弃全部视频节点。
+ * 用于音频导出：避免视频滤镜图输出（如 [va1]）悬空未连接导致 ffmpeg 报错。
+ */
+function extractAudioFilterChain(fc: string): string {
+  const segs = fc.split(';');
+  const audioSegs = segs.filter((s) => {
+    const m = s.trim().match(/\[([^\]]+)\]\s*$/);
+    return m ? /^a/.test(m[1]) : false;
+  });
+  return audioSegs.join(';');
+}
+
+export function applyAudioExport(args: string[], options: ExportOptionsParam): string[] {
+  const result: string[] = [];
+
+  // 1) 定位音频输出标签：优先从 -map 找 [a...]；兜底从 -filter_complex 里找 [aout]/[a0]
+  let audioLabel: string | null = null;
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === '-map') {
+      const m = args[i + 1].match(/^\[([^\]]+)\]$/);
+      if (m && /^a/.test(m[1])) { audioLabel = m[1]; break; }
+    }
+  }
+  if (!audioLabel) {
+    const fcIdx = args.indexOf('-filter_complex');
+    if (fcIdx >= 0 && fcIdx + 1 < args.length) {
+      const m = args[fcIdx + 1].match(/\[a(?:out|\d+)\]/);
+      if (m) audioLabel = m[0].slice(1, -1);
+    }
+  }
+  if (!audioLabel) {
+    throw new Error('NO_AUDIO');
+  }
+
+  // 2) 只保留必要段：输入文件(-i)、-y/-n、音频滤镜链、音频 -map
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '-i') {
+      if (i + 1 < args.length) { result.push(a, args[i + 1]); i++; }
+    } else if (a === '-y' || a === '-n') {
+      result.push(a);
+    } else if (a === '-filter_complex') {
+      // ⚠️ 关键修复：引擎渲染命令的 -filter_complex 同时含【视频滤镜图】与【音频滤镜图】
+      // （如 color[base];[0:v]…[va1];[base][va0]overlay…[va1];[0:a]…[a0]）。
+      // 若把整个滤镜图都保留、却只 -map [a0] 音频输出，视频输出标签 [va1] 会「悬空未连接」，
+      // ffmpeg 报 "Filter 'overlay:default' has output 0 (va1) unconnected / Error binding
+      // filtergraph" 导致音频导出失败。因此只抽取【输出标签为音频】的链段（[0:a]…[a0]、
+      // amix 链等），彻底丢弃视频节点。
+      if (i + 1 < args.length) {
+        result.push(a, extractAudioFilterChain(args[i + 1]));
+        i++;
+      }
+    } else if (a === '-map') {
+      if (i + 1 < args.length && /^\[a/.test(args[i + 1])) { result.push(a, args[i + 1]); }
+      if (i + 1 < args.length) i++;
+    }
+    // 其余（视频/编码/分辨率/scale/vf/crf 等）全部丢弃
+  }
+
+  // 3) 不输出视频
+  result.push('-vn');
+
+  // 4) 音频编码器 + 码率
+  const acodec =
+    options.audioFormat === 'wav' ? 'pcm_s16le'
+    : options.audioFormat === 'm4a' ? 'aac'
+    : 'libmp3lame';
+  result.push('-c:a', acodec);
+  if (options.audioFormat !== 'wav') {
+    const bitrateMap: Record<string, string> = { high: '320k', medium: '192k', low: '128k' };
+    result.push('-b:a', bitrateMap[options.audioQuality] || '192k');
+  }
+
+  // 输出路径由调用方在末尾追加
+  return result;
+}
+
+// ── 字幕导出（纯 JS，直接从工程 JSON 生成，不依赖 ffmpeg） ──
+
+interface SubtitleEntry { start: number; end: number; text: string; }
+
+/** 收集工程内所有字幕片段（clip.subtitle.items），按绝对时间排序 */
+export function collectSubtitleEntries(project: any): SubtitleEntry[] {
+  const entries: SubtitleEntry[] = [];
+  for (const track of project?.tracks || []) {
+    for (const clip of track.clips || []) {
+      const sub = clip.subtitle;
+      if (sub && Array.isArray(sub.items)) {
+        // 与预览端 PreviewCanvas.activeTextOverlays 严格对称：
+        // 预览用 clipSourceTime 反解「绝对时间轴位置」t，使 srcT + lead ∈ [i.start, i.end) 命中字幕，
+        //   srcT = src_range.start + (t - timelineIn) * speed
+        // 反解得绝对位置 t = timelineIn + (i.start - lead - src_range.start) / speed。
+        // 旧实现只写 timelineIn + i.start，忽略了 src_range.start / speed / lead，
+        // 导致 ASR 字幕（src_range.start≠0）、变速、提前量场景下导出与预览错位。
+        const timelineIn = clip.timelineIn || 0;
+        const srcStart = (clip.src_range && clip.src_range.start) || 0;
+        const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+        const lead = sub.timeOffset || 0; // 与预览 clipSourceTime + lead 对称
+        const hasRemap = !!(
+          clip.time_remap &&
+          (clip.time_remap.curve?.length || clip.time_remap.reverse || clip.time_remap.freeze)
+        );
+        for (const it of sub.items) {
+          let start: number;
+          let end: number;
+          if (hasRemap) {
+            // 含变速曲线/倒放/冻结：线性反解不精确，回退为「时间轴坐标原样」
+            // （与旧行为一致；曲线段字幕极少单独导出，烧录由 Rust source_to_timeline 权威处理）。
+            start = timelineIn + (it.start || 0);
+            end = timelineIn + (it.end || 0);
+          } else {
+            start = timelineIn + ((it.start || 0) - lead - srcStart) / speed;
+            end = timelineIn + ((it.end || 0) - lead - srcStart) / speed;
+          }
+          entries.push({ start, end, text: it.text || '' });
+        }
+      }
+    }
+  }
+  entries.sort((a, b) => a.start - b.start);
+  return entries;
+}
+
+const pad2 = (n: number) => String(Math.floor(n)).padStart(2, '0');
+function fmtSrtTime(sec: number): string {
+  const ms = Math.round((sec - Math.floor(sec)) * 1000);
+  const s = Math.floor(sec) % 60;
+  const m = Math.floor(sec / 60) % 60;
+  const h = Math.floor(sec / 3600);
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)},${String(ms).padStart(3, '0')}`;
+}
+function fmtVttTime(sec: number): string {
+  const ms = Math.round((sec - Math.floor(sec)) * 1000);
+  const s = Math.floor(sec) % 60;
+  const m = Math.floor(sec / 60) % 60;
+  const h = Math.floor(sec / 3600);
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)}.${String(ms).padStart(3, '0')}`;
+}
+function fmtAssTime(sec: number): string {
+  const cs = Math.round((sec - Math.floor(sec)) * 100);
+  const s = Math.floor(sec) % 60;
+  const m = Math.floor(sec / 60) % 60;
+  const h = Math.floor(sec / 3600);
+  return `${h}:${pad2(m)}:${pad2(s)}.${String(cs).padStart(2, '0')}`;
+}
+
+export function buildSubtitleExport(project: any, format: 'srt' | 'ass' | 'vtt'): string {
+  const items = collectSubtitleEntries(project);
+  if (format === 'vtt') {
+    const body = items.map((it, i) => {
+      const text = it.text.split('\n').map((l: string) => l).join('\n');
+      return `${i + 1}\n${fmtVttTime(it.start)} --> ${fmtVttTime(it.end)}\n${text}`;
+    }).join('\n\n');
+    return `WEBVTT\n\n${body}\n`;
+  }
+  if (format === 'ass') {
+    const events = items.map((it, i) => {
+      const text = it.text.replace(/\n/g, '\\N');
+      return `${i + 1},${fmtAssTime(it.start)},${fmtAssTime(it.end)},Default,,0,0,0,,${text}`;
+    }).join('\n');
+    const header =
+      '[Script Info]\nScriptType: v4.00+\nPlayResX: 384\nPlayResY: 288\n\n' +
+      '[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, ' +
+      'Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, ' +
+      'Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n' +
+      'Style: Default,Arial,48,&H00FFFFFF,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n' +
+      '[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n';
+    return `${header}${events}\n`;
+  }
+  // srt
+  const body = items.map((it, i) => {
+    const text = it.text.split('\n').map((l: string) => l).join('\n');
+    return `${i + 1}\n${fmtSrtTime(it.start)} --> ${fmtSrtTime(it.end)}\n${text}`;
+  }).join('\n\n');
+  return `${body}\n`;
 }

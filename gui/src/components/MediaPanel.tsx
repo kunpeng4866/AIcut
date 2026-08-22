@@ -2,6 +2,7 @@
 import React, { useState, useCallback } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import type { AssetConfig, ClipConfig } from '../types';
+import { parseSRT, parseASS, addSubtitleClip } from '../utils/clipFactories';
 
 // 生成唯一ID
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -17,11 +18,25 @@ const formatTime = (sec: number): string => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
-// 媒体文件扩展名（用于从文件夹拖拽导入时过滤非媒体文件）
+// 字幕文件扩展名（.srt/.ass/.vtt）——导入时不应当作视频素材，而须解析成字幕片段落到字幕轨
+const SUBTITLE_EXT = new Set(['srt', 'ass', 'vtt']);
+const isSubtitleFile = (p: string): boolean => {
+  const i = p.lastIndexOf('.');
+  return i >= 0 && SUBTITLE_EXT.has(p.substring(i + 1).toLowerCase());
+};
+
+// 按扩展名解析字幕文本为定时条目（srt/vtt 走 parseSRT，ass 走 parseASS，二者来自 clipFactories）
+function parseSubtitleByExt(text: string, ext: string): { start: number; end: number; text: string }[] {
+  if (ext === 'ass') return parseASS(text);
+  return parseSRT(text); // srt / vtt 通用（时间分隔符 . 与 , 均兼容）
+}
+
+// 媒体文件扩展名（用于从文件夹拖拽导入时过滤非媒体文件，含字幕文件）
 const MEDIA_EXT = new Set([
   'mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'flv', 'wmv', 'mpg', 'mpeg', 'ts',
   'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'oga', 'wma', 'opus',
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'tiff',
+  'srt', 'ass', 'vtt',
 ]);
 const isMediaFile = (p: string): boolean => {
   const i = p.lastIndexOf('.');
@@ -111,6 +126,24 @@ export default function MediaPanel() {
     setBusy(true);
     try {
       for (const path of paths) {
+        // ── 字幕文件（.srt/.ass/.vtt）：解析后落到字幕轨，绝不当作视频素材 ──
+        // 修复：此前无此分支，字幕文件走 catch → 被当作 video 素材加入素材库，
+        // 拖到时间轴即落在视频轨；且因没有 clip.subtitle.items，SRT 导出内容为空。
+        if (isSubtitleFile(path)) {
+          try {
+            const ext = path.substring(path.lastIndexOf('.') + 1).toLowerCase();
+            const content = await window.aicut.readText(path);
+            const items = parseSubtitleByExt(content, ext);
+            if (items.length > 0) {
+              addSubtitleClip(items);
+            } else {
+              console.warn(`[import] 字幕文件解析为空，已跳过：${getFilename(path)}`);
+            }
+          } catch (e) {
+            console.warn(`[import] 字幕文件读取/解析失败：${getFilename(path)}`, e);
+          }
+          continue;
+        }
         try {
           const result = await window.aicut.probe(path);
           const info = result.info;

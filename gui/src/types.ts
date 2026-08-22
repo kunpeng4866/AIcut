@@ -248,11 +248,19 @@ export interface RenderResult { command: string }
 export type ExportResolution = 'original' | '2160p' | '1080p' | '720p' | '480p';
 export type ExportFormat = 'mp4-h264' | 'mp4-h265' | 'mov';
 export type ExportQuality = 'high' | 'medium' | 'low';
+// 导出类型：视频（合成全部轨道）/ 音频（仅音轨）/ 字幕（导出字幕文件）
+export type ExportKind = 'video' | 'audio' | 'subtitle';
+export type ExportAudioFormat = 'mp3' | 'wav' | 'm4a';
+export type ExportSubtitleFormat = 'srt' | 'ass' | 'vtt';
 
 export interface ExportOptions {
+  kind: ExportKind;
   resolution: ExportResolution;
   format: ExportFormat;
   quality: ExportQuality;
+  audioFormat: ExportAudioFormat;
+  audioQuality: ExportQuality;
+  subtitleFormat: ExportSubtitleFormat;
 }
 
 export interface ExportAPI {
@@ -362,6 +370,10 @@ export interface AicutAPI {
   saveProject(path: string, content: string): Promise<boolean>;
   loadProject(path: string): Promise<string>;
   openSaveDialog(defaultName?: string): Promise<string | null>;
+  // 读取文本文件内容（字幕 .srt/.ass/.vtt 导入解析用）
+  readText(path: string): Promise<string>;
+  // 复制文本到系统剪贴板（Electron 下优于 navigator.clipboard）
+  clipboardWriteText(text: string): Promise<boolean>;
   // AI配置
   getConfig(): Promise<string>;
   setConfig(json: string): Promise<boolean>;
@@ -393,7 +405,7 @@ export interface AicutAPI {
   buildPluginFilter(pluginId: string, params: string): Promise<string>;
   // 导出（旧 API，保留兼容）
   exportVideo(command: string, outputPath: string): Promise<{ success: boolean; error?: string }>;
-  openExportDialog(defaultName?: string): Promise<string | null>;
+  openExportDialog(kind?: string, defaultName?: string): Promise<string | null>;
   // 导出（新 API，带进度）
   export: ExportAPI;
   // 草稿

@@ -32,6 +32,37 @@ export function parseSRT(srt: string): { start: number; end: number; text: strin
   return out;
 }
 
+// 解析 ASS 字幕（[Events] 段下的 Dialogue 行，取 Start/End/Text 列）
+export function parseASS(ass: string): { start: number; end: number; text: string }[] {
+  const lines = ass.split(/\r?\n/);
+  let textCol = -1;
+  const out: { start: number; end: number; text: string }[] = [];
+  const toSec = (t: string): number => {
+    const m = t.trim().match(/(\d+):(\d+):(\d+)\.(\d+)/);
+    if (!m) return 0;
+    return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 100;
+  };
+  for (const line of lines) {
+    const tr = line.trim();
+    if (tr.startsWith('Format:') && textCol < 0) {
+      const cols = tr.slice(7).split(',').map((c) => c.trim());
+      const i = cols.indexOf('Text');
+      if (i >= 0) textCol = i;
+      continue;
+    }
+    if (tr.startsWith('Dialogue:')) {
+      const parts = tr.slice(9).split(',');
+      if (parts.length <= textCol || textCol < 0) continue;
+      const start = toSec(parts[1] || '0');
+      const end = toSec(parts[2] || '0');
+      // Text 列可能含逗号，拼回其后的所有字段
+      const text = parts.slice(textCol).join(',').trim();
+      if (text) out.push({ start, end, text });
+    }
+  }
+  return out;
+}
+
 // 确保存在指定类型的轨道，返回其 id（找不到则新建）
 export function ensureTrack(type: 'video' | 'audio' | 'text' | 'sticker' | 'subtitle'): string | null {
   const p = useProjectStore.getState();
@@ -86,9 +117,18 @@ export function addTextClip(): void {
 }
 
 // 导入解析后的字幕条目到字幕轨
+// ⚠️ 对齐铁律（与 ASR buildSubtitleClips 一致）：SRT 时间戳是「相对媒体源」的绝对秒数，
+// 字幕 clip 须随参考音/视频片段的起点平移，否则整体滞后于音频。
+// 修复前 addSubtitleClip 恒把字幕 clip 放在 timelineIn=0，一旦音频被放在非 0 位置
+// （前面有内容 / 拖动落点非开头），字幕就会整体滞后 → 预览看不到、导出时间也对不上。
 export function addSubtitleClip(items: { start: number; end: number; text: string }[]): void {
   if (items.length === 0) return;
   const totalDuration = items[items.length - 1].end;
+  // 字幕以「时间轴 0」为起点放置：SRT 自身的 00:00:00 对应时间轴绝对位置 0。
+  // 不绑定任何音/视频片段（用户明确：文字段未必由音频生成、无参考性），
+  // 因此导入后导出的 SRT 时间戳与原始文件一致（干净往返）；且导出端与预览绝对位置
+  // 已严格对称（见 exportOptions.collectSubtitleEntries），故导出 == 预览。
+  // 若需与某段音频对齐，用户自行拖动字幕片段即可，导出永远跟随预览。
   const clip: ClipConfig = {
     id: uid('clip'),
     assetId: '_subtitle',

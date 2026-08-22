@@ -17,6 +17,13 @@ contextBridge.exposeInMainWorld('aicut', {
   saveProject: (path: string, content: string) => ipcRenderer.invoke('file:saveProject', path, content),
   loadProject: (path: string) => ipcRenderer.invoke('file:loadProject', path),
   openSaveDialog: (defaultName?: string) => ipcRenderer.invoke('dialog:saveFile', defaultName),
+  // 读取文本文件内容（字幕导入解析用）
+  readText: (path: string) => ipcRenderer.invoke('file:readText', path),
+  // 导出保存对话框：传入 kind 让主进程按类型生成「保存类型」过滤（视频/音频/字幕）
+  openExportDialog: (kind?: string, defaultName?: string) =>
+    ipcRenderer.invoke('dialog:exportFile', { kind, defaultName }),
+  // 复制文本到系统剪贴板（Electron 下优于 navigator.clipboard）
+  clipboardWriteText: (text: string) => ipcRenderer.invoke('clipboard:writeText', text),
 
   // ── AI配置 ──
   getConfig: () => ipcRenderer.invoke('config:get'),
@@ -29,7 +36,6 @@ contextBridge.exposeInMainWorld('aicut', {
 
   // ── 导出 ──
   exportVideo: (command: string, outputPath: string) => ipcRenderer.invoke('render:export', command, outputPath),
-  openExportDialog: (defaultName?: string) => ipcRenderer.invoke('dialog:exportFile', defaultName),
   export: {
     start: (project: any, outputPath: string, options: any) =>
       ipcRenderer.invoke('export:start', { project, outputPath, options }),

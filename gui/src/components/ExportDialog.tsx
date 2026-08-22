@@ -81,22 +81,44 @@ const C = {
     maxHeight: 220, overflowY: 'auto',
   } as React.CSSProperties,
   warnText: { fontSize: 12, color: '#aaa', marginBottom: 16 } as React.CSSProperties,
+  segWrap: {
+    display: 'flex', gap: 4, flex: 1, background: '#0f3460', borderRadius: 6, padding: 3,
+  } as React.CSSProperties,
+  segBtn: {
+    flex: 1, padding: '7px 0', border: 'none', borderRadius: 4, cursor: 'pointer',
+    fontSize: 13, background: 'transparent', color: '#aaa',
+  } as React.CSSProperties,
+  segBtnActive: {
+    flex: 1, padding: '7px 0', border: 'none', borderRadius: 4, cursor: 'pointer',
+    fontSize: 13, background: '#e94560', color: '#fff', fontWeight: 600,
+  } as React.CSSProperties,
+  kindHint: { fontSize: 12, color: '#aaa', marginBottom: 18, marginTop: -4 } as React.CSSProperties,
 };
 
 type Status = 'idle' | 'exporting' | 'done' | 'error';
 
 export default function ExportDialog({ project, onClose }: Props) {
   const [options, setOptions] = useState<ExportOptions>({
+    kind: 'video',
     resolution: '1080p', format: 'mp4-h264', quality: 'medium',
+    audioFormat: 'mp3', audioQuality: 'medium',
+    subtitleFormat: 'srt',
   });
   const [outputPath, setOutputPath] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const [progress, setProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');
+  const [copied, setCopied] = useState(false);
   const statusRef = useRef<Status>('idle');
 
   const hasClips = project.tracks.some((t) => t.clips.length > 0);
+  const hasAudio = project.tracks.some(
+    (t) => t.clips.length > 0 && (t.type === 'audio' || t.type === 'video')
+  );
+  const hasSubtitle = project.tracks.some(
+    (t) => t.clips.some((c) => c.subtitle && Array.isArray(c.subtitle.items) && c.subtitle.items.length > 0)
+  );
 
   // 导出中计时器
   useEffect(() => {
@@ -126,8 +148,11 @@ export default function ExportDialog({ project, onClose }: Props) {
   };
 
   const handleChoosePath = async () => {
-    const ext = options.format === 'mov' ? 'mov' : 'mp4';
-    const path = await window.aicut.openExportDialog(`output.${ext}`);
+    let ext = 'mp4';
+    if (options.kind === 'audio') ext = options.audioFormat;
+    else if (options.kind === 'subtitle') ext = options.subtitleFormat;
+    else ext = options.format === 'mov' ? 'mov' : 'mp4';
+    const path = await window.aicut.openExportDialog(options.kind, `output.${ext}`);
     if (path) setOutputPath(path);
   };
 
@@ -135,6 +160,7 @@ export default function ExportDialog({ project, onClose }: Props) {
     setProgress(0);
     setElapsedSeconds(0);
     setErrorMsg('');
+    setCopied(false);
     setStatus('exporting');
     statusRef.current = 'exporting';
     const result = await window.aicut.export.start(project, outputPath, options);
@@ -161,70 +187,151 @@ export default function ExportDialog({ project, onClose }: Props) {
     setOptions((prev) => ({ ...prev, [key]: value }));
   };
 
-  const canExport = outputPath && hasClips && status !== 'exporting';
+  const canExport =
+    outputPath && status !== 'exporting' &&
+    ((options.kind === 'video' && hasClips) ||
+      (options.kind === 'audio' && hasAudio) ||
+      (options.kind === 'subtitle' && hasSubtitle));
 
   return (
     <div style={C.overlay} onClick={(e) => { if (e.target === e.currentTarget && status !== 'exporting') onClose(); }}>
       <div style={C.dialog}>
         {/* 标题栏 */}
         <div style={C.header}>
-          <span style={C.title}>导出视频</span>
+          <span style={C.title}>导出</span>
           <button style={C.closeBtn} onClick={() => status !== 'exporting' && onClose()} disabled={status === 'exporting'}>
             ✕
           </button>
         </div>
 
         <div style={C.body}>
-          {!hasClips && (
+          {!hasClips && options.kind === 'video' && (
             <div style={C.warnText}>当前工程没有内容，请先添加素材到时间轴。</div>
           )}
+          {!hasAudio && options.kind === 'audio' && (
+            <div style={C.warnText}>当前工程没有可导出的音频（请先添加带声音的素材或音频轨）。</div>
+          )}
+          {!hasSubtitle && options.kind === 'subtitle' && (
+            <div style={C.warnText}>当前工程没有字幕片段（请先添加字幕轨或用 ASR 生成字幕）。</div>
+          )}
 
-          {/* 分辨率 */}
+          {/* 导出类型（用户可三选一） */}
           <div style={C.row}>
-            <span style={C.label}>分辨率</span>
-            <select
-              style={C.select}
-              value={options.resolution}
-              onChange={(e) => updateOption('resolution', e.target.value)}
-              disabled={status === 'exporting'}
-            >
-              <option value="2160p">4K 分辨率 (3840×2160)</option>
-              <option value="1080p">1080p (1920×1080)</option>
-              <option value="720p">720p (1280×720)</option>
-              <option value="480p">480p (854×480)</option>
-              <option value="original">原尺寸（跟随画布）</option>
-            </select>
+            <span style={C.label}>导出类型</span>
+            <div style={C.segWrap}>
+              {(['video', 'audio', 'subtitle'] as const).map((k) => (
+                <button
+                  key={k}
+                  style={options.kind === k ? C.segBtnActive : C.segBtn}
+                  onClick={() => { updateOption('kind', k); setOutputPath(''); }}
+                  disabled={status === 'exporting'}
+                >
+                  {k === 'video' ? '视频' : k === 'audio' ? '音频' : '字幕'}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* 格式 */}
-          <div style={C.row}>
-            <span style={C.label}>格式</span>
-            <select
-              style={C.select}
-              value={options.format}
-              onChange={(e) => updateOption('format', e.target.value)}
-              disabled={status === 'exporting'}
-            >
-              <option value="mp4-h264">MP4 (H.264)</option>
-              <option value="mp4-h265">MP4 (H.265)</option>
-              <option value="mov">MOV</option>
-            </select>
-          </div>
+          {/* 视频选项 */}
+          {options.kind === 'video' && (
+            <>
+              {/* 分辨率 */}
+              <div style={C.row}>
+                <span style={C.label}>分辨率</span>
+                <select
+                  style={C.select}
+                  value={options.resolution}
+                  onChange={(e) => updateOption('resolution', e.target.value)}
+                  disabled={status === 'exporting'}
+                >
+                  <option value="2160p">4K 分辨率 (3840×2160)</option>
+                  <option value="1080p">1080p (1920×1080)</option>
+                  <option value="720p">720p (1280×720)</option>
+                  <option value="480p">480p (854×480)</option>
+                  <option value="original">原尺寸（跟随画布）</option>
+                </select>
+              </div>
 
-          {/* 质量 */}
-          <div style={C.row}>
-            <span style={C.label}>质量</span>
-            <select
-              style={C.select}
-              value={options.quality}
-              onChange={(e) => updateOption('quality', e.target.value)}
-              disabled={status === 'exporting'}
-            >
-              <option value="high">高 (CRF 18)</option>
-              <option value="medium">中 (CRF 23)</option>
-              <option value="low">低 (CRF 28)</option>
-            </select>
-          </div>
+              {/* 格式 */}
+              <div style={C.row}>
+                <span style={C.label}>格式</span>
+                <select
+                  style={C.select}
+                  value={options.format}
+                  onChange={(e) => updateOption('format', e.target.value)}
+                  disabled={status === 'exporting'}
+                >
+                  <option value="mp4-h264">MP4 (H.264)</option>
+                  <option value="mp4-h265">MP4 (H.265)</option>
+                  <option value="mov">MOV</option>
+                </select>
+              </div>
+
+              {/* 质量 */}
+              <div style={C.row}>
+                <span style={C.label}>质量</span>
+                <select
+                  style={C.select}
+                  value={options.quality}
+                  onChange={(e) => updateOption('quality', e.target.value)}
+                  disabled={status === 'exporting'}
+                >
+                  <option value="high">高 (CRF 18)</option>
+                  <option value="medium">中 (CRF 23)</option>
+                  <option value="low">低 (CRF 28)</option>
+                </select>
+              </div>
+            </>
+          )}
+
+          {/* 音频选项 */}
+          {options.kind === 'audio' && (
+            <>
+              <div style={C.row}>
+                <span style={C.label}>音频格式</span>
+                <select
+                  style={C.select}
+                  value={options.audioFormat}
+                  onChange={(e) => updateOption('audioFormat', e.target.value)}
+                  disabled={status === 'exporting'}
+                >
+                  <option value="mp3">MP3</option>
+                  <option value="wav">WAV (无损)</option>
+                  <option value="m4a">M4A (AAC)</option>
+                </select>
+              </div>
+              <div style={C.row}>
+                <span style={C.label}>质量</span>
+                <select
+                  style={C.select}
+                  value={options.audioQuality}
+                  onChange={(e) => updateOption('audioQuality', e.target.value)}
+                  disabled={status === 'exporting' || options.audioFormat === 'wav'}
+                >
+                  <option value="high">高 (320k)</option>
+                  <option value="medium">中 (192k)</option>
+                  <option value="low">低 (128k)</option>
+                </select>
+              </div>
+            </>
+          )}
+
+          {/* 字幕选项 */}
+          {options.kind === 'subtitle' && (
+            <div style={C.row}>
+              <span style={C.label}>字幕格式</span>
+              <select
+                style={C.select}
+                value={options.subtitleFormat}
+                onChange={(e) => updateOption('subtitleFormat', e.target.value)}
+                disabled={status === 'exporting'}
+              >
+                <option value="srt">SRT（最通用）</option>
+                <option value="ass">ASS（带样式）</option>
+                <option value="vtt">VTT（网页）</option>
+              </select>
+            </div>
+          )}
 
           {/* 输出路径 */}
           <div style={C.pathRow}>
@@ -265,8 +372,11 @@ export default function ExportDialog({ project, onClose }: Props) {
                 <strong>导出失败：</strong>
                 <button
                   style={{ ...C.btn, padding: '2px 10px', fontSize: 11 }}
-                  onClick={() => { navigator.clipboard?.writeText(errorMsg).catch(() => {}); }}
-                >复制错误</button>
+                  onClick={async () => {
+                    const ok = await window.aicut.clipboardWriteText(errorMsg);
+                    if (ok) setCopied(true);
+                  }}
+                >{copied ? '已复制 ✓' : '复制错误'}</button>
               </div>
               <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>{errorMsg}</div>
             </div>
