@@ -714,7 +714,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
 }
 
 export default function Timeline() {
-  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, copyClips, pasteClips, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
+  const { project, addTrack, insertTrackAt, addTrackLiveAt, addClip, removeClip, removeTrack, copyClips, pasteClips, splitClip, updateClipLive, moveClipLive, moveClipToTrackLive, realignProject, removeEmptyTrack, toggleTrackLock, toggleTrackVisible, toggleTrackMute, toggleTrackSolo, getMainVideoTrack } = useProjectStore();
   const { selectedTrackId, selectedClipId, selectedClipIds, currentTime, timelineZoom, magneticSnap, clipSnap, selectClip, setSelection, clearSelection, setCurrentTime, setTimelineZoom, toggleMagneticSnap, toggleClipSnap, setActiveRightPanel, setRightView, speechOverlay } = useUIStore();
   // 框选（rubber-band）临时状态：仅作用于单条轨道
   const [marquee, setMarquee] = useState<{ trackId: string; left: number; width: number } | null>(null);
@@ -731,6 +731,10 @@ export default function Timeline() {
   const subMenuRef = useRef<HTMLDivElement>(null);
   const [subMenuPos, setSubMenuPos] = useState<{ x: number; y: number } | null>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  // 轨道头部右键菜单（删除空轨）
+  const [trackMenu, setTrackMenu] = useState<{ x: number; y: number; trackId: string } | null>(null);
+  const trackMenuRef = useRef<HTMLDivElement>(null);
+  const [trackMenuPos, setTrackMenuPos] = useState<{ x: number; y: number } | null>(null);
 
   // 二级子菜单（声音分离 ▸）同样 clamp 进视口：向右/向下展开可能超出右/下边界
   useLayoutEffect(() => {
@@ -748,18 +752,19 @@ export default function Timeline() {
 
   // 点击菜单外任意位置（仅左键）关闭所有弹出菜单，修复“点别处菜单不消失”
   useEffect(() => {
-    if (!menu && !subMenu && !addMenu) return;
+    if (!menu && !subMenu && !addMenu && !trackMenu) return;
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;  // 仅左键；右键由各 onContext 自行处理
       const t = e.target as Node;
       if (menuRef.current?.contains(t)) return;
       if (subMenuRef.current?.contains(t)) return;
       if (addMenuRef.current?.contains(t)) return;
-      setMenu(null); setSubMenu(null); setAddMenu(null);
+      if (trackMenuRef.current?.contains(t)) return;
+      setMenu(null); setSubMenu(null); setAddMenu(null); setTrackMenu(null);
     };
     window.addEventListener('mousedown', onDown);
     return () => window.removeEventListener('mousedown', onDown);
-  }, [menu, subMenu, addMenu]);
+  }, [menu, subMenu, addMenu, trackMenu]);
   const [dragOver, setDragOver] = useState<{ time: number; trackIndex: number; yInTrack: number } | null>(null);
 
   // Timeline duration is at least 30s.
@@ -955,6 +960,20 @@ export default function Timeline() {
     if (y < m) y = m;
     setMenuPos({ x, y });
   }, [menu]);
+
+  // 轨道右键菜单定位（删除空轨）：同样 clamp 进视口
+  useLayoutEffect(() => {
+    if (!trackMenu || !trackMenuRef.current) { setTrackMenuPos(null); return; }
+    const rect = trackMenuRef.current.getBoundingClientRect();
+    const m = 8;
+    let x = trackMenu.x;
+    let y = trackMenu.y;
+    if (x + rect.width > window.innerWidth - m) x = Math.max(m, window.innerWidth - rect.width - m);
+    if (y + rect.height > window.innerHeight - m) y = Math.max(m, window.innerHeight - rect.height - m);
+    if (x < m) x = m;
+    if (y < m) y = m;
+    setTrackMenuPos({ x, y });
+  }, [trackMenu]);
 
   // 音频分离（av）：把视频片段拆成「仅视频」素材 + 一条「仅音频」轨道片段。
   async function handleSeparateAV(trackId: string, clipId: string) {
@@ -1213,7 +1232,8 @@ export default function Timeline() {
               padding: '0 6px', borderBottom: '1px solid rgba(255,255,255,0.05)',
               background: t.locked ? 'rgba(233,69,96,0.15)' : 'transparent',
               opacity: t.visible === false ? 0.4 : 1,
-            }}>
+            }}
+              onContextMenu={(e) => { e.preventDefault(); setTrackMenu({ x: e.clientX, y: e.clientY, trackId: t.id }); }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <span style={{ fontSize: 11 }}>{Gu[t.type] || '🎬'}</span>
                 <span style={{ fontSize: 10, color: '#aaa' }}>{t.type}</span>
@@ -1395,6 +1415,25 @@ export default function Timeline() {
           ))}
         </div>
       )}
+
+      {/* Track context menu: 右键轨道头部删除空轨 */}
+      {trackMenu && (() => {
+        const tr = useProjectStore.getState().project.tracks.find((x) => x.id === trackMenu.trackId);
+        const isEmpty = !tr || tr.clips.length === 0;
+        const isMain = !!tr?.isMain;
+        const canDelete = isEmpty && !isMain;
+        return (
+          <div ref={trackMenuRef} onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: trackMenuPos ? trackMenuPos.x : trackMenu.x, top: trackMenuPos ? trackMenuPos.y : trackMenu.y, zIndex: 1000, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 130 }}>
+            <div
+              onClick={() => { if (canDelete) removeTrack(trackMenu.trackId); setTrackMenu(null); }}
+              style={{ ...menuItem, opacity: canDelete ? 1 : 0.4, cursor: canDelete ? 'pointer' : 'not-allowed' }}
+              title={isMain ? '主视频轨永远保留，不可删除' : (!isEmpty ? '请先移走轨道内的素材再删除' : '删除此空轨道')}
+            >
+              删除轨道{isMain ? '（主轨）' : (!isEmpty ? '（非空）' : '')}
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

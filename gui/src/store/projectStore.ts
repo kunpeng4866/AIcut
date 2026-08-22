@@ -257,7 +257,12 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       });
       return newId;
     },
-    removeTrack: (id) => mutate((p) => ({ ...p, tracks: p.tracks.filter((t) => t.id !== id) })),
+    // 主视频轨永远保留；仅允许删除空轨道（无片段）。满足「没有放素材的轨道允许右键删除」且「主视频轨永远存在」。
+    removeTrack: (id) => mutate((p) => {
+      const t = p.tracks.find((x) => x.id === id);
+      if (!t || t.isMain || t.clips.length > 0) return p;
+      return { ...p, tracks: p.tracks.filter((x) => x.id !== id) };
+    }),
     // 连续拖动中专用：不压快照（拖动开始已压一次），直接新建一条同类型空白轨道并返回 id。
     // 供「拖到空白区即时建轨」使用，与 pushHistorySnapshot + 拖后 prune 配合实现「一次拖动=一次撤销」。
     addTrackLive: (type) => {
