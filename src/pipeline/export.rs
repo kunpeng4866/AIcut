@@ -12,7 +12,7 @@ use crate::project::{CanvasConfig, Clip, Project};
 use crate::subtitle;
 use crate::timeline::Timeline;
 use crate::AppError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -419,17 +419,74 @@ impl<'a> ExportPipeline<'a> {
         // 内置字体目录（由 Electron 主进程通过 AICUT_FONTS_DIR 传入），用于导出时
         // 将 drawtext 的 fontfile= 指向随包字体，保证预览/导出字体一致。
         let fontfile_dir = std::env::var("AICUT_FONTS_DIR").unwrap_or_default();
+
+        // 去重：同一文本在同一画面位置、同一时间段出现多次时，只烧录一次。
+        // 典型场景：语音转文字生成 _subtitle 轨道后，用户又做文字转语音，项目里可能
+        // 同时存在 _subtitle 和 _text 两份相同内容；导出若不做去重会出现两行字幕。
+        // 键：文本 + 毫秒级起止时间 + 归一化位置，保证视觉上重叠的重复字幕只留一条。
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        struct OverlayKey {
+            text: String,
+            start_ms: i64,
+            end_ms: i64,
+            y_ms: i64,
+            x_ms: i64,
+        }
+        fn q(v: f64) -> i64 { (v * 1000.0).round() as i64 }
+        let mut seen: HashSet<OverlayKey> = HashSet::new();
+
         for track in &self.project.tracks {
             if track.visible == false { continue; }  // 隐藏轨不渲染
             for clip in &track.clips {
                 if let Some(t) = &clip.text {
-                    if let Some(f) = subtitle::build_text_overlay_filter(t, clip.timeline_in, clip.timeline_out, w, h, &fontfile_dir) {
-                        text_filters.push((clip.timeline_in, f));
+                    let trimmed = t.content.trim();
+                    if !trimmed.is_empty() {
+                        let key = OverlayKey {
+                            text: trimmed.to_string(),
+                            start_ms: q(clip.timeline_in),
+                            end_ms: q(clip.timeline_out),
+                            y_ms: q(t.y.unwrap_or(0.5)),
+                            x_ms: q(t.x.unwrap_or(0.5)),
+                        };
+                        if seen.insert(key) {
+                            if let Some(f) = subtitle::build_text_overlay_filter(t, clip.timeline_in, clip.timeline_out, w, h, &fontfile_dir) {
+                                text_filters.push((clip.timeline_in, f));
+                            }
+                        }
                     }
                 }
                 if let Some(s) = &clip.subtitle {
-                    for f in subtitle::build_subtitle_overlay_filters_for_clip(s, clip, w, h, &fontfile_dir) {
-                        text_filters.push((clip.timeline_in, f));
+                    for item in &s.items {
+                        let trimmed = item.text.trim();
+                        if trimmed.is_empty() { continue; }
+                        let abs_start = subtitle::source_to_timeline(item.start - s.time_offset, clip);
+                        let abs_end = subtitle::source_to_timeline(item.end - s.time_offset, clip);
+                        let y = s.pos_y.unwrap_or_else(|| match s.position.as_deref() {
+                            Some("top") => 0.15,
+                            Some("bottom") => 0.85,
+                            _ => 0.5,
+                        });
+                        let x = s.pos_x.unwrap_or_else(|| match s.align.as_deref().unwrap_or("center") {
+                            "left" => 0.12,
+                            "right" => 0.88,
+                            _ => 0.5,
+                        });
+                        let key = OverlayKey {
+                            text: trimmed.to_string(),
+                            start_ms: q(abs_start),
+                            end_ms: q(abs_end),
+                            y_ms: q(y),
+                            x_ms: q(x),
+                        };
+                        if seen.insert(key) {
+                            let sub_single = subtitle::SubtitleOverlay {
+                                items: vec![item.clone()],
+                                ..s.clone()
+                            };
+                            for f in subtitle::build_subtitle_overlay_filters_for_clip(&sub_single, clip, w, h, &fontfile_dir) {
+                                text_filters.push((clip.timeline_in, f));
+                            }
+                        }
                     }
                 }
             }

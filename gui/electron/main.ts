@@ -5,12 +5,14 @@ import { readFile, writeFile, mkdir, readdir, unlink, stat } from 'fs/promises';
 import { mkdirSync } from 'fs';
 import { createReadStream } from 'fs';
 import { Readable } from 'stream';
-import { join, dirname, basename } from 'path';
+import { join, dirname, basename, delimiter } from 'path';
 import { pathToFileURL } from 'url';
 import { applyExportOptions, applyAudioExport, buildSubtitleExport, parseShellArgs, type ExportOptionsParam } from './exportOptions';
 
 let mainWindow: BrowserWindow | null = null;
-const ENGINE_BIN = join(__dirname, '../../target/debug/aicut-engine.exe');
+const ENGINE_BIN = app.isPackaged
+  ? join(process.resourcesPath, 'engine', 'aicut-engine.exe')
+  : join(__dirname, '../../target/debug/aicut-engine.exe');
 
 // 让引擎 CLI（plugin:list / render 子进程）能定位插件目录（仓库根/plugins）。
 // render 子进程继承此环境变量，因而应用插件也会在导出时生效。
@@ -27,6 +29,27 @@ try {
   process.env.AICUT_KEYING_BRIDGE = join(__dirname, '../../python/keying/bridge.py');
   process.env.AICUT_SR_BRIDGE = join(__dirname, '../../python/sr/bridge.py');
 } catch { /* dev 兜底 */ }
+
+// 打包模式：覆盖为随包自包含路径（resources/），使分发包在任意机器离线运行。
+// 这些环境变量会被 spawn 的引擎子进程继承；Rust 端已支持 AICUT_PYTHON_BIN / AICUT_*_BRIDGE 覆盖。
+if (app.isPackaged) {
+  const res = process.resourcesPath;
+  process.env.AICUT_PLUGIN_DIR = join(res, 'plugins');
+  process.env.AICUT_FONTS_DIR = join(res, 'fonts');
+  const ff = join(res, 'ffmpeg');
+  process.env.PATH = `${ff}${delimiter}${process.env.PATH || ''}`;
+  process.env.AICUT_FFMPEG = join(ff, 'ffmpeg.exe');
+  process.env.AICUT_FFPROBE = join(ff, 'ffprobe.exe');
+  const pyDir = join(res, 'python');
+  process.env.AICUT_PYTHON_BIN = join(pyDir, 'python.exe');
+  process.env.AICUT_SPEECH_BRIDGE = join(pyDir, 'speech_edit', 'bridge.py');
+  process.env.AICUT_KEYING_BRIDGE = join(pyDir, 'keying', 'bridge.py');
+  process.env.AICUT_SR_BRIDGE = join(pyDir, 'sr', 'bridge.py');
+  const mDir = join(res, 'models');
+  process.env.AICUT_RMBG2_MODEL = join(mDir, 'rmbg2.onnx');
+  process.env.AICUT_MODNET_MODEL = join(mDir, 'modnet.onnx');
+  process.env.AICUT_SR_MODEL = join(mDir, 'sr_v0_test.onnx');
+}
 
 // ── 路径常量 ──
 function getConfigPath() { return join(app.getPath('userData'), 'config.json'); }

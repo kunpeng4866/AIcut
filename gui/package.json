@@ -49,8 +49,23 @@
       {
         "from": "public/fonts",
         "to": "fonts"
+      },
+      {
+        "from": "../pack-staging/ffmpeg",
+        "to": "ffmpeg"
+      },
+      {
+        "from": "../pack-staging/python",
+        "to": "python"
+      },
+      {
+        "from": "../pack-staging/models",
+        "to": "models"
       }
     ],
+    "directories": {
+      "output": "dist-full"
+    },
     "asarUnpack": [
       "fonts/**",
       "engine/**"

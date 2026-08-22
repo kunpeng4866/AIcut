@@ -592,7 +592,7 @@ pub fn build_subtitle_overlay_filters_for_clip(
 /// - 曲线（curve 非空时忽略 reverse/freeze）：二分反解归一化偏移 `off_norm`，
 ///   使 `speed_integral(curve, off_norm, 0) == (S - src_range.start) / dur`，
 ///   再 `T = timeline_in + off_norm · dur`。
-fn source_to_timeline(src: f64, clip: &crate::project::Clip) -> f64 {
+pub(crate) fn source_to_timeline(src: f64, clip: &crate::project::Clip) -> f64 {
     let timeline_in = clip.timeline_in;
     let dur = clip.timeline_out - timeline_in;
     let remap = &clip.time_remap;
