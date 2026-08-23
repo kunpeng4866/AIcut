@@ -9,8 +9,8 @@ import os
 
 # 火山引擎 TTS 配置
 URL = "https://openspeech.bytedance.com/api/v1/tts"
-APPID = "REDACTED"
-TOKEN = "REDACTED"
+APPID = os.environ.get("VOLCANO_TTS_APPID", "")
+TOKEN = os.environ.get("VOLCANO_TTS_TOKEN", "")
 
 # 尝试多种 voice_type，确认哪个可用
 VOICES = [

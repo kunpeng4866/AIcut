@@ -1,12 +1,13 @@
 """测试不同 cluster，确认 AppID 开通了哪个 TTS 产品"""
 import json
+import os
 import uuid
 import urllib.request
 import urllib.error
 
 URL = "https://openspeech.bytedance.com/api/v1/tts"
-APPID = "REDACTED"
-TOKEN = "REDACTED"
+APPID = os.environ.get("VOLCANO_TTS_APPID", "")
+TOKEN = os.environ.get("VOLCANO_TTS_TOKEN", "")
 
 # 火山引擎可能的 cluster 值
 CLUSTERS = [
