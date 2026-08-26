@@ -43,6 +43,12 @@ struct SpeechAssembleOptions {
     /// 缺省（None/空/长度不匹配）时回退到「间隙全删」的旧行为。
     #[serde(default)]
     keep_segments_out: Option<Vec<(f64, f64)>>,
+    /// 是否对视频流做同步剪切（Mode Ⅱ）。默认 true（音视频强关联）：
+    /// 分离重组路径下，视频按与音频相同的源区间逐段切片并 concat，保持与编辑后音频同步；
+    /// false（Mode Ⅰ）则保留整段原视频、仅替换音频轨道。仅作用于分离路径
+    /// （非分离路径始终按 keep_segments 同步切视频，不读此字段）。
+    #[serde(default)]
+    video_sync: Option<bool>,
     output_path: String,
     /// 交叉淡入淡出时长（毫秒）。默认 20ms：>0 且保留片段数 >= 2 时启用 crossfade。
     #[serde(default = "default_crossfade_ms")]
@@ -719,6 +725,14 @@ fn speech_assemble_separated(input: &str, opts: &SpeechAssembleOptions) -> Resul
 
     let ff = ffmpeg_exe();
     let has_video = has_video_stream(input)?;
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src_fps = probe(input).map(|m| m.fps).unwrap_or(30.0);
+    let fps = if src_fps > 0.0 && src_fps.is_finite() {
+        src_fps
+    } else {
+        30.0
+    };
 
     let declick = opts.declick.unwrap_or(false);
     let deess = opts.deess.unwrap_or(false);
@@ -844,42 +858,39 @@ fn speech_assemble_separated(input: &str, opts: &SpeechAssembleOptions) -> Resul
         fc.pop();
     }
 
-    let mut args: Vec<String> = vec!["-y".into()];
-    // 输入顺序：idx0 = 原 input（仅用其视频），idx1 = 人声 stem，idx2 = 伴奏 stem。
-    args.push("-i".into());
-    args.push(input.to_string());
-    args.push("-i".into());
-    args.push(vocal.to_string());
-    args.push("-i".into());
-    args.push(accomp.to_string());
-    args.push("-filter_complex".into());
-    args.push(fc);
-    args.push("-map".into());
-    if has_video {
-        // 注意：直接引用输入流用裸写法 `0:v`（无方括号）；方括号会被当成滤镜图输出标签而报错。
-        args.push("0:v".into());
-        args.push("-map".into());
-    }
-    args.push("[aout]".into());
-    args.push("-c:v".into());
-    args.push("libx264".into());
-    args.push("-pix_fmt".into());
-    args.push("yuv420p".into());
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-shortest".into());
-    args.push(opts.output_path.clone());
-
-    let out = Command::new(&ff)
-        .args(&args)
+    // ── 音频合成：filter_complex 产出 [aout]，先落临时音频文件 ──
+    let combined_audio = temp_dir.join(format!("aicut_sep_audio_{}.m4a", pid));
+    let combined_audio_str = combined_audio.to_string_lossy().replace('\\', "/");
+    let audio_args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        input.to_string(),
+        "-i".into(),
+        vocal.to_string(),
+        "-i".into(),
+        accomp.to_string(),
+        "-filter_complex".into(),
+        fc,
+        "-map".into(),
+        "[aout]".into(),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "2".into(),
+        "-c:a".into(),
+        "aac".into(),
+        combined_audio_str.clone(),
+    ];
+    let aout = Command::new(&ff)
+        .args(&audio_args)
         .output()
         .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    if !aout.status.success() {
         return Err(AppError::Render(format!(
-            "分离重组合成失败 (退出码 {:?}): {}",
-            out.status.code(),
-            stderr.chars().take(800).collect::<String>()
+            "分离重组合成失败 (退出码 {:?} args={:?}): {}",
+            aout.status.code(),
+            audio_args,
+            String::from_utf8_lossy(&aout.stderr).chars().take(800).collect::<String>()
         )));
     }
 
@@ -891,6 +902,83 @@ fn speech_assemble_separated(input: &str, opts: &SpeechAssembleOptions) -> Resul
     } else {
         total
     };
+
+    // ── 视频处理：Mode Ⅱ（默认）按源区间同步切；Mode Ⅰ 保留整段原视频 ──
+    let video_sync = opts.video_sync.unwrap_or(true) && has_video;
+    let output_str = opts.output_path.clone();
+    if video_sync {
+        // 按 segs 顺序对 0:v 逐段切片（无音频），再 concat → combined_video.mp4
+        let mut vid_clips: Vec<PathBuf> = Vec::with_capacity(segs.len());
+        for (i, &(_, s, e)) in segs.iter().enumerate() {
+            let vseg = temp_dir.join(format!("aicut_sep_vseg_{}_{}.mp4", pid, i));
+            if let Err(e) = build_video_seg(&ff, input, s, e, fps, &vseg) {
+                let _ = std::fs::remove_file(&combined_audio);
+                return Err(e);
+            }
+            vid_clips.push(vseg);
+        }
+        let combined_video = temp_dir.join(format!("aicut_sep_vid_{}.mp4", pid));
+        let vlist = temp_dir.join(format!("aicut_sep_vlist_{}.txt", pid));
+        if let Err(e) = concat_video(&ff, &vid_clips, &vlist, &combined_video) {
+            cleanup(&vid_clips, Some(&vlist));
+            let _ = std::fs::remove_file(&combined_audio);
+            return Err(e);
+        }
+        let mux: Vec<String> = vec![
+            "-y".into(),
+            "-i".into(),
+            combined_video.to_string_lossy().replace('\\', "/"),
+            "-i".into(),
+            combined_audio_str.clone(),
+            "-c".into(),
+            "copy".into(),
+            output_str,
+        ];
+        let mo = Command::new(&ff)
+            .args(&mux)
+            .output()
+            .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+        cleanup(&vid_clips, Some(&vlist));
+        let _ = std::fs::remove_file(&combined_video);
+        let _ = std::fs::remove_file(&combined_audio);
+        if !mo.status.success() {
+            return Err(AppError::Render(format!(
+                "分离 ModeⅡ 末级 mux 失败 (退出码 {:?}): {}",
+                mo.status.code(),
+                String::from_utf8_lossy(&mo.stderr).chars().take(800).collect::<String>()
+            )));
+        }
+    } else {
+        // Mode Ⅰ：保留整段原视频 + 替换音频（-c copy；无视频则仅输出音频）
+        let mut mux: Vec<String> = vec![
+            "-y".into(),
+            "-i".into(),
+            input.to_string(),
+            "-i".into(),
+            combined_audio_str.clone(),
+        ];
+        if has_video {
+            mux.push("-map".into());
+            mux.push("0:v".into());
+        }
+        mux.push("-map".into());
+        mux.push("1:a".into());
+        mux.push("-c".into());
+        mux.push("copy".into());
+        mux.push(output_str);
+        let mo = Command::new(&ff)
+            .args(&mux)
+            .output()
+            .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+        let _ = std::fs::remove_file(&combined_audio);
+        if !mo.status.success() {
+            return Err(AppError::Render(format!(
+                "分离 ModeⅠ 末级 mux 失败 (退出码 {:?}): {}",
+                mo.status.code(),
+                String::from_utf8_lossy(&mo.stderr).chars().take(800).collect::<String>()
+            )));
+        }
+    }
 
     Ok(json!({
         "outputPath": opts.output_path.clone(),
@@ -927,6 +1015,15 @@ fn speech_assemble_separated_pause(
 ) -> Result<Value, AppError> {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
+    let src_fps = probe(input).map(|m| m.fps).unwrap_or(30.0);
+    let fps = if src_fps > 0.0 && src_fps.is_finite() {
+        src_fps
+    } else {
+        30.0
+    };
+    let video_sync = opts.video_sync.unwrap_or(true) && has_video;
+    let mut vid_clips: Vec<PathBuf> = Vec::with_capacity(segments.len() * 2);
+    let mut prev_vseg: Option<PathBuf> = None;
 
     let mut clips: Vec<PathBuf> = Vec::with_capacity(segments.len() * 2);
     let mut clip_durations: Vec<f64> = Vec::with_capacity(segments.len() * 2);
@@ -944,6 +1041,18 @@ fn speech_assemble_separated_pause(
         }
         clips.push(mix_path);
         clip_durations.push((ve - vs).max(0.0));
+
+        // 1b) 视频同步段：按同一源区间 [vs,ve] 切片（Mode Ⅱ）。
+        if video_sync {
+            let vseg = temp_dir.join(format!("aicut_sep_pvseg_{}_{}.mp4", pid, i));
+            if let Err(e) = build_video_seg(ff, input, vs, ve, fps, &vseg) {
+                cleanup(&clips, None);
+                cleanup(&vid_clips, None);
+                return Err(e);
+            }
+            vid_clips.push(vseg.clone());
+            prev_vseg = Some(vseg);
+        }
 
         // 2) 间隙段（vocal i 与 i+1 之间）。
         if i + 1 < segments.len() {
@@ -980,9 +1089,35 @@ fn speech_assemble_separated_pause(
                     }
                     clips.push(sl_path);
                 }
+                if video_sync {
+                    if let Some(ref pv) = prev_vseg {
+                        let vfr = temp_dir.join(format!("aicut_sep_pvfr_{}_{}.mp4", pid, i));
+                        if let Err(e) = build_freeze_video_seg(ff, pv, gap_dur, fps, &vfr) {
+                            cleanup(&clips, None);
+                            cleanup(&vid_clips, None);
+                            return Err(e);
+                        }
+                        vid_clips.push(vfr);
+                    }
+                }
                 clip_durations.push(gap_dur);
             }
         }
+    }
+
+    // 3b) 视频同步：将 vid_clips 直连为 combined_video（与音频等时长、等序）。
+    let mut combined_video: Option<PathBuf> = None;
+    let mut vlist_path: Option<PathBuf> = None;
+    if video_sync && !vid_clips.is_empty() {
+        let cv = temp_dir.join(format!("aicut_sep_pvid_{}.mp4", pid));
+        let vl = temp_dir.join(format!("aicut_sep_pvlist_{}.txt", pid));
+        if let Err(e) = concat_video(ff, &vid_clips, &vl, &cv) {
+            cleanup(&clips, None);
+            cleanup(&vid_clips, Some(&vl));
+            return Err(e);
+        }
+        combined_video = Some(cv);
+        vlist_path = Some(vl);
     }
 
     // 3) concat demuxer 直连各段（均为 aac/48k/2ch，可 -c copy）。
@@ -1027,6 +1162,44 @@ fn speech_assemble_separated_pause(
         )));
     }
     cleanup(&clips, Some(&list_path));
+
+    // 4a) Mode Ⅱ：已同步切好的视频轨道 + 合并音频，直接封装（默认行为）。
+    if video_sync {
+        if let (Some(ref cv), Some(ref vl)) = (combined_video, vlist_path) {
+            let mux: Vec<String> = vec![
+                "-y".into(),
+                "-i".into(),
+                cv.to_string_lossy().replace('\\', "/"),
+                "-i".into(),
+                combined.to_string_lossy().replace('\\', "/"),
+                "-c".into(),
+                "copy".into(),
+                opts.output_path.clone(),
+            ];
+            let mo = Command::new(ff)
+                .args(&mux)
+                .output()
+                .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+            cleanup(&vid_clips, Some(vl));
+            let _ = std::fs::remove_file(&combined);
+            if !mo.status.success() {
+                return Err(AppError::Render(format!(
+                    "分离暂停 ModeⅡ 末级 mux 失败 (退出码 {:?}): {}",
+                    mo.status.code(),
+                    String::from_utf8_lossy(&mo.stderr).chars().take(800).collect::<String>()
+                )));
+            }
+            let out_duration: f64 = clip_durations.iter().sum();
+            let real_dur = probe(&opts.output_path)
+                .map(|m| m.duration)
+                .unwrap_or(out_duration);
+            return Ok(json!({
+                "outputPath": opts.output_path.clone(),
+                "duration": real_dur,
+                "ok": true
+            }));
+        }
+    }
 
     // 4) 末级 mux：原视频流 0:v（若有） + 合并音频（统一后处理），-shortest 截断到音频时长。
     let mut args: Vec<String> = vec![
@@ -1211,6 +1384,172 @@ fn build_silence_audio_clip(
     if !out.status.success() {
         return Err(AppError::Render(format!(
             "静音桥接段生成失败 (退出码 {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(600).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+/// 按源区间 [s,e] 从原视频流截取一段（无音频），用于 Mode Ⅱ 视频同步剪切。
+/// 与音频段同源同序，concat 后即可与编辑后的音频轨道对齐。
+fn build_video_seg(
+    ff: &str,
+    input: &str,
+    s: f64,
+    e: f64,
+    fps: f64,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
+    let out_str = out_path.to_string_lossy().replace('\\', "/");
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-ss".into(),
+        format!("{:.6}", s),
+        "-to".into(),
+        format!("{:.6}", e),
+        "-i".into(),
+        input.to_string(),
+        "-an".into(),
+        "-c:v".into(),
+        "libx264".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-r".into(),
+        format!("{:.4}", fps),
+        out_str,
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "视频同步片段切割失败 (退出码 {:?}): {}",
+            out.status.code(),
+            {
+                let s = String::from_utf8_lossy(&out.stderr);
+                let n = s.len();
+                s.chars().skip(n.saturating_sub(2500)).collect::<String>()
+            }
+        )));
+    }
+    Ok(())
+}
+
+/// 生成视频暂停冻结片段（无音频）：取 prev 段末帧冻结 pause 秒，用于 Mode Ⅱ 暂停间隙的视频对齐。
+/// 与非分离路径的 build_pause_clip 同理，但只产出视频（音频由对应桥接/静音段负责）。
+fn build_freeze_video_seg(
+    ff: &str,
+    prev_video_seg: &std::path::Path,
+    pause: f64,
+    fps: f64,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
+    let temp_dir = out_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let last_png = temp_dir.join(format!(
+        "aicut_freeze_{}.png",
+        out_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let last_str = last_png.to_string_lossy().replace('\\', "/");
+    let prev_str = prev_video_seg.to_string_lossy().replace('\\', "/");
+    let ext = Command::new(ff)
+        .args([
+            "-y",
+            "-sseof",
+            "-0.04",
+            "-i",
+            &prev_str,
+            "-vf",
+            "select=eq(n\\,0)",
+            "-frames:v",
+            "1",
+            &last_str,
+        ])
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !ext.status.success() {
+        let _ = std::fs::remove_file(&last_png);
+        return Err(AppError::Render(format!(
+            "冻结帧提取失败 (退出码 {:?}): {}",
+            ext.status.code(),
+            String::from_utf8_lossy(&ext.stderr).chars().take(400).collect::<String>()
+        )));
+    }
+    let out_str = out_path.to_string_lossy().replace('\\', "/");
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-loop".into(),
+        "1".into(),
+        "-i".into(),
+        last_str,
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        format!("anullsrc=r=48000:cl=stereo:d={:.6}", pause),
+        "-t".into(),
+        format!("{:.6}", pause),
+        "-c:v".into(),
+        "libx264".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-an".into(),
+        "-r".into(),
+        format!("{:.4}", fps),
+        "-shortest".into(),
+        out_str,
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    let _ = std::fs::remove_file(&last_png);
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "视频冻结片段生成失败 (退出码 {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(600).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+/// 用 concat demuxer 直连多个视频片段（均已统一编码、无音频），输出 video-only 文件。
+fn concat_video(
+    ff: &str,
+    clips: &[PathBuf],
+    list_path: &std::path::Path,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
+    let mut content = String::new();
+    for p in clips {
+        content.push_str(&format!("file '{}'\n", p.to_string_lossy().replace('\\', "/")));
+    }
+    if let Err(e) = std::fs::write(list_path, content) {
+        return Err(AppError::Render(format!("写入视频 concat 列表失败: {}", e)));
+    }
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        list_path.to_string_lossy().replace('\\', "/"),
+        "-c".into(),
+        "copy".into(),
+        out_path.to_string_lossy().replace('\\', "/"),
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "视频 concat 失败 (退出码 {:?}): {}",
             out.status.code(),
             String::from_utf8_lossy(&out.stderr).chars().take(600).collect::<String>()
         )));

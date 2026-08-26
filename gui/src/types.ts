@@ -348,6 +348,7 @@ export interface SpeechAssembleOptions {
   accompPath?: string;  // 伴奏 stem 路径（separated 时提供）
   musicSegments?: [number, number][]; // 纯伴奏桥接段（separated 时与 keepSegments 交替拼接，gap 音乐不丢）
   keepSegmentsOut?: [number, number][]; // 输出时间轴保留段（暂停压缩后）；提供时 Rust assemble 在段间插入短暂停而非全删
+  videoSync?: boolean; // Mode Ⅱ 视频同步剪切（默认 true）：分离重组时视频按与音频相同的源区间逐段切+concat，保持同步；false=Mode Ⅰ 保留整段原视频仅换音轨
 }
 
 export interface SpeechAPI {
