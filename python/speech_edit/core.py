@@ -2188,6 +2188,13 @@ def analyze(input_path: str, opts: dict) -> dict:
         print(f"  删除合计: {total_removed:.1f}s ({ratio*100:.0f}%)", flush=True)
         print(f"  保留段: {len(keep)} 段", flush=True)
 
+        # ── 能量曲线（供前端波形/能量可视化；相对量纲，前端自行归一化）──
+        _N = int(au.size)
+        _pts = 300                       # 目标点数（几十~几百）
+        _hop = max(1, _N // _pts)
+        energy_curve = [float(round(float(np.sqrt(float(np.mean(au[i:i + _hop] ** 2)))), 6))
+                        for i in range(0, _N, _hop)]
+
         result = {
             "duration": round(dur, 6),
             "sampleRate": 16000,
@@ -2221,6 +2228,7 @@ def analyze(input_path: str, opts: dict) -> dict:
             "keepSegmentsOut": [[float(s), float(e)] for s, e in (keep_out or keep)],
             "outputDuration": (output_dur if keep_out else round(dur, 6)),
             "speakingRate": speaking_rate_stats(words, dur, window=rate_window),
+            "energyCurve": energy_curve,
         }
         if warnings_out:
             result["warnings"] = warnings_out

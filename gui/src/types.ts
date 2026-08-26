@@ -298,7 +298,7 @@ export interface SpeechEditOptions {
   vadThreshold: number;      // VAD 灵敏度 0~1，默认 0.25
   minGap: number;            // 最小停顿(秒)，默认 0.18
   wordPad: number;           // 词边界 padding(秒)，默认 0.04
-  denoise: boolean;          // 去齿音/响度归一（降噪增强）
+  denoise: boolean;          // 启用降噪流水线(DFN3/FRCRN)，默认 true（core: do_denoise=opts.denoise）
   deess: boolean;            // 去齿音
   normalize: boolean;        // 响度归一(LUFS)
   fillers: boolean;          // 删语气词废话
@@ -308,6 +308,9 @@ export interface SpeechEditOptions {
   sedEvents?: boolean;        // 副语言/非语音事件检测(PANNs 帧级 SED：笑声/叹息/咳嗽/呼吸等)，默认 true
   sedThreshold?: number;      // 副语言事件触发阈值 0~1，默认 0.5
   respiroBreath?: boolean;    // 呼吸专项检测(Respiro 风格后处理)，默认 true
+  stutterDetect?: boolean;    // 语音级不流畅(口吃/重复)检测，默认 true
+  stutterThreshold?: number;  // 口吃检测敏感度 0~1，默认 0.5
+  denoiseQuality?: 'standard' | 'high'; // 降噪档位：standard=DFN3；high=FRCRN 高质量(CPU)
 }
 
 // 输出：与 W1 决策层 keep_segments + detail 对齐
@@ -329,6 +332,7 @@ export interface SpeechEditResult {
   keepSegmentsOut?: [number, number][];   // ★ 输出时间轴保留段（暂停压缩后；与 keepSegments 索引一一对应，段长一致，相邻段间隙=插入的短暂停）。Rust assemble 消费它把暂停真正落到音频
   outputDuration?: number;                // 输出总时长（<= duration，停顿被压缩）
   speakingRate?: any;                     // 语速统计（overall_cps / median_cps / windows / anomalies）
+  energyCurve?: number[];                 // 帧 RMS 能量曲线(相对量纲, 前端自行归一化), 约300点
 }
 
 // assemble（生成清洗文件）的输出

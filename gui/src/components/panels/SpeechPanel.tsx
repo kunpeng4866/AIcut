@@ -10,6 +10,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
 import type { ClipConfig, SpeechEditOptions, SpeechEditResult, SpeechAssembleOptions } from '../../types';
+import { useConfigStore } from '../../store/configStore';
 
 // 生成唯一ID（与 MediaPanel.tsx 同款实现）
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -24,6 +25,50 @@ const C = {
   border: '#0f3460',
   keep: '#67e8c4',
   removed: '#fca5a5',
+};
+
+// 三预设：轻量 / 标准 / 激进（标准 = 面板全套默认）
+type PresetKey = 'light' | 'standard' | 'aggressive';
+type PresetValues = {
+  modelSize: SpeechEditOptions['modelSize'];
+  useDemucs: boolean;
+  vadThreshold: number;
+  minGap: number;
+  wordPad: number;
+  denoise: boolean;
+  denoiseQuality: 'standard' | 'high';
+  deess: boolean;
+  normalize: boolean;
+  fillers: boolean;
+  keepNonspeech: boolean;
+  trimSilence: boolean;
+  sedEvents: boolean;
+  sedThreshold: number;
+  respiroBreath: boolean;
+  stutterDetect: boolean;
+  stutterThreshold: number;
+  crossfadeMs: number;
+  declick: boolean;
+};
+const PRESETS: Record<PresetKey, PresetValues> = {
+  light: {
+    modelSize: 'base', useDemucs: false, vadThreshold: 0.3, minGap: 0.1, wordPad: 0.02,
+    denoise: true, denoiseQuality: 'standard', deess: false, normalize: false, fillers: true,
+    keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.4,
+    respiroBreath: false, stutterDetect: true, stutterThreshold: 0.4, crossfadeMs: 20, declick: true,
+  },
+  standard: {
+    modelSize: 'base', useDemucs: false, vadThreshold: 0.25, minGap: 0.18, wordPad: 0.04,
+    denoise: true, denoiseQuality: 'standard', deess: false, normalize: false, fillers: true,
+    keepNonspeech: true, trimSilence: true, sedEvents: true, sedThreshold: 0.5,
+    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.5, crossfadeMs: 20, declick: true,
+  },
+  aggressive: {
+    modelSize: 'small', useDemucs: false, vadThreshold: 0.2, minGap: 0.05, wordPad: 0.06,
+    denoise: true, denoiseQuality: 'high', deess: true, normalize: true, fillers: true,
+    keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.6,
+    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.6, crossfadeMs: 30, declick: true,
+  },
 };
 
 // 由 keepSegments 求补集，得到「被删除」区间 [start,end]
@@ -137,24 +182,96 @@ export default function SpeechPanel() {
     return sa && (sa.type === 'audio' || sa.type === 'video') ? sa : null;
   })();
 
-  // ── 选项（本地状态，带默认值）──
-  const [modelSize, setModelSize] = useState<SpeechEditOptions['modelSize']>('base');
-  const [useDemucs, setUseDemucs] = useState(false);      // 声源分离（默认关：口播清洗直接用原素材音频，避免 Demucs 误分配导致静音；需保留背景音乐时手动开启）
-  const [vadThreshold, setVadThreshold] = useState(0.25);  // VAD 灵敏度
-  const [minGap, setMinGap] = useState(0.18);             // 最小停顿
-  const [wordPad, setWordPad] = useState(0.04);           // 词边界 padding
-  const [fillers, setFillers] = useState(true);           // 删语气词
-  const [deess, setDeess] = useState(false);              // 去齿音
-  const [normalize, setNormalize] = useState(false);      // 响度归一
-  const [keepNonspeech, setKeepNonspeech] = useState(true); // 保留背景音乐/环境音
-  const [trimSilence, setTrimSilence] = useState(true);      // 修剪首尾静音
-  const [sedEvents, setSedEvents] = useState(true);          // 副语言/非语音事件检测(PANNs SED)
-  const [respiroBreath, setRespiroBreath] = useState(true);  // 呼吸专项检测(Respiro)
-  const [sedThreshold, setSedThreshold] = useState(0.5);     // 副语言事件阈值 0~1
+  // ── 偏好记忆（useConfigStore 持久化）──
+  const speechPrefs = useConfigStore((s) => s.config?.speech);
+  // 组件内持久化 helper（非 hook）：把当前选项补丁写回 config.speech
+  const persistSpeech = (patch: Record<string, unknown>) => {
+    const cur = useConfigStore.getState().config?.speech ?? {};
+    useConfigStore.getState().updateConfig({ speech: { ...cur, ...patch } });
+  };
+  // 统一 set 某个选项并持久化（避免逐个 onChange 重复写）
+  const setOpt = <K extends keyof typeof PRESETS.standard>(
+    setter: (v: (typeof PRESETS.standard)[K]) => void,
+    key: K,
+    v: (typeof PRESETS.standard)[K],
+  ) => {
+    setter(v);
+    persistSpeech({ [key]: v } as Record<string, unknown>);
+  };
+  // 当前高亮预设：本地点击态优先，否则读回持久化的 preset
+  const storedPreset = speechPrefs ? (speechPrefs as Record<string, unknown>).preset : undefined;
+  const [presetActive, setPresetActive] = useState<PresetKey | null>(null);
+  const activePreset = presetActive ?? (storedPreset as PresetKey | undefined) ?? null;
+
+  // ── 选项（本地状态；默认值取偏好记忆，回退到标准预设）──
+  const [modelSize, setModelSize] = useState<SpeechEditOptions['modelSize']>(speechPrefs?.modelSize ?? PRESETS.standard.modelSize);
+  const [useDemucs, setUseDemucs] = useState(speechPrefs?.useDemucs ?? PRESETS.standard.useDemucs);      // 声源分离（默认关：口播清洗直接用原素材音频，避免 Demucs 误分配导致静音；需保留背景音乐时手动开启）
+  const [vadThreshold, setVadThreshold] = useState(speechPrefs?.vadThreshold ?? PRESETS.standard.vadThreshold);  // VAD 灵敏度
+  const [minGap, setMinGap] = useState(speechPrefs?.minGap ?? PRESETS.standard.minGap);             // 最小停顿
+  const [wordPad, setWordPad] = useState(speechPrefs?.wordPad ?? PRESETS.standard.wordPad);           // 词边界 padding
+  const [denoise, setDenoise] = useState(speechPrefs?.denoise ?? PRESETS.standard.denoise);             // AI 降噪
+  const [denoiseQuality, setDenoiseQuality] = useState<'standard' | 'high'>(speechPrefs?.denoiseQuality ?? PRESETS.standard.denoiseQuality);
+  const [stutterDetect, setStutterDetect] = useState(speechPrefs?.stutterDetect ?? PRESETS.standard.stutterDetect); // 结巴/卡顿检测
+  const [stutterThreshold, setStutterThreshold] = useState(speechPrefs?.stutterThreshold ?? PRESETS.standard.stutterThreshold); // 结巴阈值
+  const [fillers, setFillers] = useState(speechPrefs?.fillers ?? PRESETS.standard.fillers);           // 删语气词
+  const [deess, setDeess] = useState(speechPrefs?.deess ?? PRESETS.standard.deess);              // 去齿音
+  const [normalize, setNormalize] = useState(speechPrefs?.normalize ?? PRESETS.standard.normalize);      // 响度归一
+  const [keepNonspeech, setKeepNonspeech] = useState(speechPrefs?.keepNonspeech ?? PRESETS.standard.keepNonspeech); // 保留背景音乐/环境音
+  const [trimSilence, setTrimSilence] = useState(speechPrefs?.trimSilence ?? PRESETS.standard.trimSilence);      // 修剪首尾静音
+  const [sedEvents, setSedEvents] = useState(speechPrefs?.sedEvents ?? PRESETS.standard.sedEvents);          // 副语言/非语音事件检测(PANNs SED)
+  const [respiroBreath, setRespiroBreath] = useState(speechPrefs?.respiroBreath ?? PRESETS.standard.respiroBreath);  // 呼吸专项检测(Respiro)
+  const [sedThreshold, setSedThreshold] = useState(speechPrefs?.sedThreshold ?? PRESETS.standard.sedThreshold);     // 副语言事件阈值 0~1
 
   // ── assemble 选项 ──
-  const [declick, setDeclick] = useState(true);          // 去咔哒声(爆音)
-  const [crossfadeMs, setCrossfadeMs] = useState(20);    // 接缝平滑(ms)
+  const [declick, setDeclick] = useState(speechPrefs?.declick ?? PRESETS.standard.declick);          // 去咔哒声(爆音)
+  const [crossfadeMs, setCrossfadeMs] = useState(speechPrefs?.crossfadeMs ?? PRESETS.standard.crossfadeMs);    // 接缝平滑(ms)
+
+  // 用当前面板选项生成 analyze 用的 opts（修复原 denoise 硬编码 false 的 bug）
+  const buildOpts = (): SpeechEditOptions => ({
+    modelSize,
+    useDemucs,
+    vadThreshold,
+    minGap,
+    wordPad,
+    denoise,
+    denoiseQuality,
+    deess,
+    normalize,
+    fillers,
+    keepNonspeech,
+    trimSilence,
+    sedEvents,
+    sedThreshold,
+    respiroBreath,
+    stutterDetect,
+    stutterThreshold,
+  });
+
+  // 应用预设：一次性 set 所有状态并持久化
+  const applyPreset = (key: PresetKey) => {
+    const p = PRESETS[key];
+    setModelSize(p.modelSize);
+    setUseDemucs(p.useDemucs);
+    setVadThreshold(p.vadThreshold);
+    setMinGap(p.minGap);
+    setWordPad(p.wordPad);
+    setDenoise(p.denoise);
+    setDenoiseQuality(p.denoiseQuality);
+    setStutterDetect(p.stutterDetect);
+    setStutterThreshold(p.stutterThreshold);
+    setDeess(p.deess);
+    setNormalize(p.normalize);
+    setFillers(p.fillers);
+    setKeepNonspeech(p.keepNonspeech);
+    setTrimSilence(p.trimSilence);
+    setSedEvents(p.sedEvents);
+    setSedThreshold(p.sedThreshold);
+    setRespiroBreath(p.respiroBreath);
+    setCrossfadeMs(p.crossfadeMs);
+    setDeclick(p.declick);
+    persistSpeech({ ...p, preset: key });
+    setPresetActive(key);
+  };
 
   // ── 结果 / 状态 ──
   const [result, setResult] = useState<SpeechEditResult | null>(null);
@@ -169,6 +286,11 @@ export default function SpeechPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+
+  // ── 时间轴全量批量处理 ──
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchTotal, setBatchTotal] = useState(0);
+  const [batchItems, setBatchItems] = useState<{ name: string; status: 'pending' | 'ok' | 'fail'; msg: string }[]>([]);
 
   // ── 删除明细编辑 / 试听 / 撤销 ──
   const currentTime = useUIStore((s) => s.currentTime);
@@ -298,22 +420,7 @@ export default function SpeechPanel() {
     setError(null);
     setMsg(null);
     try {
-      const opts: SpeechEditOptions = {
-        modelSize,
-        useDemucs,
-        vadThreshold,
-        minGap,
-        wordPad,
-        denoise: false,
-        deess,
-        normalize,
-        fillers,
-        keepNonspeech,
-        trimSilence,
-        sedEvents,
-        sedThreshold,
-        respiroBreath,
-      };
+      const opts = buildOpts();
       const res = await window.aicut.speech.analyze(selectedAsset.path, JSON.stringify(opts));
       if (res.success && res.data) {
         setResult(res.data);
@@ -406,6 +513,98 @@ export default function SpeechPanel() {
     }
   };
 
+  // ── 时间轴全量批量：串行对每段音/视频素材做 analyze → assemble 并落轨 ──
+  const handleBatch = async () => {
+    if (batchRunning) return;
+    const allClips = useProjectStore.getState().project.tracks.flatMap((t) => t.clips);
+    const seen = new Set<string>();
+    const targets: typeof assets = [];
+    for (const c of allClips) {
+      const a = assets.find((x) => x.id === c.assetId);
+      if (!a) continue;
+      if (a.type !== 'audio' && a.type !== 'video') continue;
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
+      targets.push(a);
+    }
+    if (targets.length === 0) {
+      setMsg('时间轴没有可批量处理的视频/音频素材');
+      return;
+    }
+    setBatchRunning(true);
+    setBatchTotal(targets.length);
+    setBatchItems(
+      targets.map((a) => ({ name: (a.path.split(/[\\/]/).pop() || a.path), status: 'pending' as const, msg: '' })),
+    );
+    setMsg(null);
+    for (let idx = 0; idx < targets.length; idx++) {
+      const a = targets[idx];
+      try {
+        const opts = buildOpts();
+        const res = await window.aicut.speech.analyze(a.path, JSON.stringify(opts));
+        if (!res.success || !res.data) throw new Error(res.error || '分析失败');
+        const outputPath = a.path.replace(/\.[^.]+$/, '_speechcut.mp4'); // 写到源文件旁边
+        const asmOpts: SpeechAssembleOptions = {
+          keepSegments: res.data.keepSegments,
+          keepSegmentsOut: res.data.keepSegmentsOut,
+          outputPath,
+          crossfadeMs,
+          declick,
+          deess,
+          normalize,
+          videoSync: true,
+          ...('separated' in res.data && res.data.separated
+            ? { separated: true, vocalPath: res.data.vocalPath, accompPath: res.data.accompPath, musicSegments: res.data.musicSegments }
+            : {}),
+        };
+        const res2 = await window.aicut.speech.assemble(a.path, JSON.stringify(asmOpts));
+        if (!res2.success || !res2.data) throw new Error(res2.error || '生成失败');
+        const asset = {
+          id: uid('asset'),
+          type: a.type, // 'video' | 'audio'
+          path: res2.data.outputPath,
+          duration: res2.data.duration,
+          fps: a.fps,
+        };
+        useProjectStore.getState().addAsset(asset);
+        // 落轨：音频源产物落音频轨、视频源产物落主视频轨（与单片段一致）。
+        const st = useProjectStore.getState();
+        let track = a.type === 'audio'
+          ? st.project.tracks.find((t) => t.type === 'audio')
+          : st.getMainVideoTrack();
+        if (!track) {
+          const tid = st.addTrack(a.type === 'audio' ? 'audio' : 'video');
+          track = st.project.tracks.find((t) => t.id === tid);
+        }
+        if (track) {
+          const lastClip = track.clips[track.clips.length - 1];
+          const start = lastClip ? lastClip.timelineOut : 0;
+          const duration = res2.data.duration || asset.duration || 5;
+          const clip: ClipConfig = {
+            id: uid('clip'),
+            assetId: asset.id,
+            src_range: { start: 0, end: duration },
+            timelineIn: start,
+            timelineOut: start + duration,
+            transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
+            volume: 1,
+            speed: 1,
+            effects: [],
+            masks: [],
+            filters: [],
+            keyframes: {},
+          };
+          st.addClip(track.id, clip);
+        }
+        setBatchItems((prev) => prev.map((it, i) => (i === idx ? { ...it, status: 'ok', msg: '已生成' } : it)));
+      } catch (e) {
+        setBatchItems((prev) => prev.map((it, i) => (i === idx ? { ...it, status: 'fail', msg: e instanceof Error ? e.message : String(e) } : it)));
+      }
+    }
+    setBatchRunning(false);
+    setMsg(`批量处理完成：共 ${targets.length} 段素材（见下方明细）。`);
+  };
+
   return (
     <div style={{ padding: 12, color: C.textMain, fontSize: 13, height: '100%', overflowY: 'auto', boxSizing: 'border-box' }}>
       <h3 style={{ margin: '0 0 8px', fontSize: 15 }}>口播剪辑（自动去口癖/静音）</h3>
@@ -426,11 +625,29 @@ export default function SpeechPanel() {
 
           {/* 选项区 */}
           <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 10 }}>
+            {/* 三预设：轻量 / 标准 / 激进（当前预设高亮） */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+              {(['light', 'standard', 'aggressive'] as const).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => applyPreset(k)}
+                  style={{
+                    flex: 1, padding: '5px 0', fontSize: 12, cursor: 'pointer',
+                    background: activePreset === k ? C.accent : C.control,
+                    color: activePreset === k ? '#fff' : C.textMain,
+                    border: `1px solid ${C.border}`, borderRadius: 4,
+                  }}
+                >
+                  {k === 'light' ? '轻量' : k === 'standard' ? '标准' : '激进'}
+                </button>
+              ))}
+            </div>
+
             {/* 模型尺寸 */}
             <label style={{ display: 'block', marginBottom: 4, opacity: 0.85 }}>识别模型</label>
             <select
               value={modelSize}
-              onChange={(e) => setModelSize(e.target.value as SpeechEditOptions['modelSize'])}
+              onChange={(e) => setOpt(setModelSize, 'modelSize', e.target.value as SpeechEditOptions['modelSize'])}
               style={{ width: '100%', marginBottom: 10, padding: 4, background: C.control, color: C.textMain, border: 'none', borderRadius: 4 }}
             >
               <option value="tiny">tiny（最快）</option>
@@ -442,74 +659,118 @@ export default function SpeechPanel() {
 
             {/* 复选框 */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
-              <input type="checkbox" checked={useDemucs} onChange={(e) => setUseDemucs(e.target.checked)} />
+              <input type="checkbox" checked={useDemucs} onChange={(e) => setOpt(setUseDemucs, 'useDemucs', e.target.checked)} />
               声源分离降噪
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
-              <input type="checkbox" checked={fillers} onChange={(e) => setFillers(e.target.checked)} />
+              <input type="checkbox" checked={denoise} onChange={(e) => setOpt(setDenoise, 'denoise', e.target.checked)} />
+              AI 降噪
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
+              降噪质量
+              <select value={denoiseQuality} onChange={(e) => setOpt(setDenoiseQuality, 'denoiseQuality', e.target.value as 'standard' | 'high')} style={{ background: C.control, color: C.textMain, border: 'none', borderRadius: 4, padding: '2px 4px' }}>
+                <option value="standard">标准</option>
+                <option value="high">高</option>
+              </select>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={stutterDetect} onChange={(e) => setOpt(setStutterDetect, 'stutterDetect', e.target.checked)} />
+              结巴/卡顿检测
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={fillers} onChange={(e) => setOpt(setFillers, 'fillers', e.target.checked)} />
               删语气词（嗯/啊/那个…）
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
-              <input type="checkbox" checked={deess} onChange={(e) => setDeess(e.target.checked)} />
+              <input type="checkbox" checked={deess} onChange={(e) => setOpt(setDeess, 'deess', e.target.checked)} />
               去齿音
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, cursor: 'pointer' }}>
-              <input type="checkbox" checked={normalize} onChange={(e) => setNormalize(e.target.checked)} />
+              <input type="checkbox" checked={normalize} onChange={(e) => setOpt(setNormalize, 'normalize', e.target.checked)} />
               响度归一
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, cursor: 'pointer' }}>
-              <input type="checkbox" checked={keepNonspeech} onChange={(e) => setKeepNonspeech(e.target.checked)} />
+              <input type="checkbox" checked={keepNonspeech} onChange={(e) => setOpt(setKeepNonspeech, 'keepNonspeech', e.target.checked)} />
               保留背景音乐/环境音
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, cursor: 'pointer' }}>
-              <input type="checkbox" checked={trimSilence} onChange={(e) => setTrimSilence(e.target.checked)} />
+              <input type="checkbox" checked={trimSilence} onChange={(e) => setOpt(setTrimSilence, 'trimSilence', e.target.checked)} />
               修剪首尾静音
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
-              <input type="checkbox" checked={sedEvents} onChange={(e) => setSedEvents(e.target.checked)} />
+              <input type="checkbox" checked={sedEvents} onChange={(e) => setOpt(setSedEvents, 'sedEvents', e.target.checked)} />
               副语言事件检测（笑声/叹息/咳嗽/呼吸…）
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, cursor: 'pointer' }}>
-              <input type="checkbox" checked={respiroBreath} onChange={(e) => setRespiroBreath(e.target.checked)} />
+              <input type="checkbox" checked={respiroBreath} onChange={(e) => setOpt(setRespiroBreath, 'respiroBreath', e.target.checked)} />
               呼吸专项检测（温和去气声）
             </label>
 
             {/* 滑块：VAD 灵敏度 */}
             <SliderRow label="VAD 灵敏度" value={vadThreshold} min={0.05} max={0.6} step={0.05}
-              onChange={setVadThreshold} display={vadThreshold.toFixed(2)} />
+              onChange={(v) => setOpt(setVadThreshold, 'vadThreshold', v)} display={vadThreshold.toFixed(2)} />
             {/* 滑块：最小停顿 */}
             <SliderRow label="最小停顿(s)" value={minGap} min={0.05} max={0.6} step={0.01}
-              onChange={setMinGap} display={minGap.toFixed(2)} />
+              onChange={(v) => setOpt(setMinGap, 'minGap', v)} display={minGap.toFixed(2)} />
             {/* 滑块：词边界 padding */}
             <SliderRow label="词边界(s)" value={wordPad} min={0} max={0.2} step={0.01}
-              onChange={setWordPad} display={wordPad.toFixed(2)} />
+              onChange={(v) => setOpt(setWordPad, 'wordPad', v)} display={wordPad.toFixed(2)} />
             {/* 滑块：副语言事件阈值 */}
             <SliderRow label="副语言阈值" value={sedThreshold} min={0.1} max={0.9} step={0.05}
-              onChange={setSedThreshold} display={sedThreshold.toFixed(2)} />
+              onChange={(v) => setOpt(setSedThreshold, 'sedThreshold', v)} display={sedThreshold.toFixed(2)} />
+            {/* 滑块：结巴阈值 */}
+            <SliderRow label="结巴阈值" value={stutterThreshold} min={0.1} max={0.9} step={0.05}
+              onChange={(v) => setOpt(setStutterThreshold, 'stutterThreshold', v)} display={stutterThreshold.toFixed(2)} />
 
             {/* 滑块：接缝平滑（assemble 用 crossfadeMs） */}
             <SliderRow label="接缝平滑(ms)" value={crossfadeMs} min={0} max={100} step={5}
-              onChange={setCrossfadeMs} display={String(crossfadeMs)} />
+              onChange={(v) => setOpt(setCrossfadeMs, 'crossfadeMs', v)} display={String(crossfadeMs)} />
 
             {/* 复选框：去咔哒声（assemble） */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
-              <input type="checkbox" checked={declick} onChange={(e) => setDeclick(e.target.checked)} />
+              <input type="checkbox" checked={declick} onChange={(e) => setOpt(setDeclick, 'declick', e.target.checked)} />
               去咔哒声(爆音)
             </label>
           </div>
 
-          {/* 分析按钮 */}
-          <button
-            onClick={handleAnalyze}
-            disabled={loading}
-            style={{
-              width: '100%', padding: '8px 10px', marginBottom: 8,
-              background: loading ? '#555' : C.accent, color: '#fff',
-              border: 'none', borderRadius: 4, cursor: loading ? 'default' : 'pointer', fontSize: 13,
-            }}
-          >
-            {loading ? '分析中…（whisper 首次可能较慢）' : '分析'}
-          </button>
+          {/* 分析 / 批量处理 按钮 */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <button
+              onClick={handleAnalyze}
+              disabled={loading || batchRunning}
+              style={{
+                flex: 1, padding: '8px 10px',
+                background: loading ? '#555' : C.accent, color: '#fff',
+                border: 'none', borderRadius: 4, cursor: (loading || batchRunning) ? 'default' : 'pointer', fontSize: 13,
+              }}
+            >
+              {loading ? '分析中…（whisper 首次可能较慢）' : '分析'}
+            </button>
+            <button
+              onClick={handleBatch}
+              disabled={batchRunning}
+              style={{
+                flex: 1, padding: '8px 10px',
+                background: batchRunning ? '#555' : C.control, color: C.textMain,
+                border: `1px solid ${C.border}`, borderRadius: 4, cursor: batchRunning ? 'default' : 'pointer', fontSize: 13,
+              }}
+            >
+              {batchRunning ? '批量处理中…' : '批量处理时间轴'}
+            </button>
+          </div>
+
+          {/* 批量处理进度明细 */}
+          {batchItems.length > 0 && (
+            <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 8, marginBottom: 8, fontSize: 11 }}>
+              <div style={{ color: C.textSub, marginBottom: 4 }}>批量处理进度：{batchItems.filter((i) => i.status === 'ok').length}/{batchTotal}</div>
+              {batchItems.map((it, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', color: it.status === 'ok' ? C.keep : it.status === 'fail' ? '#ff6b6b' : C.textSub }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>{it.name}</span>
+                  <span>{it.status === 'ok' ? '✓' : it.status === 'fail' ? `✗ ${it.msg}` : '…'}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {result && (
             <button
@@ -549,20 +810,38 @@ export default function SpeechPanel() {
                     <span style={{ width: 10, height: 10, background: C.removed, borderRadius: 2, display: 'inline-block' }} />删除
                   </span>
                 </div>
-                {/* 时间轴条（红底=删除，绿块=保留） */}
-                <div style={{ position: 'relative', flex: 1, height: 32, borderRadius: 6, overflow: 'hidden', background: C.removed }}>
-                  {liveKeepSegments.map(([s, e], i) => (
-                    <div key={i} title={`保留 ${s.toFixed(2)}–${e.toFixed(2)}s`} style={{
-                      position: 'absolute', top: 0, bottom: 0,
-                      left: `${(s / result.duration) * 100}%`,
-                      width: `${((e - s) / result.duration) * 100}%`,
-                      background: C.keep, borderRadius: 3,
-                    }} />
-                  ))}
-                  {/* 10% 刻度参考线 */}
-                  {Array.from({ length: 9 }, (_, i) => (
-                    <div key={i} style={{ position: 'absolute', top: 0, bottom: 0, left: `${(i + 1) * 10}%`, width: 1, background: 'rgba(0,0,0,0.28)' }} />
-                  ))}
+                {/* 右侧：时间轴条 + 能量曲线（与条同比例对齐） */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {/* 时间轴条（红底=删除，绿块=保留） */}
+                  <div style={{ position: 'relative', height: 32, borderRadius: 6, overflow: 'hidden', background: C.removed }}>
+                    {liveKeepSegments.map(([s, e], i) => (
+                      <div key={i} title={`保留 ${s.toFixed(2)}–${e.toFixed(2)}s`} style={{
+                        position: 'absolute', top: 0, bottom: 0,
+                        left: `${(s / result.duration) * 100}%`,
+                        width: `${((e - s) / result.duration) * 100}%`,
+                        background: C.keep, borderRadius: 3,
+                      }} />
+                    ))}
+                    {/* 10% 刻度参考线 */}
+                    {Array.from({ length: 9 }, (_, i) => (
+                      <div key={i} style={{ position: 'absolute', top: 0, bottom: 0, left: `${(i + 1) * 10}%`, width: 1, background: 'rgba(0,0,0,0.28)' }} />
+                    ))}
+                  </div>
+                  {/* 能量曲线叠加：归一化到最大值后映射高度，与上方条按 duration 同比例对齐 */}
+                  {result.energyCurve && result.energyCurve.length > 1 && (() => {
+                    const ec = result.energyCurve as number[];
+                    const max = Math.max(...ec, 1e-6);
+                    const pts = ec.map((v, i) => `${i},${100 - (v / max) * 100}`).join(' ');
+                    return (
+                      <svg
+                        width="100%" height={30} viewBox={`0 0 ${ec.length} 100`}
+                        preserveAspectRatio="none"
+                        style={{ display: 'block', marginTop: 2 }}
+                      >
+                        <polyline points={pts} fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                      </svg>
+                    );
+                  })()}
                 </div>
               </div>
               <div style={{ fontSize: 10, color: C.textSub, marginBottom: 8, lineHeight: 1.5 }}>

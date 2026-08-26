@@ -53,6 +53,30 @@ export interface AssetsConfig {
   cdnBaseUrl: string;  // CDN 基础地址（末尾带 /），下载 python 运行时与模型权重
 }
 
+// 口播剪辑偏好（跨会话记忆，由 SpeechPanel 读写 config.speech）
+export interface SpeechEditPrefs {
+  preset?: 'light' | 'standard' | 'aggressive'; // 轻量/标准/激进 预设
+  modelSize?: 'tiny' | 'base' | 'small' | 'medium' | 'large';
+  useDemucs?: boolean;
+  vadThreshold?: number;
+  minGap?: number;
+  wordPad?: number;
+  denoise?: boolean;
+  denoiseQuality?: 'standard' | 'high';
+  deess?: boolean;
+  normalize?: boolean;
+  fillers?: boolean;
+  keepNonspeech?: boolean;
+  trimSilence?: boolean;
+  sedEvents?: boolean;
+  sedThreshold?: number;
+  respiroBreath?: boolean;
+  stutterDetect?: boolean;
+  stutterThreshold?: number;
+  crossfadeMs?: number;
+  declick?: boolean;
+}
+
 // 与 electron/assets-manifest.ts 的 DEFAULT_CDN_BASE 保持一致。
 // 渲染层不能 import electron 目录（tsconfig 分离），故在此镜像同一常量；
 // 改动其中一处必须同步另一处，否则「未配置」判定会错位。
@@ -67,6 +91,7 @@ export interface AIcutConfig {
   render: RenderConfig;
   plugins: PluginConfig;
   assets: AssetsConfig;
+  speech: SpeechEditPrefs;
 }
 
 // 生成默认配置
@@ -107,6 +132,28 @@ export function getDefaultConfig(): AIcutConfig {
     },
     assets: {
       cdnBaseUrl: '',
+    },
+    speech: {
+      preset: 'standard',
+      modelSize: 'base',
+      useDemucs: false,
+      vadThreshold: 0.25,
+      minGap: 0.18,
+      wordPad: 0.04,
+      denoise: true,
+      denoiseQuality: 'standard',
+      deess: false,
+      normalize: false,
+      fillers: true,
+      keepNonspeech: true,
+      trimSilence: true,
+      sedEvents: true,
+      sedThreshold: 0.5,
+      respiroBreath: true,
+      stutterDetect: true,
+      stutterThreshold: 0.5,
+      crossfadeMs: 20,
+      declick: true,
     },
   };
 }

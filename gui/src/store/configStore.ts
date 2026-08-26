@@ -42,6 +42,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       render: { ...current.render, ...(updates.render ?? {}) },
       plugins: { ...current.plugins, ...(updates.plugins ?? {}) },
       assets: { ...current.assets, ...(updates.assets ?? {}) },
+      speech: { ...current.speech, ...(updates.speech ?? {}) },
     };
     set({ config: merged });
     try {

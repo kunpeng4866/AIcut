@@ -20,6 +20,7 @@ function parseConfig(raw: string): AIcutConfig {
       tts: { ...def.tts, ...parsed.tts },
       render: { ...def.render, ...parsed.render },
       plugins: { ...def.plugins, ...parsed.plugins },
+      speech: { ...def.speech, ...parsed.speech },
     };
   } catch {
     return getDefaultConfig();
