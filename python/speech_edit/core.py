@@ -619,7 +619,6 @@ def transcribe(wav_path: str, model_size: str = "small", language: str = None,
       - 保留 word_timestamps=True；
       - 若存在 DASHSCOPE_API_KEY，用 Paraformer 词级时间覆盖 whisper 时间戳。
     """
-    from faster_whisper import WhisperModel
     # 先估算时长（即便转写失败也能让后续 VAD 兜底走通）
     dur = 0.0
     try:
@@ -629,12 +628,29 @@ def transcribe(wav_path: str, model_size: str = "small", language: str = None,
         dur = 0.0
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
+    # ── 本地主路径：FunASR Paraformer 字级 + Qwen3-FA 强制对齐（零出域，±0.02s）──
+    # 权重缺失 / 模块不可用 / 显式禁用(AICUT_ASR_LOCAL=0) 时 local_transcribe 返回空列表，
+    # 静默回退下方 whisper→cloud→VAD 链（与旧行为零回归）。权重齐备时本路径为默认主用。
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from local_asr import local_transcribe as _local_tr
+        lw, lstatus, lmodel = _local_tr(wav_path, language)
+        if lw:
+            sys.stderr.write(f"[transcribe] 本地 ASR({lmodel}) 命中，跳过 whisper/cloud\n")
+            return lw, dur, lmodel, "ok"
+    except Exception as e:
+        sys.stderr.write(f"[transcribe] 本地 ASR 失败({e})，回退 whisper/cloud\n")
+
     dev, ctype = _whisper_device(device)
     words = []
     model = None
     status = "failed"
     try:
         try:
+            from faster_whisper import WhisperModel
             model = WhisperModel(model_size, device=dev, compute_type=ctype)
         except Exception as e:
             if dev != "cpu":

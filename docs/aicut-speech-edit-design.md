@@ -25,13 +25,12 @@
 
 ### 1.1 与最初设计的偏差（诚实记录）
 
-最初设计 §5.1 结论是「主识别用 **FunASR 本地字级** + **Qwen3-FA** 强制对齐」。**实际 P0 落地采用的是务实替代方案**：
+最初设计 §5.1 结论是「主识别用 **FunASR 本地字级** + **Qwen3-FA** 强制对齐」。**P0 先落地务实替代方案，现已补齐原目标路径**：
 
-- 本地识别用 **whisper `small`（CUDA EP）**，时间精度显著优于旧 base；
-- 词级时间戳用 **百炼 Paraformer（DashScope，项目已在用、按量 ~¥0.04/分钟）** 融合（见 `paraformer_words` / `_fuse_cloud_word_times`）；
-- **FunASR 本地字级 + Qwen3-FA 强制对齐尚未接入**（列为剩余项）。
+- P0 务实方案（保留为兜底链）：本地识别用 **whisper `small`（CUDA EP）**，词级时间戳用 **百炼 Paraformer（DashScope）** 融合（见 `paraformer_words` / `_fuse_cloud_word_times`）；
+- **原目标路径已接入（✅）**：`transcribe()` 现以 **本地 FunASR Paraformer 字级 + Qwen3-ForcedAligner 强制对齐** 为默认主用路径（零出域、±0.02s），权重缺失/失败时静默回退 whisper→cloud→VAD（与旧行为零回归）。
 
-原因：百炼 Paraformer 已是项目既有且便宜的通道，可在 P0 阶段立即拿到词级时间，不必等新模型权重落地。设计目标（时间戳准到能切）已部分达成，但「完全本地、零出域」仍待 FunASR+Qwen3-FA 落地后补齐。
+原因：百炼 Paraformer 是项目既有便宜通道，P0 先拿来即时拿到词级时间；FunASR+Qwen3-FA 权重与依赖就绪后已落地，达成「完全本地、零出域」的切准目标（见 §7.1 / §13.2）。
 
 ---
 
@@ -41,7 +40,8 @@
 
 | 能力 | 位置 | 说明 |
 |---|---|---|
-| CUDA 转写 + Paraformer 词级融合 | `transcribe` `core.py:563`（CUDA EP whisper small）；`paraformer_words` `:460`；`_fuse_cloud_word_times` `:508` | 本地 whisper small 出文本，百炼 Paraformer 出词级时间并融合；`status` 字段回传识别通道状态 |
+| CUDA 转写 + Paraformer 词级融合 | `transcribe` `core.py:563`（CUDA EP whisper small）；`paraformer_words` `:460`；`_fuse_cloud_word_times` `:508` | 本地 whisper small 出文本，百炼 Paraformer 出词级时间并融合；`status` 字段回传识别通道状态（现作为本地主路径的回退链） |
+| 本地高精度 ASR + 强制对齐（主用） | `local_asr.py`：`local_transcribe` → FunASR Paraformer 字级（`_funasr_chars`）+ Qwen3-FA 对齐（`_forced_align`）；`transcribe` `:636` 优先调用 | ✅ **零出域主路径**：FunASR 出中文字级文本，Qwen3-ForcedAligner 精修到 ±0.02s（毫秒级时间戳）；权重缺失/失败自动回退 whisper→cloud→VAD；`AICUT_ASR_LOCAL=0` 可禁用 |
 | 真实降噪 | `denoise_wav` `:418` → `_denoise_onnx` `:310` → `_denoise_dfn3` `:282` → `dfn3.enhance` | ✅ **DFN3 三段图已跑通并默认生效**（`dfn3.py` 纯 numpy+ORT，CUDA EP，69–92x 实时）；`_denoise_lightweight` 降为兜底 |
 | 安全阀放宽 | `detect_cough` `:925`（`keep_ratio=0.5`） | 与词区间重叠时不再整段不删，按重叠比例保守保留 |
 | ASR 失败兜底 | `_vad_only_silence` `:1399` | `words=[]` 时回退 VAD-only 而非静默早退 |
@@ -139,8 +139,8 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 | 步 | 动作 | 模型/工具 | 状态 |
 |---|---|---|---|
 | 1 | 抽音轨 16k | ffmpeg | ✅ |
-| 2 | 语音识别（主/增强） | whisper small(CUDA) + 百炼 Paraformer 融合 | ✅（替代原 FunASR 方案，见 §1.1） |
-| 3 | 强制对齐（切准核心） | Qwen3-FA（目标） | ⏳ 未接；当前靠 Paraformer 融合近似 |
+| 2 | 语音识别（主/增强） | 本地 FunASR Paraformer 字级（主用）+ whisper small(CUDA)/百炼 Paraformer 融合（兜底） | ✅（本地路径见 §1.1/§7.1） |
+| 3 | 强制对齐（切准核心） | Qwen3-FA（本地，±0.02s） | ✅ 已接（本地 Qwen3-FA，零出域） |
 | 4 | 停顿检测地基 | Silero VAD | ✅（`vad_speech_regions`） |
 | 5 | 填充词/口误 | 词表 + 词边界时间 | ✅（部分：文本+时间，未接 FunASR CT-Transformer） |
 | 6 | 重复/自我纠正/残句 | 改进 CTC + gap 分类（arXiv:2409.10177） | ⏳ 未接 |
@@ -161,8 +161,8 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 
 | 候选 | 结论 | 理由（选用/剔除） |
 |---|---|---|
-| **FunASR Paraformer（本地）** | ⏳ 目标主用 | 字级时间戳；AISHELL-1 CER 1.95%；中文最优之一；内置 CT-Transformer 去口误。**当前未接，P0 用百炼 Paraformer 融合替代** |
-| **Qwen3-ForcedAligner（本地）** | ⏳ 目标对齐层 | ±0.02s、离线、FP16 ~1.7GB。切准关键。**当前未接** |
+| **FunASR Paraformer（本地）** | ✅ 已接（主用） | 字级时间戳；AISHELL-1 CER 1.95%；中文最优之一；内置 CT-Transformer 去口误。**现为 `transcribe` 本地主路径，`local_asr._funasr_chars`** |
+| **Qwen3-ForcedAligner（本地）** | ✅ 已接（对齐层） | ±0.02s、离线、FP16 ~1.7GB。切准关键。**现为 `local_asr._forced_align`，权重 `python/models/asr/qwen3_fa`** |
 | **Paraformer 百炼 API** | ✅ 已增强/兜底 | 项目已在用、~¥0.04/分钟；与本地 whisper small 融合出词级时间。**P0 实际采用** |
 | WhisperX | ❌ 中文主线剔除 | 中文音素对齐弱于英文 |
 | whisper.cpp | ✅ 保留兜底 | 断网可用，段级，不精确切割 |
@@ -275,13 +275,13 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 
 ## 12. 实施分期与剩余项
 
-- **P0（✅ 已落地 `ea05d79`）**：CUDA 转写 + Paraformer 融合；真实降噪接入（部分）；放宽安全阀；ASR 失败兜底；§5.5 契约。
+- **P0（✅ 已落地 `ea05d79` + 本回合）**：CUDA 转写 + Paraformer 融合（兜底链）；**本地 FunASR Paraformer 字级 + Qwen3-FA 强制对齐（零出域主路径）**；真实降噪接入（DFN3）；放宽安全阀；ASR 失败兜底；§5.5 契约。
 - **P1（✅ 已落地 `733125a` + 本回合）**：暂停压缩优先（keepSegmentsOut，纯逻辑）→ **本回合 Rust 消费真正落到音频**；语速统计；单元测试。
 - **P2（⏳ 规划）**：模式Ⅱ视频同步剪切（含分离路径暂停压缩）；能量曲线可视化；批处理；UI 阈值滑杆 + 预设；偏好记忆。
 - **P3（⏳ 规划）**：FRCRN/MossFormer2 离线精修；可选 LLM 残句语义判定；SIDON 抢救（法务核实后）。
 
 ### 剩余项清单（按优先级）
-1. **FunASR 本地字级 + Qwen3-FA 强制对齐**：达成「完全本地、零出域、±0.02s」切准目标。
+1. ✅ **FunASR 本地字级 + Qwen3-FA 强制对齐**：已落地（`local_asr.py` + `transcribe` 主路径，commit 见 §2.1）。达成「完全本地、零出域、±0.02s」切准目标（实测见 §13.2）。
 2. **PANNs / Respiro-en / DSP 瞬态**：副语言事件检测落地。
 3. **改进 CTC 口吃/重复 + gap 分类**：语音级不流畅检测（arXiv:2409.10177）。
 4. **模式Ⅱ视频同步剪切**：Rust `speech_assemble_separated` 消费 keepSegmentsOut。
@@ -345,15 +345,44 @@ max_db_erb_thresh=30 / max_db_df_thresh=20` 分级跳过，实测使 LSD 从 8.7
 **28.77**（white_0dB）、hum_5dB dSNR 从 +9.13 掉到 −1.29——跳过阶段造成帧间不连续。
 故 `dfn3.enhance(lsnr_gate=False)` 为默认，全帧两阶段。
 
+### 13.2 本地 FunASR + Qwen3-FA 接入实测（本回合）
+
+**链路**：`core.transcribe()` 优先调 `local_asr.local_transcribe` → FunASR Paraformer 出中文字级文本 + 原生字级时间戳 → Qwen3-ForcedAligner 用该文本做强制对齐（±0.02s）。
+
+**环境**：RTX 5060 Ti (sm_120, 16GB)；`torch 2.13+cu130` / `funasr 1.4.3` / `qwen-asr 0.0.6`（Qwen3ForcedAligner）；权重 `python/models/asr/{modelscope_cache, qwen3_fa}`（按资产惯例不入库）。
+
+**验证样本**：FunASR 公开中文样本 `asr_example_zh.wav`（5.55s）。
+
+**结果（smoke + 整入口双验证 PASS）**：
+
+| 项 | 值 |
+|---|---|
+| 返回 model 名 | `funasr+qwen3fa` |
+| 识别文本 | 欢迎大家来体验达摩院推出的语音识别模型（与样本标准转写一致 → FunASR 识别正确） |
+| 词/字数 | 19（字符级，强制对齐逐字切分） |
+| 时间单调 | ✅ 全程升序无倒退 |
+| 范围合法 | ✅ 全部落在 [0, 5.55s]，无越界 |
+| 首字时间戳 | 0.880–1.120s（样本含前导静音，对齐到真实语音起点） |
+| 整入口 `core.transcribe` | `model='funasr+qwen3fa' status='ok'`，stderr 打印「本地 ASR 命中，跳过 whisper/cloud」 |
+
+**实时率**：首次含模型下载 ~110s；缓存后 FunASR rtf≈0.036、Qwen3-FA rtf≈0.108（≈0.14x 实时），单条 5.5s 音频整入口 ~12.4s（主要为 Qwen3-FA 1.7GB 权重 GPU 加载）。长音频摊薄后远低于 2 分钟预算。
+
+**关键设计修正（根因级）**：`core.transcribe` 原在函数入口无条件 `from faster_whisper import WhisperModel`，导致 faster_whisper 缺失时整函数崩溃、本地主路径根本没机会跑。已改为**惰性导入**（移进 whisper 回退块内），本地路径真正自洽——即使 whisper 未安装，本地 ASR 仍优先且跳过 whisper/cloud。
+
+**降级链（零回归）**：Qwen3-FA 权重缺失/导入失败 → 退回 FunASR 原生字级时间戳（仍本地、零出域）；FunASR 整体不可用 → 返回空交回退 whisper→cloud→VAD；`AICUT_ASR_LOCAL=0` 可强制走旧链路。
+
+**许可**：FunASR / Qwen3-FA 权重商用需法务核实（代码可引）；其余链路 MIT/Apache。
+
 ---
 
 ### 附：默认技术栈一览（商用友好、本地优先）
 
 | 环节 | 选用 | 许可 | 落地状态 |
 |---|---|---|---|
-| 识别（本地） | whisper small (CUDA EP) | MIT/Apache | ✅（P0） |
-| 词级时间（增强） | 百炼 Paraformer API（项目已在用） | 商用 SAAS 按量 | ✅（P0） |
-| 对齐（目标） | Qwen3-ForcedAligner | 待核实(阿里) | ⏳ |
+| 识别（本地·主用） | FunASR Paraformer 字级 | ModelScope 社区许可（商用待核） | ✅（本回合接入） |
+| 对齐（本地·主用） | Qwen3-ForcedAligner (0.6B) | 权重商用待法务核实（代码可引） | ✅（本回合接入） |
+| 识别（兜底链） | whisper small (CUDA EP) | MIT/Apache | ✅（P0） |
+| 词级时间（增强·兜底） | 百炼 Paraformer API（项目已在用） | 商用 SAAS 按量 | ✅（P0） |
 | 降噪(默认) | DeepFilterNet3 (ONNX) | MIT/Apache | ✅ |
 | VAD | Silero v6 (ONNX) | MIT | ✅ |
 | 副语言检测 | PANNs + Respiro-en + DSP | MIT | ⏳ |
