@@ -49,25 +49,27 @@ type PresetValues = {
   stutterThreshold: number;
   crossfadeMs: number;
   declick: boolean;
+  maskSoften: boolean;
+  maskSoftenFloor: number;
 };
 const PRESETS: Record<PresetKey, PresetValues> = {
   light: {
     modelSize: 'base', useDemucs: false, vadThreshold: 0.3, minGap: 0.1, wordPad: 0.02,
     denoise: true, denoiseQuality: 'standard', deess: false, normalize: false, fillers: true,
     keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.4,
-    respiroBreath: false, stutterDetect: true, stutterThreshold: 0.4, crossfadeMs: 20, declick: true,
+    respiroBreath: false, stutterDetect: true, stutterThreshold: 0.4, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5,
   },
   standard: {
     modelSize: 'base', useDemucs: false, vadThreshold: 0.25, minGap: 0.18, wordPad: 0.04,
     denoise: true, denoiseQuality: 'standard', deess: false, normalize: false, fillers: true,
     keepNonspeech: true, trimSilence: true, sedEvents: true, sedThreshold: 0.5,
-    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.5, crossfadeMs: 20, declick: true,
+    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.5, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5,
   },
   aggressive: {
     modelSize: 'small', useDemucs: false, vadThreshold: 0.2, minGap: 0.05, wordPad: 0.06,
     denoise: true, denoiseQuality: 'high', deess: true, normalize: true, fillers: true,
     keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.6,
-    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.6, crossfadeMs: 30, declick: true,
+    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.6, crossfadeMs: 30, declick: true, maskSoften: true, maskSoftenFloor: 0.5,
   },
 };
 
@@ -221,6 +223,8 @@ export default function SpeechPanel() {
   const [sedEvents, setSedEvents] = useState(speechPrefs?.sedEvents ?? PRESETS.standard.sedEvents);          // 副语言/非语音事件检测(PANNs SED)
   const [respiroBreath, setRespiroBreath] = useState(speechPrefs?.respiroBreath ?? PRESETS.standard.respiroBreath);  // 呼吸专项检测(Respiro)
   const [sedThreshold, setSedThreshold] = useState(speechPrefs?.sedThreshold ?? PRESETS.standard.sedThreshold);     // 副语言事件阈值 0~1
+  const [maskSoften, setMaskSoften] = useState(speechPrefs?.maskSoften ?? PRESETS.standard.maskSoften);             // DFN3 mask 软化开关
+  const [maskSoftenFloor, setMaskSoftenFloor] = useState(speechPrefs?.maskSoftenFloor ?? PRESETS.standard.maskSoftenFloor); // 软化增益阈值（听感微调）
 
   // ── assemble 选项 ──
   const [declick, setDeclick] = useState(speechPrefs?.declick ?? PRESETS.standard.declick);          // 去咔哒声(爆音)
@@ -245,6 +249,8 @@ export default function SpeechPanel() {
     respiroBreath,
     stutterDetect,
     stutterThreshold,
+    maskSoften,
+    maskSoftenFloor,
   });
 
   // 应用预设：一次性 set 所有状态并持久化
@@ -267,6 +273,8 @@ export default function SpeechPanel() {
     setSedEvents(p.sedEvents);
     setSedThreshold(p.sedThreshold);
     setRespiroBreath(p.respiroBreath);
+    setMaskSoften(p.maskSoften);
+    setMaskSoftenFloor(p.maskSoftenFloor);
     setCrossfadeMs(p.crossfadeMs);
     setDeclick(p.declick);
     persistSpeech({ ...p, preset: key });
@@ -673,6 +681,12 @@ export default function SpeechPanel() {
                 <option value="high">高</option>
               </select>
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={maskSoften} onChange={(e) => setOpt(setMaskSoften, 'maskSoften', e.target.checked)} />
+              DFN3 高 SNR 软化（保留干净语音）
+            </label>
+            <SliderRow label="软化阈值" value={maskSoftenFloor} min={0.3} max={0.9} step={0.05}
+              onChange={(v) => setOpt(setMaskSoftenFloor, 'maskSoftenFloor', v)} display={maskSoftenFloor.toFixed(2)} />
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
               <input type="checkbox" checked={stutterDetect} onChange={(e) => setOpt(setStutterDetect, 'stutterDetect', e.target.checked)} />
               结巴/卡顿检测

@@ -346,7 +346,8 @@ def _run_chunk(sessions: dict, feat_erb: np.ndarray, feat_spec: np.ndarray):
 # ══════════════════════════════════════════════════════
 
 def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
-            lsnr_gate: bool = False, mask_soften: bool = True):
+            lsnr_gate: bool = False, mask_soften: bool = True,
+            mask_soften_floor: float = MASK_SOFTEN_GAIN_FLOOR):
     """对单声道波形做 DFN3 降噪。返回与输入等长的 float32，或 None（不可用 → 调用方降级）。
 
     参数
@@ -361,6 +362,8 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
                         回混以保留干净语音、抑制 deep filtering 在净区引入的染色；增益低于
                         阈值的频带视为仍需降噪 → 全增强。纯频谱线性运算，零平移不变。可用
                         环境变量 AICUT_DFN3_SOFTEN=0 关闭（退回硬掩码 + 硬 DF 覆盖）。
+      mask_soften_floor: 软化增益阈值（默认 0.5，UI 可调 0.3~0.9 微调听感）。越低 → 越
+                        激进回混（保真优先、保守降噪）；越高 → 仅对「非常干净」频带回混（强降噪）。
     """
     x = np.asarray(au, dtype=np.float32).reshape(-1)
     n_in = int(x.size)
@@ -465,8 +468,9 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
                 # （不用官方 lsnr 二进制门控）。增益≈1 → 该频带本就干净 → 朝原
                 # 频谱回混以保留干净语音、抑制 DF 在净区引入的染色；增益低 → 全增强。
                 # 纯频谱线性运算，零平移不变。
-                c_clean = np.clip((g_full - MASK_SOFTEN_GAIN_FLOOR) / (1.0 - MASK_SOFTEN_GAIN_FLOOR),
-                                  0.0, 1.0)                            # [n,481] 干净度权重
+                _floor = min(float(mask_soften_floor), 0.99)          # 防御 floor→1 除零
+                c_clean = np.clip((g_full - _floor) / max(1.0 - _floor, 1e-6),
+                                  0.0, 1.0)                           # [n,481] 干净度权重
                 # ERB 阶段：把 (spec*g_full) 按 c 朝原频谱回混
                 spec_enh[jj] = spec[jj] * (c_clean + (1.0 - c_clean) * g_full)
                 # Deep filtering 阶段：前 NB_DF 频点按 c 回混原频谱

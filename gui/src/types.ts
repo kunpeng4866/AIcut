@@ -311,6 +311,8 @@ export interface SpeechEditOptions {
   stutterDetect?: boolean;    // 语音级不流畅(口吃/重复)检测，默认 true
   stutterThreshold?: number;  // 口吃检测敏感度 0~1，默认 0.5
   denoiseQuality?: 'standard' | 'high'; // 降噪档位：standard=DFN3；high=FRCRN 高质量(CPU)
+  maskSoften?: boolean;          // DFN3 mask 软化（高 SNR 保留干净语音），默认 true
+  maskSoftenFloor?: number;      // 软化增益阈值 0~1，默认 0.5（仅对增益≥此值的频带回混）；UI 可调 0.3~0.9
 }
 
 // 输出：与 W1 决策层 keep_segments + detail 对齐

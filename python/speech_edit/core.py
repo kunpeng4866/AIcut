@@ -296,7 +296,8 @@ def _has_dfn3_weights() -> bool:
                for n in ("enc", "erb_dec", "df_dec"))
 
 
-def _denoise_dfn3(au: np.ndarray, sr: int):
+def _denoise_dfn3(au: np.ndarray, sr: int, mask_soften: bool = True,
+                  mask_soften_floor: float = 0.5):
     """DeepFilterNet3（enc/erb_dec/df_dec 三段图）降噪。
 
     实现在 speech_edit/dfn3.py：ERB/DF 特征 → 两阶段增强 → 与输入**样本级零平移**
@@ -309,7 +310,8 @@ def _denoise_dfn3(au: np.ndarray, sr: int):
         if _here not in sys.path:
             sys.path.insert(0, _here)
         import dfn3  # noqa: E402  (同目录模块)
-        y = dfn3.enhance(au, sr, DENOISE_MODEL_DIR, _onnx_session)
+        y = dfn3.enhance(au, sr, DENOISE_MODEL_DIR, _onnx_session,
+                         mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
         if y is None:
             return None
         y = np.asarray(y, dtype=np.float32).reshape(-1)
@@ -348,7 +350,8 @@ def _denoise_frcrn(au: np.ndarray, sr: int):
         return None
 
 
-def _denoise_onnx(au: np.ndarray, sr: int, quality="standard"):
+def _denoise_onnx(au: np.ndarray, sr: int, quality="standard",
+                  mask_soften: bool = True, mask_soften_floor: float = 0.5):
     """ONNX 降噪接入点。返回降噪后的音频，或 None（不可用）。
 
     优先级：DeepFilterNet3 三段图（_denoise_dfn3）→ 单图「波形进/波形出」模型
@@ -363,7 +366,7 @@ def _denoise_onnx(au: np.ndarray, sr: int, quality="standard"):
             if y is not None:
                 _LAST_ONNX_BACKEND = "frcrn"
                 return y
-        y = _denoise_dfn3(au, sr)
+        y = _denoise_dfn3(au, sr, mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
         if y is not None:
             _LAST_ONNX_BACKEND = "dfn3"
             return y
@@ -465,7 +468,8 @@ def _denoise_lightweight(au: np.ndarray, sr: int, hp_hz: float = 80.0,
     return y.astype(np.float32)
 
 
-def denoise_wav(wav_in: str, wav_out: str, quality="standard") -> tuple:
+def denoise_wav(wav_in: str, wav_out: str, quality="standard",
+                mask_soften: bool = True, mask_soften_floor: float = 0.5) -> tuple:
     """对 16k 单声道 wav 做降噪，写到 wav_out。
 
     返回 (ok, method, warning)：
@@ -478,7 +482,8 @@ def denoise_wav(wav_in: str, wav_out: str, quality="standard") -> tuple:
     if au.size == 0:
         return False, "none", "denoise_empty_audio"
 
-    y = _denoise_onnx(au, sr, quality=quality)
+    y = _denoise_onnx(au, sr, quality=quality,
+                      mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
     if y is not None:
         try:
             _write_wav(wav_out, y, sr)
@@ -1865,6 +1870,9 @@ def analyze(input_path: str, opts: dict) -> dict:
     # deess/normalize 仍仅由 Rust 生成阶段使用，analyze 忽略。
     do_denoise = bool(opts.get("denoise", False))
     denoise_quality = opts.get("denoiseQuality", "standard")
+    # #7 DFN3 mask 软化（高 SNR 保留干净语音）；阈值经 UI 微调听感
+    mask_soften = bool(opts.get("maskSoften", True))
+    mask_soften_floor = float(opts.get("maskSoftenFloor", 0.5))
     warnings_out = []
 
     # 临时工作目录（用完即清）
@@ -1911,7 +1919,9 @@ def analyze(input_path: str, opts: dict) -> dict:
         if do_denoise:
             print("[1b] 降噪…", flush=True)
             dn_path = os.path.join(tmp, "_work_denoised.wav")
-            ok_dn, denoise_method, dn_warn = denoise_wav(work_wav, dn_path, quality=denoise_quality)
+            ok_dn, denoise_method, dn_warn = denoise_wav(
+                work_wav, dn_path, quality=denoise_quality,
+                mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
             if ok_dn:
                 work_wav = dn_path
                 print(f"  [OK] 降噪完成（{denoise_method}）", flush=True)
