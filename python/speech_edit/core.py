@@ -1391,6 +1391,8 @@ _DETAIL_META = {
     "tonal_sfx":      {"flag_disfluency": False, "gap_type": "tonal",     "conf": 0.65, "src": "rule_acoustic"},
     "vad_silence":    {"flag_disfluency": False, "gap_type": "silence",   "conf": 0.70, "src": "rule_vad"},
     "manual_exclude": {"flag_disfluency": False, "gap_type": "manual",    "conf": 1.00, "src": "manual"},
+    # P1 暂停压缩优先：把长停顿压到 targetPause 而非硬删（软停顿，非声音事件）
+    "pause_compressed": {"flag_disfluency": False, "gap_type": "pause", "conf": 0.0, "src": "rule"},
 }
 
 
@@ -1444,6 +1446,90 @@ def _apply_min_gap(remove_list: list, min_gap: float) -> list:
     if min_gap <= 0:
         return list(remove_list)
     return [(s, e) for s, e in remove_list if (e - s) >= min_gap]
+
+
+def speaking_rate_stats(words: list, dur: float, window: float = 3.0, step: float = 1.0) -> dict:
+    """语速/节奏统计（P1，纯逻辑，无外部权重）。
+
+    用词级时间戳估计中文「字/秒」：每个词字数 = len(word.strip(_PUNCT))；
+    以 [window]s 为窗、[step]s 为步长滑窗，窗内字数 / 窗长 → 该窗中心语速。
+    返回 overall_cps（全片总字数/dur）、median_cps（各窗中位数，抗离群）、
+    windows([(center_t, cps)] 供可视化)、anomalies([{start,end,cps}] 显著偏离
+    中位数的窗)、char_count(总字数)。用于 §5.5 节奏失调检测与前端提示。
+    """
+    chars = [(float(w["start"]), float(w["end"]),
+              max(1, len(w["word"].strip(_PUNCT)))) for w in words]
+    if not chars or dur <= 0:
+        return {"overall_cps": 0.0, "median_cps": 0.0, "windows": [],
+                "anomalies": [], "char_count": 0}
+    windows = []
+    half = window / 2.0
+    t = half
+    while t <= dur - half + 1e-9:
+        ws, we = t - half, t + half
+        cnt = 0.0
+        for s, e, c in chars:
+            ov = min(e, we) - max(s, ws)
+            if ov > 0:
+                cnt += c * (ov / (e - s))
+        windows.append((round(t, 3), round(cnt / window, 3)))
+        t += step
+    cps_vals = [c for _, c in windows] or [0.0]
+    median_cps = float(np.median(cps_vals))
+    overall_cps = sum(c for _, _, c in chars) / dur
+    anomalies = []
+    if median_cps > 1e-6:
+        for tc, c in windows:
+            if c > median_cps * 1.5 or c < median_cps * 0.6:
+                anomalies.append({"start": round(tc - half, 3),
+                                  "end": round(tc + half, 3), "cps": c})
+    return {"overall_cps": round(float(overall_cps), 3),
+            "median_cps": round(float(median_cps), 3),
+            "windows": windows, "anomalies": anomalies,
+            "char_count": int(sum(c for _, _, c in chars))}
+
+
+def compress_keep_timeline(keep: list, hard_remove: list, dur: float,
+                           target_pause: float = 0.35) -> tuple:
+    """暂停压缩优先策略（P1，纯逻辑，设计要求「优先压缩停顿而非删除」）。
+
+    把源时间轴的保留段重映射到输出时间轴：相邻保留段之间的「间隙」分两类——
+      · 硬删除间隙：与 hard_remove（填充词/咳嗽/瞬态/段内/手动等必须去掉的声音）
+        任一区间重叠 → 硬删，输出中不插入停顿；
+      · 软停顿间隙：纯静音 / 思考停顿（gap_breath、vad_silence 等）→ 压缩为
+        min(间隙, target_pause) 插入输出，并记录 compressed 标记供 UI 显示。
+    间隙 <= target_pause 的软停顿保持原长（不拉长）。
+    返回 (keep_out, output_dur, compressed)：
+      keep_out      : 输出时间轴保留段 [(s,e)]（非重叠、升序、从 0 起）
+      output_dur    : 输出总时长（<= dur，停顿被压缩）
+      compressed    : 被压缩的软停顿 [(out_s, out_e)]（输出时间轴）
+    注意：源空间 keepSegments 不变（Rust assemble 默认仍按源硬删），本函数为
+    增量输出，待前端/assemble 消费 keepSegmentsOut 时生效。
+    """
+    keep = _union([(float(s), float(e)) for s, e in keep])
+    if not keep:
+        return [], 0.0, []
+    hard = _union([(float(s), float(e)) for s, e in hard_remove])
+    out, compressed, cursor = [], [], 0.0
+    n = len(keep)
+    for i, (s, e) in enumerate(keep):
+        seg_len = e - s
+        out.append((cursor, cursor + seg_len))
+        cursor += seg_len
+        if i + 1 < n:
+            nxt_s = keep[i + 1][0]
+            gap = nxt_s - e
+            if gap <= 0:
+                continue
+            is_hard = any(not (ge <= e or gs >= nxt_s) for gs, ge in hard)
+            if is_hard:
+                continue  # 硬删：不插入停顿
+            add = min(gap, target_pause)  # 软停顿压缩
+            if add > 1e-4 and (gap - add) > 1e-4:
+                # 仅当停顿被实际缩短时才记为「压缩」（短停顿保持原长不标记）
+                compressed.append((cursor, cursor + add))
+            cursor += add
+    return out, round(cursor, 6), compressed
 
 
 def _head_tail_trim(wav16_path: str, silence_thr: float = 0.008, pad: float = 0.05,
@@ -1505,6 +1591,11 @@ def analyze(input_path: str, opts: dict) -> dict:
           denoise     (bool, 默认 False)    P0-B：True 时在检测前对 16k 音频做真实降噪
                                             （优先 ONNX 权重，缺失则轻量高通+噪声门），
                                             并把标志透传给 Rust 生成阶段（declick）
+          pauseCompress(bool, 默认 True)    P1：暂停压缩优先——长停顿压到 targetPause
+                                            而非硬删（源空间 keepSegments 不变，
+                                            压缩结果经 keepSegmentsOut 输出）
+          targetPause (float, 默认 0.35)    软停顿压缩目标长度（s）
+          rateWindow  (float, 默认 3.0)     语速统计滑窗长度（s）
           deess/normalize : 仅被 Rust 生成阶段使用，analyze 忽略
 
     返回（契约，必须包含以下键）
@@ -1523,6 +1614,11 @@ def analyze(input_path: str, opts: dict) -> dict:
                                 'asr_failed_fallback_to_vad' = ASR 失败已走 VAD 兜底
       asr             : dict    {status, words, cloudWords, modelSize}
       denoise         : bool    本次是否请求降噪（透传给 Rust assemble 决定 declick）
+      pauseCompress   : bool    是否启用暂停压缩优先
+      keepSegmentsOut : [[s,e], ...]  输出时间轴保留段（暂停压缩后；pauseCompress=False
+                                     时等于 keepSegments）。待前端/assemble 消费以生效
+      outputDuration  : float   输出总时长（<= duration，停顿被压缩）
+      speakingRate    : dict   {overall_cps, median_cps, windows, anomalies, char_count}
     分离成功时额外返回（可选键）：
       vocalPath       : str    人声 stem 路径（44.1k，已缓存到 .aicut_speech）
       accompPath      : str    伴奏 stem 路径（no_vocals，44.1k）
@@ -1563,6 +1659,13 @@ def analyze(input_path: str, opts: dict) -> dict:
     # P0-A：ASR 设备 / 云端词级通道开关（无 key 时自动跳过）
     asr_device = opts.get("asrDevice", None)
     use_cloud_words = bool(opts.get("cloudWordAlign", True))
+
+    # P1：暂停压缩优先 + 语速统计（纯逻辑，默认开启）。
+    # 源空间 keepSegments 不变（Rust assemble 默认仍按源硬删），
+    # 压缩结果经 keepSegmentsOut 增量输出，待 assemble 消费。
+    pause_compress = bool(opts.get("pauseCompress", True))
+    target_pause = float(opts.get("targetPause", 0.35))
+    rate_window = float(opts.get("rateWindow", 3.0))
 
     # P0-B：denoise 真正生效（在检测前对 16k 音频降噪）；
     # deess/normalize 仍仅由 Rust 生成阶段使用，analyze 忽略。
@@ -1794,6 +1897,16 @@ def analyze(input_path: str, opts: dict) -> dict:
         if not keep:
             keep = [(0.0, dur)]
 
+        # ── [P1] 暂停压缩优先 + 语速统计（纯逻辑，增量输出）──
+        # hard_remove = 必须硬删的声音事件（填充词/咳嗽/瞬态/段内/手动等）；
+        # gap_breath / vad_silence 视为「软停顿」参与压缩，不在此列。
+        hard_remove = _union(text_fillers + isolated + transients +
+                            intra_fillers + cough_events + tonal_events + manual)
+        keep_out, output_dur, compressed = ([], 0.0, [])
+        if pause_compress:
+            keep_out, output_dur, compressed = compress_keep_timeline(
+                keep, hard_remove, dur, target_pause)
+
         # ── [E] musicSegments（仅分离成功时）：保留 gap 内的音乐/环境音 ──
         # 取 [head_trim, dur - tail_trim] 内 keep 的补集得到候选 gap；
         # 若伴奏(accomp)在该区间 RMS 能量 > 0.01（真有音乐而非静音），则作为
@@ -1837,6 +1950,9 @@ def analyze(input_path: str, opts: dict) -> dict:
                          ("manual_exclude", manual)):
             for s, e in ivs:
                 detail.append(_mk_detail(typ, s, e))
+        # P1：被压缩的软停顿（暂停压缩优先策略的可视化标记）
+        for (cs, ce) in compressed:
+            detail.append(_mk_detail("pause_compressed", cs, ce))
         detail.sort(key=lambda d: d["start"])
 
         total_kept = sum(e - s for s, e in keep)
@@ -1874,6 +1990,11 @@ def analyze(input_path: str, opts: dict) -> dict:
             "denoise": bool(do_denoise),
             "denoiseMethod": denoise_method,
             "assembleHints": {"declick": bool(do_denoise)},
+            # P1：暂停压缩优先（输出时间轴增量）+ 语速统计
+            "pauseCompress": bool(pause_compress),
+            "keepSegmentsOut": [[float(s), float(e)] for s, e in (keep_out or keep)],
+            "outputDuration": (output_dur if keep_out else round(dur, 6)),
+            "speakingRate": speaking_rate_stats(words, dur, window=rate_window),
         }
         if warnings_out:
             result["warnings"] = warnings_out
