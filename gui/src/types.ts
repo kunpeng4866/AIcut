@@ -305,6 +305,9 @@ export interface SpeechEditOptions {
   keepNonspeech?: boolean;   // 保留背景音乐/环境音（默认 true：只删静音/语气词/气声/瞬态，不动音乐；false=紧凑模式，连非人声一起丢）
   trimSilence?: boolean;     // 修剪首尾静音（默认 true：删开头/结尾的低能量静音段）
   exclude?: [number, number][]; // 手动排除区间(秒) [start,end]
+  sedEvents?: boolean;        // 副语言/非语音事件检测(PANNs 帧级 SED：笑声/叹息/咳嗽/呼吸等)，默认 true
+  sedThreshold?: number;      // 副语言事件触发阈值 0~1，默认 0.5
+  respiroBreath?: boolean;    // 呼吸专项检测(Respiro 风格后处理)，默认 true
 }
 
 // 输出：与 W1 决策层 keep_segments + detail 对齐

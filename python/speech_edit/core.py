@@ -27,6 +27,17 @@ import argparse
 
 import numpy as np
 
+# ② 副语言事件检测（PANNs 帧级 SED + Respiro 呼吸专项）。
+# 权重缺失/依赖未装 → 优雅降级为 no-op（_PANNS_OK=False），不阻断分析。
+try:
+    from panns_sed import panns_sed as _panns_sed, panns_available as _panns_available
+    from respiro import detect_respiro_breath as _detect_respiro
+    _PANNS_OK = True
+except Exception:  # pragma: no cover
+    _PANNS_OK = False
+    _panns_sed = None
+    _detect_respiro = None
+
 
 # ── 常量 ──────────────────────────────────────────────
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
@@ -1450,6 +1461,10 @@ _DETAIL_META = {
     "tonal_sfx":      {"flag_disfluency": False, "gap_type": "tonal",     "conf": 0.65, "src": "rule_acoustic"},
     "vad_silence":    {"flag_disfluency": False, "gap_type": "silence",   "conf": 0.70, "src": "rule_vad"},
     "manual_exclude": {"flag_disfluency": False, "gap_type": "manual",    "conf": 1.00, "src": "manual"},
+    # ② 副语言事件（PANNs 帧级 SED 检测的非语音/副语言事件，如笑声/叹息/吸气）
+    "sed_event":      {"flag_disfluency": False, "gap_type": "sed",      "conf": 0.55, "src": "panns_sed"},
+    # ② 呼吸专项（Respiro-en 风格；软停顿，不属 hard_remove）
+    "resp_breath":    {"flag_disfluency": False, "gap_type": "breath",    "conf": 0.50, "src": "respiro"},
     # P1 暂停压缩优先：把长停顿压到 targetPause 而非硬删（软停顿，非声音事件）
     "pause_compressed": {"flag_disfluency": False, "gap_type": "pause", "conf": 0.0, "src": "rule"},
 }
@@ -1627,6 +1642,67 @@ def _head_tail_trim(wav16_path: str, silence_thr: float = 0.008, pad: float = 0.
     return head_trim, tail_trim
 
 
+# ───────────────────────────────────────────────────────────
+# ② 副语言事件检测器（PANNs 帧级 SED + Respiro 呼吸专项）
+#   统一包装成 analyze 用的 detect_* 范式：第1参 wav_path，返回 [(s,e)] 秒，
+#   权重缺失/异常 → [] no-op（对齐 cough/tonal 等既有检测器）。
+# ───────────────────────────────────────────────────────────
+def detect_panns_sed(wav_path: str, words: list, word_pad: float = 0.04,
+                     threshold: float = 0.5, min_dur: float = 0.08,
+                     max_dur: float = 2.0) -> list:
+    """PANNs(Cnn14_DecisionLevelMax) 帧级声音事件检测（副语言/非语音事件）。
+
+    仅取与既有检测器不重复的副语言类（Laughter/Sigh/Sniffing/Wheeze/Burping/
+    Sneeze/Breathing/Respiration/Shuffling/Clapping），过滤掉 Cough/Throat clearing
+    以免与 detect_cough 双标。模型权重 MIT，放置 python/models/panns/。
+    """
+    if not _PANNS_OK or not _panns_available():
+        return []
+    try:
+        au, sr = _read_wav(wav_path)
+    except Exception:
+        return []
+    classes = {
+        "Laughter": threshold,
+        "Sigh": threshold,
+        "Sniffing": threshold,
+        "Wheeze": threshold,
+        "Burping, eructation": threshold,
+        "Sneeze": threshold,
+        "Breathing": max(0.20, threshold - 0.20),
+        "Respiration": max(0.25, threshold - 0.15),
+        "Shuffling": threshold,
+        "Clapping": threshold,
+    }
+    try:
+        evs = _panns_sed(audio=au, sr=sr, classes=classes,
+                         min_dur=min_dur, max_dur=max_dur)
+    except Exception:
+        return []
+    ivs = [(s, e) for (s, e, _name, _sc) in evs]
+    # 词保护：副语言事件常压在词尾/词间，套 word safety 避免切碎连续朗读
+    word_ivs = ([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
+                 for w in words] if words else [])
+    return _apply_word_safety(ivs, word_ivs)
+
+
+def detect_respiro(wav_path: str, words: list, word_pad: float = 0.08,
+                   thr: float = 0.35, min_dur: float = 0.05,
+                   max_dur: float = 3.0) -> list:
+    """Respiro-en 风格呼吸专项检测。返回 [(s,e)]。权重缺失/异常 → []。
+
+    呼吸属软停顿，调用方须保证其结果**不进 hard_remove**（否则会复现机关枪 bug）。
+    """
+    if not _PANNS_OK:
+        return []
+    try:
+        evs = _detect_respiro(wav_path, words, word_pad=word_pad, thr=thr,
+                             min_dur=min_dur, max_dur=max_dur)
+    except Exception:
+        return []
+    return [(s, e) for (s, e, _sc) in evs]
+
+
 def analyze(input_path: str, opts: dict) -> dict:
     """
     口播剪辑决策层：分析媒体文件，返回编辑计划（JSON 友好 dict）。
@@ -1725,6 +1801,13 @@ def analyze(input_path: str, opts: dict) -> dict:
     pause_compress = bool(opts.get("pauseCompress", True))
     target_pause = float(opts.get("targetPause", 0.35))
     rate_window = float(opts.get("rateWindow", 3.0))
+
+    # ② 副语言事件检测开关（PANNs 帧级 SED + Respiro 呼吸专项）。
+    # 默认开启；权重缺失时对应检测器自动 no-op 降级。
+    do_sed = bool(opts.get("sedEvents", True))
+    sed_threshold = float(opts.get("sedThreshold", 0.5))
+    do_respiro = bool(opts.get("respiroBreath", True))
+    respiro_thr = float(opts.get("respiroThreshold", 0.35))
 
     # P0-B：denoise 真正生效（在检测前对 16k 音频降噪）；
     # deess/normalize 仍仅由 Rust 生成阶段使用，analyze 忽略。
@@ -1830,6 +1913,8 @@ def analyze(input_path: str, opts: dict) -> dict:
             sound_events = []
             intra_fillers = []
             isolated = []
+            sed_events = []
+            respiro_events = []
             # 唯一保留的删除来源：VAD 语音段之外、能量确为底噪的长静音间隙
             # （不依赖词，删了也不可能切到语音；音乐/环境音被能量门挡住）。
             vad_sil = _vad_only_silence(work_wav, speech_regs, dur,
@@ -1878,8 +1963,18 @@ def analyze(input_path: str, opts: dict) -> dict:
             gap_breath = _apply_min_gap(gap_breath, min_gap)
             transients = _apply_min_gap(transients, min_gap)
 
+            # 4g/4h. ② 副语言事件（独立于 VAD，扫全音频，补抓笑声/叹息/吸气等
+            #        与呼吸专项）。副语言事件可能短于 minGap 但确实该删，不套 min_gap。
+            sed_events = detect_panns_sed(work_wav, words, word_pad=word_pad,
+                                         threshold=sed_threshold) if do_sed else []
+            print(f"  4g. 副语言事件(笑声/叹息/…): {len(sed_events)} 段", flush=True)
+            respiro_events = detect_respiro(work_wav, words, word_pad=word_pad,
+                                            thr=respiro_thr) if do_respiro else []
+            print(f"  4h. 呼吸专项(Respiro): {len(respiro_events)} 段", flush=True)
+
             # 初始删除集 → 初始保留段
-            init_remove = _union(text_fillers + isolated + gap_breath + transients + sound_events)
+            init_remove = _union(text_fillers + isolated + gap_breath + transients
+                                 + sound_events + sed_events + respiro_events)
             init_keep = _complement(init_remove, dur, min_keep=0.0)
 
             # 4f. 保留段内部未保护区域（词前紧、词后松）
@@ -1912,6 +2007,7 @@ def analyze(input_path: str, opts: dict) -> dict:
         if keep_nonspeech:
             all_remove = _union(text_fillers + isolated + gap_breath +
                                 transients + intra_fillers + sound_events +
+                                sed_events + respiro_events +
                                 vad_sil + manual)
             keep = _complement(all_remove, dur, min_keep=0.0)
         else:
@@ -1919,7 +2015,8 @@ def analyze(input_path: str, opts: dict) -> dict:
             for (vs, ve) in speech_regs:
                 rm = [(s, e) for (s, e) in
                       (text_fillers + isolated + gap_breath + transients +
-                       intra_fillers + sound_events + manual)
+                       intra_fillers + sound_events + sed_events + respiro_events +
+                       manual)
                       if e > vs and s < ve]
                 if not rm:
                     keep.append((vs, ve))
@@ -1963,7 +2060,10 @@ def analyze(input_path: str, opts: dict) -> dict:
         # 导致 compress_keep_timeline 把所有间隙判成硬删、零停顿（即"机关枪"式拼接），
         # 与「暂停压缩优先」的设计目标相悖。它们仍照常参与 keep 的实际删除（见 all_remove），
         # 仅不决定是否在间隙插短暂停。gap_breath / vad_silence 本就是软停顿。
-        hard_remove = _union(text_fillers + transients + cough_events + manual)
+        # 副语言事件(sed_events)属离散爆发、打断语句，类比咳嗽计入硬删；
+        # 呼吸(resp_breath)是软停顿，严禁进 hard_remove——否则复现机关枪 bug。
+        hard_remove = _union(text_fillers + transients + cough_events
+                             + sed_events + manual)
         keep_out, output_dur, compressed = ([], 0.0, [])
         if pause_compress:
             keep_out, output_dur, compressed = compress_keep_timeline(
@@ -2008,6 +2108,8 @@ def analyze(input_path: str, opts: dict) -> dict:
                          ("intra_keep", intra_fillers),
                          ("cough", cough_events),
                          ("tonal_sfx", tonal_events),
+                         ("sed_event", sed_events),
+                         ("resp_breath", respiro_events),
                          ("vad_silence", vad_sil),
                          ("manual_exclude", manual)):
             for s, e in ivs:

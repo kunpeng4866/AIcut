@@ -52,6 +52,9 @@ python/keying/models/
 # 口播剪辑 ASR + 降噪模型权重：经 assets-manifest 资产分发（含真实 sha256/size），不入库
 python/models/asr/
 python/models/denoise/
+# ② 副语言检测权重（PANNs Cnn14_DecisionLevelMax 327MB / Respiro 备用）：同策略不入库
+python/models/panns/
+python/models/respiro/
 
 # 超清增强(SR)训练素材：大视频本地归集，不入库（未配 LFS 接管视频，避免撑爆仓库）
 # 脚手架 MANIFEST.json / README.md / .gitkeep 已入库，不受影响

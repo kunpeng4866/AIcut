@@ -148,6 +148,9 @@ export default function SpeechPanel() {
   const [normalize, setNormalize] = useState(false);      // 响度归一
   const [keepNonspeech, setKeepNonspeech] = useState(true); // 保留背景音乐/环境音
   const [trimSilence, setTrimSilence] = useState(true);      // 修剪首尾静音
+  const [sedEvents, setSedEvents] = useState(true);          // 副语言/非语音事件检测(PANNs SED)
+  const [respiroBreath, setRespiroBreath] = useState(true);  // 呼吸专项检测(Respiro)
+  const [sedThreshold, setSedThreshold] = useState(0.5);     // 副语言事件阈值 0~1
 
   // ── assemble 选项 ──
   const [declick, setDeclick] = useState(true);          // 去咔哒声(爆音)
@@ -307,6 +310,9 @@ export default function SpeechPanel() {
         fillers,
         keepNonspeech,
         trimSilence,
+        sedEvents,
+        sedThreshold,
+        respiroBreath,
       };
       const res = await window.aicut.speech.analyze(selectedAsset.path, JSON.stringify(opts));
       if (res.success && res.data) {
@@ -459,6 +465,14 @@ export default function SpeechPanel() {
               <input type="checkbox" checked={trimSilence} onChange={(e) => setTrimSilence(e.target.checked)} />
               修剪首尾静音
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={sedEvents} onChange={(e) => setSedEvents(e.target.checked)} />
+              副语言事件检测（笑声/叹息/咳嗽/呼吸…）
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={respiroBreath} onChange={(e) => setRespiroBreath(e.target.checked)} />
+              呼吸专项检测（温和去气声）
+            </label>
 
             {/* 滑块：VAD 灵敏度 */}
             <SliderRow label="VAD 灵敏度" value={vadThreshold} min={0.05} max={0.6} step={0.05}
@@ -469,6 +483,9 @@ export default function SpeechPanel() {
             {/* 滑块：词边界 padding */}
             <SliderRow label="词边界(s)" value={wordPad} min={0} max={0.2} step={0.01}
               onChange={setWordPad} display={wordPad.toFixed(2)} />
+            {/* 滑块：副语言事件阈值 */}
+            <SliderRow label="副语言阈值" value={sedThreshold} min={0.1} max={0.9} step={0.05}
+              onChange={setSedThreshold} display={sedThreshold.toFixed(2)} />
 
             {/* 滑块：接缝平滑（assemble 用 crossfadeMs） */}
             <SliderRow label="接缝平滑(ms)" value={crossfadeMs} min={0} max={100} step={5}

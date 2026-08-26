@@ -120,6 +120,32 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         sha256: 'ab669a1d10afe20911728b33053a452071042317a90581092b325da7b2f9d895',
         requiredBy: ['speech'],
       },
+      // ---- 副语言/非语音事件检测（PANNs Cnn14_DecisionLevelMax 帧级 SED）----
+      // 权重 MIT 许可；本地已预置于 python/models/panns/，以下为打包分发用条目。
+      // sha256/size 由本地文件实算（sha256sum python/models/panns/*）。
+      // 权重缺失时 PANNs SED 自动 no-op 降级（不报错）。
+      {
+        id: 'panns-sed',
+        name: 'PANNs Cnn14 帧级声音事件检测权重',
+        kind: 'file',
+        remoteRel: 'models/panns/Cnn14_DecisionLevelMax_mAP=0.385.pth',
+        targetSub: 'models/panns',
+        targetName: 'Cnn14_DecisionLevelMax_mAP=0.385.pth',
+        size: 327428481,
+        sha256: 'dd3b4043a87d4ec13df8082c0fcfee3fb5084151808e47e060987a95eabdd142',
+        requiredBy: ['speech'],
+      },
+      {
+        id: 'panns-labels',
+        name: 'PANNs AudioSet527 标签表',
+        kind: 'file',
+        remoteRel: 'models/panns/class_labels_indices.csv',
+        targetSub: 'models/panns',
+        targetName: 'class_labels_indices.csv',
+        size: 14675,
+        sha256: 'cdd1049833c4b86127c2773ac0d14a2754b6a6d0d1798002ed5c66e699708429',
+        requiredBy: ['speech'],
+      },
       // TODO(P1): Qwen3-ForcedAligner 本地权重（强制对齐核心，~1.71GB，safetensors 非 ONNX，
       //   需另行导出）。当前未下载（带宽不足以 2 分钟内完成），P0 先走 whisper word_timestamps +
       //   可选 Paraformer 云端词级。接入时在此补 1 条 entry（id 'qwen3fa'），并扩展 missingForFeature。
