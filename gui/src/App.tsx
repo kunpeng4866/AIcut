@@ -1,10 +1,12 @@
 // AIcut 主布局 — 顶部导航 + 左面板 + 预览 + 右面板 + 时间轴
 import { useEffect } from 'react';
 import { useConfigStore } from './store/configStore';
+import { useAssetStore } from './store/assetStore';
 import { useUIStore } from './store/uiStore';
 import { useProjectStore } from './store/projectStore';
 import { isAIConfigured } from './config/ai_config';
 import ConfigWizard from './config/ConfigWizard';
+import AssetManagerModal from './components/AssetManagerModal';
 import Header from './components/Header';
 import MediaPanel from './components/MediaPanel';
 import TextPanel from './components/panels/TextPanel';
@@ -57,6 +59,9 @@ export default function App() {
   } = useUIStore();
   const rightView = useUIStore((s) => s.rightView);
   const setRightView = useUIStore((s) => s.setRightView);
+  // ⚠️ 必须在下方 `if (!isLoaded) return` 之前取：写在 JSX 里会让首渲染(提前返回)与
+  // 加载完成后的渲染 hook 数量不一致，触发 React #310 整页崩溃。
+  const showAssetManager = useAssetStore((s) => s.showManager);
 
   // AI 字幕 / ASR 结果 → 生成独立字幕轨 clip，与选中的音/视频片段对齐。
   // 走「时间轴文字轨」模型：预览(DOM 叠加层) 与导出(subtitle.rs drawtext) 均按
@@ -88,6 +93,8 @@ export default function App() {
         state.setShowConfigWizard(true);
       }
     });
+    // 启动即探测补全资产状态（精简版缺 python/models 时用于「一键补全」提示）
+    useAssetStore.getState().checkStatus();
   }, []);
 
   // 配置加载中
@@ -181,6 +188,9 @@ export default function App() {
           onCancel={() => setShowConfigWizard(false)}
         />
       )}
+
+      {/* AI 组件管理（一键补全）弹窗 */}
+      {showAssetManager && <AssetManagerModal />}
     </div>
   );
 }

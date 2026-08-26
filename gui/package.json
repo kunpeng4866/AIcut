@@ -59,8 +59,9 @@
         "to": "python"
       },
       {
-        "from": "../pack-staging/models",
-        "to": "models"
+        "from": "../cdn-upload/models",
+        "to": "models",
+        "filter": ["!rmbg2.onnx", "!sr_v0_test.onnx"]
       }
     ],
     "directories": {

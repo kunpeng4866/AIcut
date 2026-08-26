@@ -5,6 +5,7 @@
 import { useState, useRef, useEffect } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useProjectStore } from '../../store/projectStore';
+import { useAssetStore } from '../../store/assetStore';
 import { createDefaultKeying, uid } from '../../utils/clipFactories';
 import type { ClipConfig, KeyingConfig, KeyingMode, BackgroundType, KeyingBackground, KeyingProgress } from '../../types';
 
@@ -451,6 +452,8 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       alert('找不到源素材路径，无法执行智能抠像');
       return;
     }
+    // 一键补全：缺失 Python 运行时 / 模型时引导下载，用户取消则中止
+    if (!(await useAssetStore.getState().ensureAssets(['python', 'modnet', 'rmbg2']))) return;
     const assetPath = asset.path;            // 真实文件系统路径（非 aicut-asset://）
     const model = keying.model ?? 'modnet';
     const threshold = keying.threshold ?? 0.5;
@@ -497,6 +500,8 @@ export default function KeyingTab({ clip, trackId }: { clip: ClipConfig; trackId
       alert('找不到源素材路径，无法执行手动抠像');
       return;
     }
+    // 一键补全：缺失 Python 运行时 / 模型时引导下载，用户取消则中止
+    if (!(await useAssetStore.getState().ensureAssets(['python', 'modnet', 'rmbg2']))) return;
     const assetPath = asset.path;
     const model = keying.model ?? 'modnet';
     const threshold = keying.threshold ?? 0.5;

@@ -117,6 +117,16 @@ contextBridge.exposeInMainWorld('aicut', {
     },
   },
 
+  // ── 补全资产（一键补全）──
+  assets: {
+    status: () => ipcRenderer.invoke('assets:status'),
+    download: (opts?: { ids?: string[] }) => ipcRenderer.invoke('assets:download', opts),
+    onProgress: (callback: (p: any) => void) => {
+      ipcRenderer.removeAllListeners('assets:progress');
+      ipcRenderer.on('assets:progress', (_, p: any) => callback(p));
+    },
+  },
+
   // ── 草稿 ──
   saveDraft: (name: string, content: string) => ipcRenderer.invoke('draft:save', name, content),
   loadDraft: (name: string) => ipcRenderer.invoke('draft:load', name),

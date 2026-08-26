@@ -73,6 +73,61 @@ def _union(ivs: list) -> list:
     return [(a, b) for a, b in m]
 
 
+def _subtract(s: float, e: float, ivs: list) -> list:
+    """从单个区间 [s,e] 中减去 ivs（已 union 的保护区），返回剩余子区间列表。"""
+    out = []
+    cur = float(s)
+    for ps, pe in ivs:
+        if pe <= cur or ps >= e:
+            continue
+        if ps - cur > 1e-6:
+            out.append((cur, ps))
+        cur = max(cur, pe)
+        if cur >= e:
+            break
+    if e - cur > 1e-6:
+        out.append((cur, e))
+    return out
+
+
+def _overlap_len(s: float, e: float, ivs: list) -> float:
+    """[s,e] 与 ivs（已 union）的总重叠时长。"""
+    tot = 0.0
+    for ps, pe in ivs:
+        lo, hi = max(s, ps), min(e, pe)
+        if hi > lo:
+            tot += hi - lo
+    return tot
+
+
+def _apply_word_safety(events: list, word_ivs: list,
+                       keep_ratio: float = 0.5, min_piece: float = 0.03) -> list:
+    """声音事件安全阀（P0-C 放宽版）。
+
+    旧逻辑（方案 A 保守回退）：事件只要与词区间(含 word_pad)有**任何**重叠就
+    **整段丢弃不删** → 句中咳嗽/提示音被 whisper 词区间覆盖到一点点即永不删除，
+    用户感知「完全没反应」。
+
+    新逻辑：
+      - 重叠比例 >= keep_ratio（默认 0.5）：认定事件主体就是朗读语音（连续元音），
+        **整段不删**——保留旧行为的回归保护，避免切碎连续朗读；
+      - 重叠比例 < keep_ratio：只保留被词区间覆盖的中心段，**词区间之外的部分仍可删**，
+        即允许把删除边界推到词边界（min_piece 以下的碎屑不切，避免产生咔哒）。
+    """
+    out = []
+    for s, e in events:
+        dur = e - s
+        if dur <= 0:
+            continue
+        ov = _overlap_len(s, e, word_ivs)
+        if dur > 0 and (ov / dur) >= keep_ratio:
+            continue  # 回归保护：主体是词 → 整段不删
+        for ps, pe in _subtract(s, e, word_ivs):
+            if pe - ps >= min_piece:
+                out.append((ps, pe))
+    return _union(out)
+
+
 def _complement(remove: list, dur: float, min_keep: float = 0.15) -> list:
     """返回 [0, dur] 中未被 remove 覆盖的保留区间（已合并、升序、非重叠）。"""
     keep = []
@@ -95,6 +150,18 @@ def _read_wav(path: str) -> tuple:
     au = np.frombuffer(wf.readframes(n), dtype=np.int16).astype(np.float32) / 32768.0
     wf.close()
     return au, sr
+
+
+def _write_wav(path: str, audio: np.ndarray, sr: int) -> None:
+    """写 16bit PCM 单声道 wav（与 _read_wav 对称）。"""
+    a = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
+    pcm = (a * 32767.0).astype(np.int16)
+    wf = wave.open(path, "wb")
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(int(sr))
+    wf.writeframes(pcm.tobytes())
+    wf.close()
 
 
 def _has_video(path: str) -> bool:
@@ -152,14 +219,362 @@ def neural_separate(wav16_path: str, out_dir: str, cache_dir: str):
 
 
 # ══════════════════════════════════════════════════════
+# [1b] 降噪（P0-B）：opts['denoise'] 真正生效
+# ══════════════════════════════════════════════════════
+
+# 权重目录（P0-E 负责下载放置）。DeepFilterNet3 官方权重为 **48k** 模型
+# (enc/erb_dec/df_dec 三段 ONNX)，16k 输入需 16k→48k 升采样再降回；
+# TODO(P0 之后)：在 _denoise_onnx 内接入 DFN3 三段图 + 采样率转换。
+# 期望放置路径：E:/AIcut/python/models/denoise/*.onnx
+DENOISE_MODEL_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "denoise")
+
+
+def _prepend_cuda_dll_path() -> None:
+    """与 python/keying/core.py:35 同款：把 nvidia/*/bin 注入 PATH，
+    否则 onnxruntime-gpu 找不到 cublasLt/cudnn DLL 而静默回退 CPU。"""
+    import glob as _glob
+    sp = os.path.join(sys.prefix, "Lib", "site-packages")
+    nvidia_root = os.path.join(sp, "nvidia")
+    add = []
+    if os.path.isdir(nvidia_root):
+        for pat in (os.path.join(nvidia_root, "*", "bin"),
+                    os.path.join(nvidia_root, "*", "bin", "x86_64")):
+            for d in _glob.glob(pat):
+                if os.path.isdir(d):
+                    add.append(d)
+    if add:
+        os.environ["PATH"] = os.pathsep.join(add + [os.environ.get("PATH", "")])
+
+
+def _onnx_session(model_path: str):
+    """ONNX Runtime 会话 + provider 兜底链 CUDA → DML → CPU
+    （与 python/keying/core.py:262 一致的逐 EP 独立尝试写法）。返回 (session, ep) 或 (None, None)。"""
+    try:
+        _prepend_cuda_dll_path()
+        import onnxruntime as ort
+        ort.set_default_logger_severity(3)
+        so = ort.SessionOptions()
+        avail = ort.get_available_providers()
+        for ep in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"):
+            if ep not in avail:
+                continue
+            try:
+                sess = ort.InferenceSession(model_path, so, providers=[ep])
+                if ep in sess.get_providers():
+                    return sess, ep
+            except Exception as e:
+                sys.stderr.write(f"[denoise] EP[{ep}] 初始化失败({e})，尝试下一个\n")
+                continue
+    except Exception as e:
+        sys.stderr.write(f"[denoise] onnxruntime 不可用({e})\n")
+    return None, None
+
+
+def _denoise_onnx(au: np.ndarray, sr: int):
+    """ONNX 降噪接入点（权重就位时启用）。返回降噪后的音频，或 None（不可用）。
+
+    当前只支持「波形进 / 波形出」的单图模型（输入 [1,T] float32）。
+    DeepFilterNet3 是 48k 三段图（enc/erb_dec/df_dec），需要额外的 ERB/DF 特征
+    与采样率转换，尚未实现 → 权重缺失时返回 None，由轻量方案兜底。
+    """
+    try:
+        if not os.path.isdir(DENOISE_MODEL_DIR):
+            return None
+        import glob as _glob
+        cands = sorted(_glob.glob(os.path.join(DENOISE_MODEL_DIR, "*.onnx")))
+        if not cands:
+            return None
+        # DeepFilterNet3 的分段图暂不支持（需 ERB/DF 特征流水线）
+        single = [p for p in cands
+                  if not any(k in os.path.basename(p).lower()
+                             for k in ("enc", "erb_dec", "df_dec"))]
+        if not single:
+            sys.stderr.write("[denoise] 仅发现 DeepFilterNet3 分段图，尚未支持，跳过 ONNX\n")
+            return None
+        model_path = single[0]
+        sess, ep = _onnx_session(model_path)
+        if sess is None:
+            return None
+        iname = sess.get_inputs()[0].name
+        x = np.asarray(au, dtype=np.float32)[None, :]
+        out = sess.run(None, {iname: x})[0]
+        y = np.asarray(out, dtype=np.float32).reshape(-1)
+        if y.size == 0:
+            return None
+        if y.size != au.size:
+            # 长度不一致（模型帧对齐差异）→ 裁剪/补零到原长
+            if y.size > au.size:
+                y = y[:au.size]
+            else:
+                y = np.concatenate([y, np.zeros(au.size - y.size, dtype=np.float32)])
+        sys.stderr.write(f"[denoise] ONNX 降噪成功（{os.path.basename(model_path)} @ {ep}）\n")
+        return np.clip(y, -1.0, 1.0)
+    except Exception as e:
+        sys.stderr.write(f"[denoise] ONNX 降噪失败({e})，回退轻量方案\n")
+        return None
+
+
+def _denoise_lightweight(au: np.ndarray, sr: int, hp_hz: float = 80.0,
+                         alpha: float = 1.5, floor_db: float = -14.0) -> np.ndarray:
+    """轻量降噪（无外部权重）：高通 + 谱减式噪声门。
+
+    - 噪声底：先排除近静音帧（避免静音间隙把底估成 0），再取剩余帧中
+      能量最低 20% 的频谱均值；对「带停顿的口播」稳健；
+    - 增益：max(floor, (|X| - alpha*noise)/|X|)，floor 默认 -14dB（温和，
+      避免破坏后续检测所依赖的能量/浊音/平坦度特征）；
+    - hp_hz 以下频点直接置零（去除空调/电流低频轰鸣）；
+    - 反射填充 n_fft 以消除 STFT 重叠相加在首尾的归一化放大伪影。
+    """
+    x = np.asarray(au, dtype=np.float32)
+    n = x.size
+    n_fft, hop = 512, 256
+    if n < n_fft * 2:
+        return x
+    win = np.hanning(n_fft).astype(np.float32)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    # 反射填充，消除 STFT 重叠相加在首尾的归一化放大伪影
+    pad = n_fft
+    xp = np.concatenate([x[:pad][::-1], x, x[-pad:][::-1]]).astype(np.float32)
+    nframes = 1 + (xp.size - n_fft) // hop
+
+    # ── 稳健噪声底估计（抽样最多 3000 帧）──
+    step = max(1, nframes // 3000)
+    sidx = np.arange(0, nframes, step)
+    fr = xp[(np.arange(n_fft)[None, :] + hop * sidx[:, None])] * win
+    mag_s = np.abs(np.fft.rfft(fr, axis=1)).astype(np.float32)
+    # 排除近静音帧，取剩余帧中能量最低 20% 的频谱均值作为噪声底
+    fenergy = mag_s.sum(axis=1)
+    nonzero = fenergy > (fenergy.max() * 1e-3 + 1e-9)
+    if int(nonzero.sum()) < 3:
+        nonzero = np.ones_like(nonzero)  # 全静音兜底：不降噪
+    fe_sorted = np.argsort(fenergy[nonzero])
+    k = max(1, int(0.2 * int(nonzero.sum())))
+    noise = mag_s[nonzero][fe_sorted[:k]].mean(axis=0).astype(np.float32)
+    del fr, mag_s
+
+    floor_gain = float(10.0 ** (floor_db / 20.0))
+    out = np.zeros(xp.size + n_fft, dtype=np.float32)
+    norm = np.zeros(xp.size + n_fft, dtype=np.float32)
+    win2 = (win ** 2).astype(np.float32)
+    batch = 2048
+    for b0 in range(0, nframes, batch):
+        b1 = min(nframes, b0 + batch)
+        starts = np.arange(b0, b1) * hop
+        seg = xp[(np.arange(n_fft)[None, :] + starts[:, None])] * win
+        spec = np.fft.rfft(seg, axis=1)
+        mag = np.abs(spec).astype(np.float32) + 1e-12
+        gain = (mag - alpha * noise[None, :]) / mag
+        np.clip(gain, floor_gain, 1.0, out=gain)
+        gain[:, freqs < hp_hz] = 0.0
+        rec = np.fft.irfft(spec * gain, n=n_fft, axis=1).astype(np.float32) * win
+        for kk, st in enumerate(starts):
+            out[st:st + n_fft] += rec[kk]
+            norm[st:st + n_fft] += win2
+    yp = np.zeros(xp.size, dtype=np.float32)
+    valid = norm[:xp.size] > 1e-6
+    yp[valid] = out[:xp.size][valid] / norm[:xp.size][valid]
+    yp = np.clip(yp, -1.0, 1.0)
+    y = yp[pad:pad + n]  # 取回原始长度
+    return y.astype(np.float32)
+
+
+def denoise_wav(wav_in: str, wav_out: str) -> tuple:
+    """对 16k 单声道 wav 做降噪，写到 wav_out。
+
+    返回 (ok, method, warning)：
+      ok=False 时调用方继续用原音频（no-op 降级，绝不抛错阻断分析）。
+    """
+    try:
+        au, sr = _read_wav(wav_in)
+    except Exception as e:
+        return False, "none", f"denoise_read_failed:{e}"
+    if au.size == 0:
+        return False, "none", "denoise_empty_audio"
+
+    y = _denoise_onnx(au, sr)
+    if y is not None:
+        try:
+            _write_wav(wav_out, y, sr)
+            return True, "onnx", ""
+        except Exception as e:
+            return False, "none", f"denoise_write_failed:{e}"
+
+    # 权重不存在 / ONNX 不可用 → 轻量方案（并回告 warning，便于前端提示）
+    try:
+        y = _denoise_lightweight(au, sr)
+        _write_wav(wav_out, y, sr)
+        return True, "lightweight", "denoise_weights_missing_fallback_lightweight"
+    except Exception as e:
+        sys.stderr.write(f"[denoise] 轻量降噪失败({e})，按 no-op 处理\n")
+        return False, "none", f"denoise_failed:{e}"
+
+
+# ══════════════════════════════════════════════════════
 # [2] Whisper 词级转写
 # ══════════════════════════════════════════════════════
 
-def transcribe(wav_path: str, model_size: str = "base", language: str = None) -> tuple:
-    """返回 (words, duration, asr_model)。words: [{word,start,end}]
+def _whisper_device(prefer: str = None) -> tuple:
+    """选择 faster-whisper(ctranslate2) 的 (device, compute_type)。
+
+    P0-A：默认优先 CUDA（float16，词级时间戳明显更稳），探测失败/无 GPU 时回退
+    CPU int8（与旧行为一致）。prefer 可显式指定 'cuda' / 'cpu'。
+    """
+    want = (prefer or os.environ.get("AICUT_SPEECH_DEVICE") or "auto").strip().lower()
+    if want == "cpu":
+        return "cpu", "int8"
+    try:
+        import ctranslate2
+        if int(ctranslate2.get_cuda_device_count()) > 0:
+            types = set()
+            try:
+                types = set(ctranslate2.get_supported_compute_types("cuda"))
+            except Exception:
+                pass
+            for ct in ("float16", "int8_float16", "float32"):
+                if not types or ct in types:
+                    return "cuda", ct
+    except Exception as e:
+        sys.stderr.write(f"[transcribe] CUDA 探测失败({e})，回退 CPU\n")
+    return "cpu", "int8"
+
+
+def _asr_bridge_module():
+    """按文件路径加载 python/asr/bridge.py（不能直接 `import bridge`：
+    speech_edit/bridge.py 已占用同名模块且在 sys.path[0]）。失败返回 None。"""
+    try:
+        import importlib.util as iu
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(os.path.dirname(here), "asr", "bridge.py")
+        if not os.path.exists(path):
+            return None
+        spec = iu.spec_from_file_location("aicut_asr_bridge", path)
+        mod = iu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"[transcribe] 加载 asr/bridge.py 失败({e})\n")
+        return None
+
+
+def paraformer_words(wav_path: str, language: str = None) -> list:
+    """可选云端词级时间通道（DashScope / Paraformer 实时识别）。
+
+    返回 [{word,start,end}]；无 key / SDK 缺失 / 网络失败时返回 []（静默跳过，
+    调用方回退 whisper 的 word_timestamps）。Key 一律从环境变量读取，绝不硬编码。
+    """
+    key = (os.environ.get("DASHSCOPE_API_KEY")
+           or os.environ.get("AICUT_ASR_API_KEY") or "").strip()
+    if not key:
+        return []
+    mod = _asr_bridge_module()
+    if mod is None:
+        return []
+    try:
+        import dashscope
+        dashscope.api_key = key
+        os.environ["DASHSCOPE_API_KEY"] = key
+        lang = language or "auto"
+        model = os.environ.get("AICUT_SPEECH_CLOUD_MODEL", "paraformer-realtime-v2")
+
+        def _norm(r):
+            """asr/bridge 的两个入口在部分失败分支只返回 list（非 (segs, flag) 元组），
+            这里统一成 (segs, word_level)。"""
+            if isinstance(r, tuple) and len(r) == 2:
+                return (r[0] or []), bool(r[1])
+            return (r or []), False
+
+        segs, word_level = _norm(mod._recognize(wav_path, lang, model))
+        if not segs:
+            segs, word_level = _norm(mod._recognize_file_fallback(wav_path, lang, model))
+        if not segs or not word_level:
+            return []
+        out = []
+        for s in segs:
+            t = (s.get("text") or "").strip()
+            if not t:
+                continue
+            ws, we = float(s["start"]), float(s["end"])
+            if we < ws:
+                we = ws
+            out.append({"word": t, "start": ws, "end": we})
+        out.sort(key=lambda w: w["start"])
+        return out
+    except Exception as e:
+        sys.stderr.write(f"[transcribe] Paraformer 词级通道不可用({e})，跳过\n")
+        return []
+
+
+def _fuse_cloud_word_times(wh_words: list, cloud_words: list) -> list:
+    """用 Paraformer 词级时间覆盖 whisper 词的时间戳（文本以 whisper 为准）。
+
+    对齐方式：两侧文本去标点后拼成字符串，difflib 求匹配块 → whisper 每个词落在
+    哪些云端词上，用云端词的 start/end 取 min/max 覆盖。未匹配上的 whisper 词保留
+    自身时间（不猜）。云端词级比 whisper CPU 解码的时间戳更贴合真实边界。
+    """
+    if not wh_words or not cloud_words:
+        return wh_words
+    import difflib
+
+    def _plain(text):
+        return "".join(ch for ch in text if ch not in _PUNCT)
+
+    a_chars, a_owner = [], []
+    for i, w in enumerate(wh_words):
+        for ch in _plain(w["word"]):
+            a_chars.append(ch)
+            a_owner.append(i)
+    b_chars, b_owner = [], []
+    for j, w in enumerate(cloud_words):
+        for ch in _plain(w["word"]):
+            b_chars.append(ch)
+            b_owner.append(j)
+    if not a_chars or not b_chars:
+        return wh_words
+    a, b = "".join(a_chars), "".join(b_chars)
+    # 两路转写字数差异过大 → 融合无意义（与 asr/bridge._merge_clauses 同款护栏）
+    if abs(len(a) - len(b)) > max(len(a), len(b)) * 0.4 + 16:
+        sys.stderr.write("[transcribe] 云端/本地转写字数差异过大，跳过词级融合\n")
+        return wh_words
+
+    hit = {}  # whisper 词索引 → 命中的云端词索引集合
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    for ai, bj, size in sm.get_matching_blocks():
+        for k in range(size):
+            hit.setdefault(a_owner[ai + k], set()).add(b_owner[bj + k])
+
+    fused = []
+    n_over = 0
+    for i, w in enumerate(wh_words):
+        js = hit.get(i)
+        if js:
+            s = min(cloud_words[j]["start"] for j in js)
+            e = max(cloud_words[j]["end"] for j in js)
+            if e > s:
+                fused.append({"word": w["word"], "start": float(s), "end": float(e)})
+                n_over += 1
+                continue
+        fused.append(dict(w))
+    fused.sort(key=lambda x: x["start"])
+    sys.stderr.write(f"[transcribe] 云端词级融合：{n_over}/{len(wh_words)} 个词时间被覆盖\n")
+    return fused
+
+
+def transcribe(wav_path: str, model_size: str = "small", language: str = None,
+               device: str = None, cloud_words: bool = True) -> tuple:
+    """返回 (words, duration, asr_model, status)。words: [{word,start,end}]
+
+    status: 'ok'（有词）/ 'empty'（模型跑通但 0 词，真的无语音/纯音乐）/
+            'failed'（转写抛异常，词不可用 → 主流程需显式 VAD 兜底并告警）。
 
     language=None 时交给 faster-whisper 自动检测（泛化：支持英文 / 中英混说 / 方言样本，
     不再硬编码中文导致非中文样本词缺失 → 级联误删）。
+
+    P0-A 精度提升：
+      - device 默认探测 CUDA（float16），不可用回退 CPU int8（旧行为）；
+      - model_size 默认 'small'（旧 'base'），仍可被 opts 覆盖；
+      - 保留 word_timestamps=True；
+      - 若存在 DASHSCOPE_API_KEY，用 Paraformer 词级时间覆盖 whisper 时间戳。
     """
     from faster_whisper import WhisperModel
     # 先估算时长（即便转写失败也能让后续 VAD 兜底走通）
@@ -171,18 +586,42 @@ def transcribe(wav_path: str, model_size: str = "base", language: str = None) ->
         dur = 0.0
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    dev, ctype = _whisper_device(device)
+    words = []
+    model = None
+    status = "failed"
     try:
-        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        try:
+            model = WhisperModel(model_size, device=dev, compute_type=ctype)
+        except Exception as e:
+            if dev != "cpu":
+                sys.stderr.write(f"[transcribe] {dev}/{ctype} 初始化失败({e})，回退 cpu/int8\n")
+                dev, ctype = "cpu", "int8"
+                model = WhisperModel(model_size, device=dev, compute_type=ctype)
+            else:
+                raise
+        sys.stderr.write(f"[transcribe] whisper {model_size} @ {dev}/{ctype}\n")
         segs, info = model.transcribe(wav_path, beam_size=5, language=language, word_timestamps=True)
-        words = []
         for seg in segs:
             for w in (seg.words or []):
                 words.append({"word": w.word, "start": float(w.start), "end": float(w.end)})
         dur = float(getattr(info, "duration", 0) or 0) or dur
-        return words, dur, model
+        status = "ok" if words else "empty"
     except Exception as e:
-        sys.stderr.write(f"[transcribe] 转写失败({e})，降级为无词（仅 VAD 路径）\n")
-        return [], dur, None
+        sys.stderr.write(f"[transcribe] 转写失败({e})，标记 asr 失败（主流程走 VAD 兜底）\n")
+        words, model, status = [], None, "failed"
+
+    # 云端词级通道（可选）：Paraformer 词级时间比 whisper 更贴合真实词边界。
+    if cloud_words:
+        cw = paraformer_words(wav_path, language)
+        if cw:
+            if words:
+                words = _fuse_cloud_word_times(words, cw)
+            else:
+                # whisper 无词（失败或空）但云端有词 → 直接采用云端词，救回该次分析
+                words = cw
+                status = "ok"
+    return words, dur, model, status
 
 
 
@@ -486,7 +925,8 @@ def _has_silence_border(au: np.ndarray, sr: int, s: float, e: float,
 def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
                  onset_factor: float = 4.5, min_dur: float = 0.10,
                  max_dur: float = 0.7, min_voiced: float = 0.08,
-                 word_pad: float = 0.12, vad_regs: list = None) -> list:
+                 word_pad: float = 0.12, vad_regs: list = None,
+                 overlap_keep_ratio: float = 0.5) -> list:
     """全音频扫描短促浊音爆发（咳嗽 / 清嗓 / 咳痰）。
 
     独立于 VAD 间隙：即便 silero VAD 把咳嗽判成语音并并入相邻朗读段，
@@ -528,22 +968,24 @@ def detect_cough(wav_path: str, words: list, win_ms: int = 10, hop_ms: int = 5,
             i += 1
     if not events:
         return []
-    # 方案 A 保守回退：安全阀 = 词区间(含 word_pad)。
-    # 任何与词对齐重叠的声音事件**整段丢弃**(不删)，只删完全不碰词、落在词
-    # 间静音间隙的独立非语音事件。回到用户验收"无噪音"的 745230d 基线——
-    # 删除点都在词间静音间隙，acrossfade 不切语音 → 无噪音；朗读字(如"离")
-    # 被词保护覆盖，不会被误删。
+    # 安全阀 = 词区间(含 word_pad)。
+    # 【原逻辑，已被 P0-C 取代，保留说明避免误删】方案 A 保守回退：任何与词对齐
+    # 重叠的声音事件**整段丢弃**(不删)，只删完全不碰词、落在词间静音间隙的独立
+    # 非语音事件 —— 副作用是句中咳嗽被词区间碰到一点即永不删除。
+    #   out = [(s, e) for s, e in events
+    #          if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
+    # 【P0-C 放宽】重叠比例 >= overlap_keep_ratio 才整段不删（保护连续朗读元音），
+    # 否则仅裁掉词区间之外的部分（句中咳嗽的词外部分可删）。
     word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
                        for w in words])
-    out = [(s, e) for s, e in events
-           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
-    return _union(out)
+    return _apply_word_safety(events, word_ivs, keep_ratio=overlap_keep_ratio)
 
 
 def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int = 15,
                      flat_thr: float = 0.12, min_rel_energy: float = 1.5,
                      min_dur: float = 0.05, max_dur: float = 0.6,
-                     word_pad: float = 0.08, vad_regs: list = None) -> list:
+                     word_pad: float = 0.08, vad_regs: list = None,
+                     overlap_keep_ratio: float = 0.5) -> list:
     """全音频扫描短时强纯音事件（系统提示音 / 蜂鸣 / 按键音 / 门铃）。
 
     独立于 VAD：提示音常被 VAD 连同相邻朗读一起判为语音并入 keep，且现有
@@ -588,13 +1030,15 @@ def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int =
         i = j + 1
     if not events:
         return []
-    # 方案 A 保守回退：同 detect_cough —— 词区间(含 word_pad)即整段丢弃，
-    # 只删词间静音间隙的独立纯音事件。回到 745230d 无噪音基线。
+    # 安全阀：同 detect_cough。
+    # 【原逻辑，已被 P0-C 取代，保留说明】方案 A 保守回退——词区间(含 word_pad)
+    # 有任何重叠即整段丢弃，只删词间静音间隙的独立纯音事件：
+    #   out = [(s, e) for s, e in events
+    #          if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
+    # 【P0-C 放宽】改为重叠比例阈值 + 词外部分裁剪。
     word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
                        for w in words])
-    out = [(s, e) for s, e in events
-           if not any(not (e <= ws or s >= we) for ws, we in word_ivs)]
-    return _union(out)
+    return _apply_word_safety(events, word_ivs, keep_ratio=overlap_keep_ratio)
 
 
 # ══════════════════════════════════════════════════════
@@ -931,6 +1375,70 @@ def normalize_lufs(audio: np.ndarray, sr: int, target_lufs: float = -16.0) -> np
 # 主分析入口（决策层，仅返回 JSON 计划，不生成任何媒体文件）
 # ══════════════════════════════════════════════════════
 
+# 方案 §5.5 契约字段：每个删除事件除 type/start/end 外还需带
+#   flag_disfluency (bool)  是否口头不流畅（填充词/重复/结巴）
+#   gap_type        (str)   间隙/事件语义类型（供 P1 间隙分类器细化）
+#   conf            (float) 置信度 0..1（规则检测器给经验值，P1 模型给真实分数）
+#   src             (str)   来源标识（rule / rule_text / rule_acoustic / manual / 模型名）
+# 这里给出各 detector 的初始填充值；P1 检测器接入后覆盖对应字段即可。
+_DETAIL_META = {
+    "text_filler":    {"flag_disfluency": True,  "gap_type": "filler",   "conf": 0.80, "src": "rule_text"},
+    "isolated_noise": {"flag_disfluency": False, "gap_type": "isolated",  "conf": 0.60, "src": "rule_acoustic"},
+    "gap_breath":     {"flag_disfluency": False, "gap_type": "breath",    "conf": 0.60, "src": "rule_acoustic"},
+    "transient":      {"flag_disfluency": False, "gap_type": "transient", "conf": 0.55, "src": "rule_acoustic"},
+    "intra_keep":     {"flag_disfluency": True,  "gap_type": "intra",     "conf": 0.50, "src": "rule_acoustic"},
+    "cough":          {"flag_disfluency": False, "gap_type": "cough",     "conf": 0.65, "src": "rule_acoustic"},
+    "tonal_sfx":      {"flag_disfluency": False, "gap_type": "tonal",     "conf": 0.65, "src": "rule_acoustic"},
+    "vad_silence":    {"flag_disfluency": False, "gap_type": "silence",   "conf": 0.70, "src": "rule_vad"},
+    "manual_exclude": {"flag_disfluency": False, "gap_type": "manual",    "conf": 1.00, "src": "manual"},
+}
+
+
+def _vad_only_silence(wav_path: str, speech_regs: list, dur: float,
+                      min_sil: float = 0.35, sil_ratio: float = 2.0) -> list:
+    """P0-D 兜底用：只删「VAD 语音段之外、且能量确实处于静音底噪」的长间隙。
+
+    不依赖任何词信息，故 ASR 失败时可安全使用：
+      - 候选 = VAD 语音段的补集里长度 >= min_sil 的间隙；
+      - 再要求该间隙 RMS < 底噪 * sil_ratio（排除音乐/环境音，避免删掉背景音乐）。
+    """
+    try:
+        au, sr = _read_wav(wav_path)
+    except Exception:
+        return []
+    if au.size == 0:
+        return []
+    win = max(1, int(0.02 * sr))
+    hop = max(1, win // 2)
+    rms_arr = np.array([float(np.sqrt(np.mean(au[i:i + win] ** 2)))
+                        for i in range(0, max(1, len(au) - win), hop)])
+    if rms_arr.size == 0:
+        return []
+    pos = rms_arr[rms_arr > 1e-8]
+    noise_floor = float(np.percentile(pos, 10)) if pos.size else 1e-4
+    out = []
+    for gs, ge in _complement(speech_regs, dur, min_keep=0.0):
+        if ge - gs < min_sil:
+            continue
+        a, b = int(gs * sr), int(ge * sr)
+        if b <= a:
+            continue
+        seg_rms = float(np.sqrt(np.mean(au[a:b] ** 2)))
+        if seg_rms < noise_floor * sil_ratio:
+            out.append((gs, ge))
+    return _union(out)
+
+
+def _mk_detail(typ: str, s: float, e: float, **over) -> dict:
+    """构造带 §5.5 契约字段的 detail 项；over 可由检测器覆盖任意字段。"""
+    meta = _DETAIL_META.get(typ, {"flag_disfluency": None, "gap_type": "", "conf": None, "src": "rule"})
+    d = {"type": typ, "start": float(s), "end": float(e),
+         "flag_disfluency": meta["flag_disfluency"], "gap_type": meta["gap_type"],
+         "conf": meta["conf"], "src": meta["src"]}
+    d.update(over)
+    return d
+
+
 def _apply_min_gap(remove_list: list, min_gap: float) -> list:
     """丢弃短于 min_gap 的声学检测删除区间（太短的静音不值得切）。"""
     if min_gap <= 0:
@@ -984,7 +1492,7 @@ def analyze(input_path: str, opts: dict) -> dict:
         输入音频/视频文件路径。
     opts : dict
         选项（均可选，含默认值）：
-          modelSize   (str,  默认 'base')  whisper 模型大小
+          modelSize   (str,  默认 'small') whisper 模型大小（P0-A：由 'base' 提升）
           useDemucs   (bool, 默认 True)    是否用 Demucs 做人声分离（分析辅助）
           vadThreshold(float, 默认 0.25)    Silero VAD 阈值
           minGap      (float, 默认 0.18)    最短可切除静音间隙（s）
@@ -994,7 +1502,10 @@ def analyze(input_path: str, opts: dict) -> dict:
                                             仅删语音内填充/呼吸；False=仅保留 VAD 语音段（紧凑旁白）
           trimSilence(bool, 默认 True)      裁剪首尾低能量静音段（基于原始 16k 包络）
           exclude     (list, 默认 [])       人工排除区 [[s,e], ...]（并入删除集）
-          denoise/deess/normalize : 仅被 Rust 生成阶段使用，analyze 忽略
+          denoise     (bool, 默认 False)    P0-B：True 时在检测前对 16k 音频做真实降噪
+                                            （优先 ONNX 权重，缺失则轻量高通+噪声门），
+                                            并把标志透传给 Rust 生成阶段（declick）
+          deess/normalize : 仅被 Rust 生成阶段使用，analyze 忽略
 
     返回（契约，必须包含以下键）
     ----------------------------------------------
@@ -1002,10 +1513,16 @@ def analyze(input_path: str, opts: dict) -> dict:
       sampleRate      : int     16000
       words           : [{word,start,end}, ...]
       keepSegments    : [[s,e], ...]  升序、非重叠、在 [0,duration] 内
-      detail          : [{type,start,end}, ...]  每段删除区的类型化描述
+      detail          : [{type,start,end,flag_disfluency,gap_type,conf,src}, ...]
+                        每段删除区的类型化描述（后 4 个为 §5.5 契约字段，P1 检测器填充）
       totalRemovedSec : float
       ratio           : float   0..1
       separated       : bool    是否成功做了 Demucs 声源分离
+      warnings        : [str]   非致命告警列表（可能为空）
+      warning         : str     首个告警（仅当有告警时存在）；
+                                'asr_failed_fallback_to_vad' = ASR 失败已走 VAD 兜底
+      asr             : dict    {status, words, cloudWords, modelSize}
+      denoise         : bool    本次是否请求降噪（透传给 Rust assemble 决定 declick）
     分离成功时额外返回（可选键）：
       vocalPath       : str    人声 stem 路径（44.1k，已缓存到 .aicut_speech）
       accompPath      : str    伴奏 stem 路径（no_vocals，44.1k）
@@ -1013,7 +1530,8 @@ def analyze(input_path: str, opts: dict) -> dict:
     """
     opts = opts or {}
 
-    model_size = opts.get("modelSize", "base")
+    # P0-A：默认模型由 'base' → 'small'（词边界更准），仍可被前端 opts 覆盖
+    model_size = opts.get("modelSize", "small")
     use_demucs = bool(opts.get("useDemucs", False))
     vad_threshold = float(opts.get("vadThreshold", 0.25))
     min_gap = float(opts.get("minGap", 0.18))
@@ -1040,9 +1558,16 @@ def analyze(input_path: str, opts: dict) -> dict:
     cough_min_voiced = float(opts.get("coughMinVoiced", 0.08))
     tonal_flat_thr = float(opts.get("tonalFlatThr", 0.12))
     tonal_max_dur = float(opts.get("tonalMaxDur", 0.6))
+    # P0-C：声音事件安全阀的「整段不删」重叠比例阈值（越大越敢删词外部分）
+    event_overlap_keep = float(opts.get("eventOverlapKeepRatio", 0.5))
+    # P0-A：ASR 设备 / 云端词级通道开关（无 key 时自动跳过）
+    asr_device = opts.get("asrDevice", None)
+    use_cloud_words = bool(opts.get("cloudWordAlign", True))
 
-    # 仅接受，不在此处使用（输出生成由 Rust 负责）
-    # opts.get("denoise"); opts.get("deess"); opts.get("normalize")
+    # P0-B：denoise 真正生效（在检测前对 16k 音频降噪）；
+    # deess/normalize 仍仅由 Rust 生成阶段使用，analyze 忽略。
+    do_denoise = bool(opts.get("denoise", False))
+    warnings_out = []
 
     # 临时工作目录（用完即清）
     tmp = tempfile.mkdtemp(prefix="aicut_se_")
@@ -1081,10 +1606,37 @@ def analyze(input_path: str, opts: dict) -> dict:
         else:
             print("[1/6] 跳过 Demucs", flush=True)
 
+        # ── [1b] 降噪（P0-B）：opts.denoise=True 时在检测前对 16k 音频降噪 ──
+        # 降噪后的音频既进 ASR 也进各声学检测器（噪声底更低 → 事件 onset 更干净）；
+        # 失败一律 no-op 降级 + warning，绝不阻断分析。
+        denoise_method = "none"
+        if do_denoise:
+            print("[1b] 降噪…", flush=True)
+            dn_path = os.path.join(tmp, "_work_denoised.wav")
+            ok_dn, denoise_method, dn_warn = denoise_wav(work_wav, dn_path)
+            if ok_dn:
+                work_wav = dn_path
+                print(f"  [OK] 降噪完成（{denoise_method}）", flush=True)
+            else:
+                print(f"  [SKIP] 降噪未生效（{dn_warn}），使用原音频", flush=True)
+            if dn_warn:
+                warnings_out.append(dn_warn)
+
         # ── [2] Whisper 转写 ──
         print("[2/6] Whisper 转写…", flush=True)
-        words, _, _ = transcribe(work_wav, model_size, language)
-        print(f"  {len(words)} 个词", flush=True)
+        words, _, _, asr_status = transcribe(work_wav, model_size, language,
+                                             device=asr_device,
+                                             cloud_words=use_cloud_words)
+        print(f"  {len(words)} 个词 (asr={asr_status})", flush=True)
+        # P0-D：区分「ASR 失败」与「真的无语音」。
+        #   failed → 词不可信，必须显式走 VAD-only 兜底并回告前端；
+        #   empty  → 模型跑通但确实没词（纯音乐/静音），保持原行为，仅信息性告警。
+        asr_failed = (asr_status == "failed")
+        if asr_failed:
+            warnings_out.append("asr_failed_fallback_to_vad")
+            print("  [WARN] ASR 失败 → 走 VAD-only 保守兜底（不做词级删除）", flush=True)
+        elif asr_status == "empty":
+            warnings_out.append("asr_no_words")
 
         # ── [3] VAD ──
         print("[3/6] VAD 语音检测…", flush=True)
@@ -1102,57 +1654,80 @@ def analyze(input_path: str, opts: dict) -> dict:
             speech_regs = [(0.0, dur)]
 
         # ── [4] 多层噪声检测 ──
-        print("[4/6] 多层噪声检测…", flush=True)
+        if asr_failed:
+            # P0-D：ASR 失败 → 词不可信，任何依赖词的检测都可能级联误删，
+            # 这里显式退化为 VAD-only 保守路径：只用 人工排除 + 首尾裁剪
+            # （keepNonspeech=False 时再叠加「仅保留 VAD 语音段」），
+            # 并已在上面写入 warning='asr_failed_fallback_to_vad' 告知前端。
+            print("[4/6] 跳过噪声检测（ASR 失败 → VAD-only 兜底）", flush=True)
+            text_fillers = []
+            gap_breath = []
+            transients = []
+            cough_events = []
+            tonal_events = []
+            sound_events = []
+            intra_fillers = []
+            isolated = []
+            # 唯一保留的删除来源：VAD 语音段之外、能量确为底噪的长静音间隙
+            # （不依赖词，删了也不可能切到语音；音乐/环境音被能量门挡住）。
+            vad_sil = _vad_only_silence(work_wav, speech_regs, dur,
+                                        min_sil=max(min_gap, 0.35))
+            print(f"  VAD-only 静音间隙: {len(vad_sil)} 段", flush=True)
+        else:
+            print("[4/6] 多层噪声检测…", flush=True)
+            vad_sil = []
 
-        # 4a. 文本填充词
-        text_fillers = detect_fillers(words, word_pad) if do_fillers else []
-        print(f"  4a. 文本填充词: {len(text_fillers)} 段", flush=True)
+            # 4a. 文本填充词
+            text_fillers = detect_fillers(words, word_pad) if do_fillers else []
+            print(f"  4a. 文本填充词: {len(text_fillers)} 段", flush=True)
 
-        # 4b. 孤立段填充词/噪声
-        isolated = detect_isolated_fillers(work_wav, words, speech_regs)
-        print(f"  4b. 孤立段填充/噪声: {len(isolated)} 段", flush=True)
+            # 4b. 孤立段填充词/噪声
+            isolated = detect_isolated_fillers(work_wav, words, speech_regs)
+            print(f"  4b. 孤立段填充/噪声: {len(isolated)} 段", flush=True)
 
-        # 4c/4d. 基于 VAD 间隙的呼吸/瞬态检测
-        gaps = _complement(speech_regs, dur, min_keep=0.0)
-        gap_breath = detect_gap_breath(work_wav, gaps, words, word_pad=word_pad)
-        print(f"  4c. 间隙气声/咳嗽: {len(gap_breath)} 段", flush=True)
-        transients = detect_transients(
-            work_wav, gaps, words, word_pad=word_pad,
-            crest_thr=transient_crest_thr, max_dur=transient_max_dur,
-        )
-        print(f"  4d. 瞬态/咂嘴: {len(transients)} 段", flush=True)
+            # 4c/4d. 基于 VAD 间隙的呼吸/瞬态检测
+            gaps = _complement(speech_regs, dur, min_keep=0.0)
+            gap_breath = detect_gap_breath(work_wav, gaps, words, word_pad=word_pad)
+            print(f"  4c. 间隙气声/咳嗽: {len(gap_breath)} 段", flush=True)
+            transients = detect_transients(
+                work_wav, gaps, words, word_pad=word_pad,
+                crest_thr=transient_crest_thr, max_dur=transient_max_dur,
+            )
+            print(f"  4d. 瞬态/咂嘴: {len(transients)} 段", flush=True)
 
-        # 4e/4f. 非语音声音事件（独立于 VAD，扫全音频，补抓被 VAD 吸收的咳嗽
-        #         / 语音段内的纯音提示音）。这些事件可能短于 minGap 但确实该删，
-        #         因此不套 _apply_min_gap。
-        cough_events = detect_cough(work_wav, words, word_pad=word_pad,
-                                    onset_factor=cough_onset_factor,
-                                    min_voiced=cough_min_voiced,
-                                    vad_regs=speech_regs)
-        print(f"  4e. 咳嗽/清嗓(浊音爆发): {len(cough_events)} 段", flush=True)
-        tonal_events = detect_tonal_sfx(work_wav, words, word_pad=word_pad,
-                                        flat_thr=tonal_flat_thr, max_dur=tonal_max_dur,
-                                        vad_regs=speech_regs)
-        print(f"  4f. 提示音/纯音事件: {len(tonal_events)} 段", flush=True)
-        sound_events = _union(cough_events + tonal_events)
+            # 4e/4f. 非语音声音事件（独立于 VAD，扫全音频，补抓被 VAD 吸收的咳嗽
+            #         / 语音段内的纯音提示音）。这些事件可能短于 minGap 但确实该删，
+            #         因此不套 _apply_min_gap。
+            cough_events = detect_cough(work_wav, words, word_pad=word_pad,
+                                        onset_factor=cough_onset_factor,
+                                        min_voiced=cough_min_voiced,
+                                        vad_regs=speech_regs,
+                                        overlap_keep_ratio=event_overlap_keep)
+            print(f"  4e. 咳嗽/清嗓(浊音爆发): {len(cough_events)} 段", flush=True)
+            tonal_events = detect_tonal_sfx(work_wav, words, word_pad=word_pad,
+                                            flat_thr=tonal_flat_thr, max_dur=tonal_max_dur,
+                                            vad_regs=speech_regs,
+                                            overlap_keep_ratio=event_overlap_keep)
+            print(f"  4f. 提示音/纯音事件: {len(tonal_events)} 段", flush=True)
+            sound_events = _union(cough_events + tonal_events)
 
-        # 对声学类删除区应用 minGap 下限（太短不切）；声音事件不套（见上）
-        isolated = _apply_min_gap(isolated, min_gap)
-        gap_breath = _apply_min_gap(gap_breath, min_gap)
-        transients = _apply_min_gap(transients, min_gap)
+            # 对声学类删除区应用 minGap 下限（太短不切）；声音事件不套（见上）
+            isolated = _apply_min_gap(isolated, min_gap)
+            gap_breath = _apply_min_gap(gap_breath, min_gap)
+            transients = _apply_min_gap(transients, min_gap)
 
-        # 初始删除集 → 初始保留段
-        init_remove = _union(text_fillers + isolated + gap_breath + transients + sound_events)
-        init_keep = _complement(init_remove, dur, min_keep=0.0)
+            # 初始删除集 → 初始保留段
+            init_remove = _union(text_fillers + isolated + gap_breath + transients + sound_events)
+            init_keep = _complement(init_remove, dur, min_keep=0.0)
 
-        # 4f. 保留段内部未保护区域（词前紧、词后松）
-        pad_head = word_pad
-        pad_tail = 0.25
-        intra_fillers = detect_intra_keep(work_wav, init_keep, words,
-                                          pad_head=pad_head, pad_tail=pad_tail)
-        intra_fillers = _apply_min_gap(intra_fillers, min_gap)
-        if intra_fillers:
-            print(f"  4f. 段内未保护区填充/噪声: {len(intra_fillers)} 段", flush=True)
+            # 4f. 保留段内部未保护区域（词前紧、词后松）
+            pad_head = word_pad
+            pad_tail = 0.25
+            intra_fillers = detect_intra_keep(work_wav, init_keep, words,
+                                              pad_head=pad_head, pad_tail=pad_tail)
+            intra_fillers = _apply_min_gap(intra_fillers, min_gap)
+            if intra_fillers:
+                print(f"  4f. 段内未保护区填充/噪声: {len(intra_fillers)} 段", flush=True)
 
         # 人工排除区（并入删除集，类型 manual_exclude）
         manual = []
@@ -1171,9 +1746,11 @@ def analyze(input_path: str, opts: dict) -> dict:
         # keepNonspeech=True（默认）：删除集的补集 = 保留背景音乐/环境音，仅删语音内噪声
         # keepNonspeech=False（紧凑）：仅保留 VAD 语音段，段内再挖除各类填充/噪声，
         #   非语音间隙（静音+音乐）整体丢弃。
+        # vad_sil 仅在 ASR 失败兜底路径非空（VAD-only 静音间隙）。
         if keep_nonspeech:
             all_remove = _union(text_fillers + isolated + gap_breath +
-                                transients + intra_fillers + sound_events + manual)
+                                transients + intra_fillers + sound_events +
+                                vad_sil + manual)
             keep = _complement(all_remove, dur, min_keep=0.0)
         else:
             keep = []
@@ -1249,22 +1826,17 @@ def analyze(input_path: str, opts: dict) -> dict:
 
         # ── detail：类型化删除明细（与 keep 互为补集）──
         detail = []
-        for s, e in text_fillers:
-            detail.append({"type": "text_filler", "start": s, "end": e})
-        for s, e in isolated:
-            detail.append({"type": "isolated_noise", "start": s, "end": e})
-        for s, e in gap_breath:
-            detail.append({"type": "gap_breath", "start": s, "end": e})
-        for s, e in transients:
-            detail.append({"type": "transient", "start": s, "end": e})
-        for s, e in intra_fillers:
-            detail.append({"type": "intra_keep", "start": s, "end": e})
-        for s, e in cough_events:
-            detail.append({"type": "cough", "start": s, "end": e})
-        for s, e in tonal_events:
-            detail.append({"type": "tonal_sfx", "start": s, "end": e})
-        for s, e in manual:
-            detail.append({"type": "manual_exclude", "start": s, "end": e})
+        for typ, ivs in (("text_filler", text_fillers),
+                         ("isolated_noise", isolated),
+                         ("gap_breath", gap_breath),
+                         ("transient", transients),
+                         ("intra_keep", intra_fillers),
+                         ("cough", cough_events),
+                         ("tonal_sfx", tonal_events),
+                         ("vad_silence", vad_sil),
+                         ("manual_exclude", manual)):
+            for s, e in ivs:
+                detail.append(_mk_detail(typ, s, e))
         detail.sort(key=lambda d: d["start"])
 
         total_kept = sum(e - s for s, e in keep)
@@ -1280,12 +1852,32 @@ def analyze(input_path: str, opts: dict) -> dict:
             "words": [{"word": w["word"], "start": float(w["start"]), "end": float(w["end"])}
                       for w in words],
             "keepSegments": [[float(s), float(e)] for s, e in keep],
-            "detail": [{"type": d["type"], "start": round(float(d["start"]), 6),
-                        "end": round(float(d["end"]), 6)} for d in detail],
+            # detail 除 type/start/end 外补齐 §5.5 契约字段（P1 检测器覆盖）
+            "detail": [{"type": d["type"],
+                        "start": round(float(d["start"]), 6),
+                        "end": round(float(d["end"]), 6),
+                        "flag_disfluency": d.get("flag_disfluency"),
+                        "gap_type": d.get("gap_type", ""),
+                        "conf": d.get("conf"),
+                        "src": d.get("src", "rule")} for d in detail],
             "totalRemovedSec": round(total_removed, 6),
             "ratio": round(ratio, 6),
             "separated": bool(separated),
+            # P0-A/D：ASR 状态可观测（前端可据此提示"转写失败，已按 VAD 保守处理"）
+            "asr": {
+                "status": asr_status,
+                "words": len(words),
+                "modelSize": model_size,
+                "cloudWords": bool(use_cloud_words),
+            },
+            # P0-B：denoise 标志透传 —— Rust speech_assemble 可据此启用 declick/adeclick
+            "denoise": bool(do_denoise),
+            "denoiseMethod": denoise_method,
+            "assembleHints": {"declick": bool(do_denoise)},
         }
+        if warnings_out:
+            result["warnings"] = warnings_out
+            result["warning"] = warnings_out[0]
         if separated and voice and accomp:
             result["vocalPath"] = voice
             result["accompPath"] = accomp
@@ -1371,7 +1963,8 @@ def separate(input_path, opts):
 def main():
     ap = argparse.ArgumentParser(description="AIcut 口播剪辑决策层（仅分析，返回计划）")
     ap.add_argument("input", help="输入音频/视频路径")
-    ap.add_argument("--model", default="base", help="Whisper 模型大小")
+    ap.add_argument("--model", default="small", help="Whisper 模型大小（P0-A 默认 small）")
+    ap.add_argument("--denoise", action="store_true", help="检测前对 16k 音频做降噪")
     ap.add_argument("--no-demucs", action="store_true", help="跳过 Demucs 声源分离")
     ap.add_argument("--vad-threshold", type=float, default=0.25)
     ap.add_argument("--min-gap", type=float, default=0.18)
@@ -1396,6 +1989,7 @@ def main():
         "minGap": args.min_gap,
         "wordPad": args.word_pad,
         "fillers": not args.no_fillers,
+        "denoise": args.denoise,
         "exclude": exclude,
     })
     print(json.dumps(rep, ensure_ascii=False, indent=2))

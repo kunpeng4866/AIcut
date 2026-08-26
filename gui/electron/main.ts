@@ -1,13 +1,15 @@
 // Electron main process — AIcut Desktop
 import { app, BrowserWindow, ipcMain, dialog, protocol, session, shell, clipboard } from 'electron';
 import { spawn } from 'child_process';
-import { readFile, writeFile, mkdir, readdir, unlink, stat } from 'fs/promises';
-import { mkdirSync } from 'fs';
-import { createReadStream } from 'fs';
+import { readFile, writeFile, mkdir, readdir, unlink, stat, rename } from 'fs/promises';
+import { mkdirSync, existsSync } from 'fs';
+import { createReadStream, createWriteStream } from 'fs';
 import { Readable } from 'stream';
 import { join, dirname, basename, delimiter } from 'path';
 import { pathToFileURL } from 'url';
+import { createHash } from 'crypto';
 import { applyExportOptions, applyAudioExport, buildSubtitleExport, parseShellArgs, type ExportOptionsParam } from './exportOptions';
+import { getManifest, DEFAULT_CDN_BASE } from './assets-manifest';
 
 let mainWindow: BrowserWindow | null = null;
 const ENGINE_BIN = app.isPackaged
@@ -40,20 +42,41 @@ if (app.isPackaged) {
   process.env.PATH = `${ff}${delimiter}${process.env.PATH || ''}`;
   process.env.AICUT_FFMPEG = join(ff, 'ffmpeg.exe');
   process.env.AICUT_FFPROBE = join(ff, 'ffprobe.exe');
-  const pyDir = join(res, 'python');
-  process.env.AICUT_PYTHON_BIN = join(pyDir, 'python.exe');
-  process.env.AICUT_SPEECH_BRIDGE = join(pyDir, 'speech_edit', 'bridge.py');
-  process.env.AICUT_KEYING_BRIDGE = join(pyDir, 'keying', 'bridge.py');
-  process.env.AICUT_SR_BRIDGE = join(pyDir, 'sr', 'bridge.py');
-  const mDir = join(res, 'models');
-  process.env.AICUT_RMBG2_MODEL = join(mDir, 'rmbg2.onnx');
-  process.env.AICUT_MODNET_MODEL = join(mDir, 'modnet.onnx');
-  process.env.AICUT_SR_MODEL = join(mDir, 'sr_v0_test.onnx');
+  // ⚠️ python / models 不再在打包块硬编码：精简版不含它们，改由 setupAssetEnv()
+  // 在 app ready 后按「resources 优先、否则回退 userData/aicut-assets」解析（见下方定义）。
 }
 
 // ── 路径常量 ──
 function getConfigPath() { return join(app.getPath('userData'), 'config.json'); }
 function getDraftsDir() { return join(app.getPath('userData'), 'drafts'); }
+
+// ── 补全资产（一键补全）路径解析 ──
+// 精简版安装包不含 python / models；下载后落到 userData/aicut-assets/（可写目录）。
+// Windows 下 resources/ 对标准用户只读，故回退到此目录，让 AICUT_* 变量自动指过去。
+function assetsDir(): string {
+  return join(app.getPath('userData'), 'aicut-assets');
+}
+function resolveAsset(sub: string, name: string): string {
+  const res = join(process.resourcesPath, sub, name);
+  try { if (existsSync(res)) return res; } catch { /* 忽略 */ }
+  return join(assetsDir(), sub, name);
+}
+// 在 app ready 后调用：按「resources 优先、否则回退 userData」解析 python / models 环境变量（仅打包模式）。
+function setupAssetEnv() {
+  if (!app.isPackaged) return; // 开发模式沿用上方 dev 块
+  const pyResolved = existsSync(join(process.resourcesPath, 'python', 'python.exe'))
+    ? join(process.resourcesPath, 'python')
+    : join(assetsDir(), 'python');
+  process.env.AICUT_PYTHON_BIN = join(pyResolved, 'python.exe');
+  process.env.AICUT_SPEECH_BRIDGE = join(pyResolved, 'speech_edit', 'bridge.py');
+  process.env.AICUT_KEYING_BRIDGE = join(pyResolved, 'keying', 'bridge.py');
+  process.env.AICUT_SR_BRIDGE = join(pyResolved, 'sr', 'bridge.py');
+  // 每个模型独立解析（resources 内置优先，否则回退 userData/aicut-assets 下载目录）。
+  // rmbg2 为可选下载，可能与内置 modnet 落在不同目录，故不能用同一个 mResolved。
+  process.env.AICUT_RMBG2_MODEL = resolveAsset('models', 'rmbg2.onnx');
+  process.env.AICUT_MODNET_MODEL = resolveAsset('models', 'modnet.onnx');
+  process.env.AICUT_SR_MODEL = resolveAsset('models', 'sr_v0_test.onnx');
+}
 
 // 内置字体目录：
 // 开发模式 → 仓库 gui/public/fonts（vite 以 /fonts/* 提供，且预览渲染层直接读取）
@@ -337,6 +360,191 @@ ipcMain.handle('config:set', async (_e, json: string) => {
   } catch (e: any) {
     return false;
   }
+});
+
+// ── 补全资产（一键补全）──
+// 精简版不含 python / 模型；本段提供「探测缺失 + 从 CDN 下载 + sha256 校验 + 解压」能力。
+// 主进程 Node fetch 走系统代理可能因 Misty 等失败，故下载时临时清空代理环境变量强制直连。
+
+async function readCdnBaseUrl(): Promise<string | undefined> {
+  try {
+    const c = JSON.parse(await readFile(getConfigPath(), 'utf8'));
+    return c?.assets?.cdnBaseUrl;
+  } catch {
+    return undefined;
+  }
+}
+
+// 临时清空代理环境变量，强制 Node fetch 直连（避免系统代理 Misty 干扰 HTTPS）
+async function withDirectNetwork<T>(fn: () => Promise<T>): Promise<T> {
+  const keys = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'all_proxy', 'npm_proxy', 'NPM_PROXY'];
+  const saved: Record<string, string | undefined> = {};
+  for (const k of keys) { saved[k] = process.env[k]; process.env[k] = ''; }
+  try {
+    return await fn();
+  } finally {
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+}
+
+// 流式下载 + 断点续传 + sha256 校验。dest 为最终路径，过程写 dest.part。
+async function streamDownload(
+  url: string,
+  dest: string,
+  expectedSha256: string,
+  onProgress?: (received: number, total: number) => void,
+): Promise<void> {
+  await mkdir(dirname(dest), { recursive: true });
+  const partPath = dest + '.part';
+  let start = 0;
+  try { start = (await stat(partPath)).size; } catch { start = 0; }
+  const headers: Record<string, string> = start > 0 ? { Range: `bytes=${start}-` } : {};
+  const res = await fetch(url, { headers });
+  if (!res.ok && res.status !== 206) throw new Error(`下载失败 HTTP ${res.status}: ${url}`);
+  // 服务器不支持 Range 时会返回 200 全量：此时必须丢弃已有片段从头重写，
+  // 否则以 'a' 追加会把整段内容拼在旧数据后面，产出损坏文件且哈希必然不符。
+  const resumed = start > 0 && res.status === 206;
+  if (!resumed) start = 0;
+  const remoteLen = parseInt(res.headers.get('content-length') || '0', 10) || 0;
+  const total = remoteLen > 0 ? remoteLen + start : (start || 1);
+  const fileStream = createWriteStream(partPath, { flags: resumed ? 'a' : 'w' });
+  const hash = createHash('sha256');
+  if (resumed && expectedSha256) {
+    // 已下载部分计入哈希（避免续传后整体哈希错位）
+    const prev = createReadStream(partPath, { start: 0, end: start - 1 });
+    for await (const chunk of prev) hash.update(chunk as Buffer);
+  }
+  const reader = res.body!.getReader();
+  let received = start;
+  let lastTick = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength) {
+      const buf = Buffer.from(value);
+      // 背压：内核缓冲写满时等 drain，避免 GB 级下载把数据全堆进内存
+      if (!fileStream.write(buf)) {
+        await new Promise<void>((r) => fileStream.once('drain', r));
+      }
+      hash.update(buf);
+      received += buf.byteLength;
+      // 进度节流 200ms：1.8G / 16K chunk 逾十万次 IPC 会拖死渲染进程
+      const now = Date.now();
+      if (now - lastTick >= 200) { lastTick = now; onProgress?.(received, total); }
+    }
+  }
+  onProgress?.(received, total);
+  await new Promise<void>((resolve, reject) => fileStream.end((err?: Error | null) => (err ? reject(err) : resolve())));
+  const actual = hash.digest('hex');
+  if (expectedSha256 && actual.toLowerCase() !== expectedSha256.toLowerCase()) {
+    await unlink(partPath).catch(() => {});
+    throw new Error(`校验失败：sha256 不匹配（期望 ${expectedSha256}，实得 ${actual}）`);
+  }
+  await rename(partPath, dest);
+}
+
+// 多源下载兜底：依次尝试候选 URL，前一个失败则换下一个。各源字节一致（同一 sha256），
+// .part 断点续传可跨源安全衔接。
+async function downloadWithFallback(
+  urls: string[],
+  dest: string,
+  expectedSha256: string,
+  onProgress?: (received: number, total: number) => void,
+): Promise<void> {
+  let lastErr: any = new Error('无可用下载源');
+  for (const url of urls) {
+    try {
+      await withDirectNetwork(() => streamDownload(url, dest, expectedSha256, onProgress));
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+// 解压 zip（Windows 内置 Expand-Archive）
+async function extractZip(zipPath: string, targetDir: string): Promise<void> {
+  await mkdir(targetDir, { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    const p = spawn('powershell', ['-NoProfile', '-Command', `Expand-Archive -Force -Path "${zipPath}" -DestinationPath "${targetDir}"`]);
+    let err = '';
+    p.stderr?.on('data', (d: Buffer) => { err += d.toString(); });
+    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(err || `解压失败 退出码 ${code}`))));
+    p.on('error', reject);
+  });
+}
+
+ipcMain.handle('assets:status', async () => {
+  const manifest = getManifest(await readCdnBaseUrl());
+  const status: Record<string, boolean> = {};
+  for (const e of manifest.entries) {
+    if (e.kind === 'file') {
+      status[e.id] = existsSync(resolveAsset(e.targetSub, e.targetName));
+    } else {
+      // zip：resources 或 userData 中的 python 目录含 python.exe 即视为就绪
+      status[e.id] = existsSync(join(resolveAsset(e.targetSub, ''), 'python.exe'));
+    }
+  }
+  return {
+    baseUrl: manifest.baseUrl,
+    isPlaceholder: manifest.baseUrl === DEFAULT_CDN_BASE,
+    status,
+    entries: manifest.entries.map((e) => ({ id: e.id, name: e.name, size: e.size, requiredBy: e.requiredBy, hasDirect: !!e.absoluteUrl })),
+  };
+});
+
+ipcMain.handle('assets:download', async (event, opts?: { ids?: string[] }) => {
+  const manifest = getManifest(await readCdnBaseUrl());
+  const ids = opts?.ids && opts.ids.length ? opts.ids : manifest.entries.map((e) => e.id);
+  const entries = manifest.entries.filter((e) => ids.includes(e.id));
+  // 仅当待下载条目中「存在无绝对直链（absoluteUrl）的条目」时才要求 CDN 基础地址已配置；
+  // 有 absoluteUrl 的条目（如 rmbg2 走 ModelScope 直链）不依赖 cdnBaseUrl。
+  if (manifest.baseUrl === DEFAULT_CDN_BASE && entries.some((e) => !e.absoluteUrl)) {
+    const msg = '请先在「设置 → AI 组件管理」中填写 CDN 基础地址，再执行补全。';
+    event.sender.send('assets:progress', { phase: 'error', error: msg });
+    return { success: false, error: msg };
+  }
+  let doneCount = 0;
+  for (const e of entries) {
+    const cdnUrl = manifest.baseUrl.replace(/\/$/, '') + '/' + e.remoteRel;
+    // 绝对直链（如 rmbg2 走 ModelScope）优先，用户自建 CDN 兜底（若已配置）。
+    const urls = e.absoluteUrl
+      ? [e.absoluteUrl, ...(manifest.baseUrl !== DEFAULT_CDN_BASE ? [cdnUrl] : [])]
+      : [cdnUrl];
+    event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'start', received: 0, total: e.size, percent: 0 });
+    try {
+      if (e.kind === 'file') {
+        const dest = resolveAsset(e.targetSub, e.targetName);
+        // rmbg2 走 ModelScope 直链（absoluteUrl）时 sha256 同样校验：实测 ModelScope LFS 对象
+        // 路径即编码了该哈希，与清单一致，保留校验可防 1GB 大文件传输损坏。
+        const expectedSha = e.sha256;
+        await downloadWithFallback(urls, dest, expectedSha, (recv, total) => {
+          event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'downloading', received: recv, total, percent: total ? recv / total : 0 });
+        });
+      } else {
+        const tmp = join(assetsDir(), e.targetName + '.partdl');
+        await downloadWithFallback(urls, tmp, e.sha256, (recv, total) => {
+          event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'downloading', received: recv, total, percent: total ? recv / total : 0 });
+        });
+        event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'extracting', received: e.size, total: e.size, percent: 1 });
+        // python.zip 内部已自带顶层 `python/` 目录（Compress-Archive 压缩目录的默认行为），
+        // 故解压到 assetsDir() 根；若解到 assetsDir()/python 会套成 python/python/python.exe，
+        // 令 assets:status 的 python.exe 探测永远失败。
+        await extractZip(tmp, assetsDir());
+        await unlink(tmp).catch(() => {});
+      }
+      doneCount++;
+      event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'done', received: e.size, total: e.size, percent: 1, doneCount, totalCount: entries.length });
+    } catch (err: any) {
+      const msg = `下载「${e.name}」失败：${err?.message ?? String(err)}`;
+      event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'error', error: msg });
+      return { success: false, error: msg };
+    }
+  }
+  // 刷新 AICUT_* 环境变量，使后续引擎子进程指向补全目录
+  setupAssetEnv();
+  return { success: true, doneCount };
 });
 
 // ── TTS 语音合成 ──
@@ -935,6 +1143,9 @@ app.commandLine.appendSwitch('disable-client-side-phishing-detection');
 app.commandLine.appendSwitch('enable-unsafe-webgpu');
 
 app.whenReady().then(async () => {
+  // 解析 python / models 环境变量（resources 优先，否则回退 userData/aicut-assets）
+  setupAssetEnv();
+
   // 注册 aicut-asset:// 协议处理器：直接读取本地文件，绕过代理
   // 支持 Range 请求（Chromium <video> 需要才能播放和 seek）
   protocol.handle('aicut-asset', async (request) => {

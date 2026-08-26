@@ -58,12 +58,16 @@ _LANG_CODES = {"zh", "en", "ja", "yue", "ko", "de", "fr", "ru"}
 
 def _load_dotenv() -> None:
     """极简 .env 加载（不依赖 python-dotenv）：仅当进程尚未设置该键时才注入 os.environ。
-    搜索顺序：环境变量 AICUT_ENV_FILE 指定路径 → <仓库根>/.env（脚本位于 <repo>/python/asr/，仓库根为上两级）。"""
+
+    ⚠️ 安全红线：仅支持环境变量 AICUT_ENV_FILE **显式指定**路径，**绝不自动搜索仓库根
+    .env**。原因：此前仓库根 .env 含真实百炼 Key，被静默注入导致「未配置也能识别」，
+    且一旦随 python 目录打包进 resources 即造成密钥泄露。生产密钥一律来自 argv[4]
+    （前端 config.json 经 Rust 传入）或用户显式 export 的环境变量。开发者本地调试用：
+        AICUT_ENV_FILE=/abs/path/.env python bridge.py ...
+    """
     env_path = os.environ.get("AICUT_ENV_FILE")
     if not env_path:
-        here = os.path.dirname(os.path.abspath(__file__))
-        repo_root = os.path.dirname(os.path.dirname(here))  # .../python/asr → .../python → <repo>
-        env_path = os.path.join(repo_root, ".env")
+        return
     if not os.path.exists(env_path):
         return
     try:

@@ -250,61 +250,8 @@ fn resolve_asr_bridge() -> Result<PathBuf, String> {
     from_exe.ok_or_else(|| "无法推断 python/asr/bridge.py 路径".to_string())
 }
 
-/// 极简 `.env` 加载器（不引入任何外部 crate）：
-/// 从 `.env` 读取 `KEY=VALUE`，仅当进程尚未设置该键时才注入 `std::env`，
-/// 避免覆盖已存在的真实环境变量 / CLI 显式参数（shell 里 `export` 的 Key 优先级最高）。
-///
-/// 搜索顺序：环境变量 `AICUT_ENV_FILE` 指定路径 → `<仓库根>/.env`。
-/// 文件不存在 / 不可读 / 解析失败均静默忽略，不影响其它来源的 Key。
-fn load_dotenv() {
-    let env_path = if let Ok(p) = std::env::var("AICUT_ENV_FILE") {
-        PathBuf::from(p)
-    } else {
-        repo_root().join(".env")
-    };
-    let content = match std::fs::read_to_string(&env_path) {
-        Ok(c) => c,
-        Err(_) => return, // 无 .env 文件：静默跳过
-    };
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let kv = line.strip_prefix("export ").unwrap_or(line);
-        let mut it = kv.splitn(2, '=');
-        let (k, v) = match (it.next(), it.next()) {
-            (Some(k), Some(v)) => (k.trim(), v.trim()),
-            _ => continue,
-        };
-        if k.is_empty() {
-            continue;
-        }
-        // 去引号
-        let v = v.trim_matches(|c| c == '"' || c == '\'');
-        if std::env::var(k).is_err() {
-            std::env::set_var(k, v);
-        }
-    }
-}
-
-/// 推断仓库根目录（`<repo>`），用于定位默认 `.env` 与桥路径。
-fn repo_root() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(root) = exe
-            .parent() // <repo>/target/debug
-            .and_then(|p| p.parent()) // <repo>/target
-            .and_then(|p| p.parent()) // <repo>
-        {
-            return root.to_path_buf();
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 impl AsrProvider for BailianAsrProvider {
     fn transcribe(&self, audio_path: &str, language: &str) -> Result<TranscriptResult, String> {
-        load_dotenv(); // 让 .env 里的 AICUT_ASR_API_KEY 自动生效（CLI 直跑也能读）
         let lang = if language.is_empty() { "zh" } else { language };
         let py = python_bin();
         let bridge = resolve_asr_bridge()?;

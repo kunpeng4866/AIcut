@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { useProjectStore } from '../store/projectStore';
 import { useHistoryStore } from '../store/historyStore';
 import { useConfigStore } from '../store/configStore';
+import { useAssetStore } from '../store/assetStore';
 import ExportDialog from './ExportDialog';
 
 // 内联样式：深色主题
@@ -40,8 +41,9 @@ const theme = {
     fontSize: 13,
     marginLeft: 6,
   } as React.CSSProperties,
-  spacer: { flex: 1 } as React.CSSProperties,
-  gear: { cursor: 'pointer', padding: 6, display: 'flex', alignItems: 'center' } as React.CSSProperties,
+  spacer: { flex: 1, minWidth: 0 } as React.CSSProperties,
+  rightGroup: { display: 'flex', alignItems: 'center', flexShrink: 0 } as React.CSSProperties,
+  gear: { cursor: 'pointer', padding: 6, display: 'flex', alignItems: 'center', flexShrink: 0 } as React.CSSProperties,
 };
 
 export default function Header() {
@@ -106,6 +108,8 @@ export default function Header() {
 
   // 打开AI配置向导
   const handleConfig = () => configStore.setShowConfigWizard(true);
+  // 打开 AI 组件管理（一键补全）
+  const handleAssets = () => useAssetStore.getState().setShowManager(true);
 
   return (
     <div style={theme.bar}>
@@ -124,13 +128,24 @@ export default function Header() {
 
       <div style={theme.spacer} />
 
-      {/* 右侧：AI配置按钮 */}
-      <div style={theme.gear} onClick={handleConfig} title="AI配置">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#eee" strokeWidth="2">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
-        <span style={{ fontSize: 12, marginLeft: 4 }}>AI配置</span>
+      {/* 右侧：AI配置 + AI 组件补全入口（flexShrink:0 防止窗口不够宽时被挤出可视区） */}
+      <div style={theme.rightGroup}>
+        <div style={theme.gear} onClick={handleConfig} title="AI配置">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#eee" strokeWidth="2">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          <span style={{ fontSize: 12, marginLeft: 4 }}>AI配置</span>
+        </div>
+
+        <div style={theme.gear} onClick={handleAssets} title="AI 组件补全">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#eee" strokeWidth="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+            <line x1="12" y1="22.08" x2="12" y2="12" />
+          </svg>
+          <span style={{ fontSize: 12, marginLeft: 4 }}>AI组件</span>
+        </div>
       </div>
 
       {/* 导出对话框 */}

@@ -48,6 +48,16 @@ export interface PluginConfig {
   enabledPlugins: string[];
 }
 
+// 补全资产（一键补全）设置
+export interface AssetsConfig {
+  cdnBaseUrl: string;  // CDN 基础地址（末尾带 /），下载 python 运行时与模型权重
+}
+
+// 与 electron/assets-manifest.ts 的 DEFAULT_CDN_BASE 保持一致。
+// 渲染层不能 import electron 目录（tsconfig 分离），故在此镜像同一常量；
+// 改动其中一处必须同步另一处，否则「未配置」判定会错位。
+export const DEFAULT_CDN_PLACEHOLDER = 'https://REPLACE_WITH_YOUR_CDN_BASE/';
+
 // 顶层配置
 export interface AIcutConfig {
   version: string;
@@ -56,6 +66,7 @@ export interface AIcutConfig {
   tts: TTSConfig;
   render: RenderConfig;
   plugins: PluginConfig;
+  assets: AssetsConfig;
 }
 
 // 生成默认配置
@@ -93,6 +104,9 @@ export function getDefaultConfig(): AIcutConfig {
     plugins: {
       vfxDirectory: '',
       enabledPlugins: [],
+    },
+    assets: {
+      cdnBaseUrl: '',
     },
   };
 }

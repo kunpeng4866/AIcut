@@ -95,10 +95,15 @@ python/sr/_*.py
 .playwright-cli/
 
 # ===== 上传 GitHub 前补充：构建/暂存/测试巨目录，严禁入库 =====
-# 打包 staging（含 win-unpacked 未压缩发布目录，5GB+），仅本地分发用，不入库
+# 打包 staging（含 win-unpacked 未压缩发布目录），仅本地分发用，不入库
 gui/dist-full/
+gui/dist-lite*/
+# vite 旧 bundle 回收目录（emptyOutDir:false 的代价，由 moveStaleAssets 插件搬运）
+gui/.build-trash/
 # ffmpeg/models/python 依赖暂存（4.6GB+），仅本地打包用，不入库
 pack-staging/
+# 一键补全 CDN 上传清单（python.zip + 模型权重，2.7GB 二进制），仅本地暂存，不入库
+cdn-upload/
 # 本地导出测试产物（生成物，非源码）
 test_exports/
 # 根目录散落调试 txt
