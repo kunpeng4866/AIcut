@@ -1898,10 +1898,13 @@ def analyze(input_path: str, opts: dict) -> dict:
             keep = [(0.0, dur)]
 
         # ── [P1] 暂停压缩优先 + 语速统计（纯逻辑，增量输出）──
-        # hard_remove = 必须硬删的声音事件（填充词/咳嗽/瞬态/段内/手动等）；
-        # gap_breath / vad_silence 视为「软停顿」参与压缩，不在此列。
-        hard_remove = _union(text_fillers + isolated + transients +
-                            intra_fillers + cough_events + tonal_events + manual)
+        # 用于「是否插暂停」判定的硬删集合：仅含真正打断语句 interior 删除的声音事件
+        # （填充词/瞬态/咳嗽/手动）。isolated_noise / intra_keep / tonal_sfx 不计入——
+        # 这三类在含背景音乐/哼鸣的样本里会把「自然停顿间隙」整体误判为硬删事件，
+        # 导致 compress_keep_timeline 把所有间隙判成硬删、零停顿（即"机关枪"式拼接），
+        # 与「暂停压缩优先」的设计目标相悖。它们仍照常参与 keep 的实际删除（见 all_remove），
+        # 仅不决定是否在间隙插短暂停。gap_breath / vad_silence 本就是软停顿。
+        hard_remove = _union(text_fillers + transients + cough_events + manual)
         keep_out, output_dur, compressed = ([], 0.0, [])
         if pause_compress:
             keep_out, output_dur, compressed = compress_keep_timeline(
