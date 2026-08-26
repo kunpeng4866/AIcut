@@ -120,6 +120,17 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         sha256: 'ab669a1d10afe20911728b33053a452071042317a90581092b325da7b2f9d895',
         requiredBy: ['speech'],
       },
+      {
+        id: 'denoise-frcrn',
+        name: 'FRCRN_SE_16K 高质量降噪 ONNX',
+        kind: 'file',
+        remoteRel: 'models/denoise/frcrn_se16k.onnx',
+        targetSub: 'models/denoise',
+        targetName: 'frcrn_se16k.onnx',
+        size: 57480770,
+        sha256: '9a3582e61901724706301ed489a9fb73ac4cecb511ff40396bd48187fbb5c7f6',
+        requiredBy: ['speech'],
+      },
       // ---- 副语言/非语音事件检测（PANNs Cnn14_DecisionLevelMax 帧级 SED）----
       // 权重 MIT 许可；本地已预置于 python/models/panns/，以下为打包分发用条目。
       // sha256/size 由本地文件实算（sha256sum python/models/panns/*）。

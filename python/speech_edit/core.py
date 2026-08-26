@@ -32,11 +32,13 @@ import numpy as np
 try:
     from panns_sed import panns_sed as _panns_sed, panns_available as _panns_available
     from respiro import detect_respiro_breath as _detect_respiro
+    from stutter import detect_stutter as _detect_stutter
     _PANNS_OK = True
 except Exception:  # pragma: no cover
     _PANNS_OK = False
     _panns_sed = None
     _detect_respiro = None
+    _detect_stutter = None
 
 
 # ── 常量 ──────────────────────────────────────────────
@@ -321,7 +323,32 @@ def _denoise_dfn3(au: np.ndarray, sr: int):
         return None
 
 
-def _denoise_onnx(au: np.ndarray, sr: int):
+def _denoise_frcrn(au: np.ndarray, sr: int):
+    """FRCRN_SE_16K 高质量降噪（frcrn.py）。
+
+    权重缺失/推理失败返回 None → 由调用方降级到 DFN3/轻量方案。
+    输出与输入样本级等长（frcrn.enhance 内部已做零平移补偿）。
+    """
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        import frcrn  # noqa: E402  (同目录模块；frcrn 内部 from core import _onnx_session)
+        y = frcrn.enhance(au, sr, DENOISE_MODEL_DIR, _onnx_session)
+        if y is None:
+            return None
+        y = np.asarray(y, dtype=np.float32).reshape(-1)
+        if y.size != au.size:
+            sys.stderr.write(
+                f"[denoise] FRCRN 输出长度异常({y.size}!={au.size})，回退\n")
+            return None
+        return np.clip(y, -1.0, 1.0)
+    except Exception as e:
+        sys.stderr.write(f"[denoise] FRCRN 降噪失败({e})，回退下一级方案\n")
+        return None
+
+
+def _denoise_onnx(au: np.ndarray, sr: int, quality="standard"):
     """ONNX 降噪接入点。返回降噪后的音频，或 None（不可用）。
 
     优先级：DeepFilterNet3 三段图（_denoise_dfn3）→ 单图「波形进/波形出」模型
@@ -331,6 +358,11 @@ def _denoise_onnx(au: np.ndarray, sr: int):
         if not os.path.isdir(DENOISE_MODEL_DIR):
             return None
         global _LAST_ONNX_BACKEND
+        if quality == "high":
+            y = _denoise_frcrn(au, sr)
+            if y is not None:
+                _LAST_ONNX_BACKEND = "frcrn"
+                return y
         y = _denoise_dfn3(au, sr)
         if y is not None:
             _LAST_ONNX_BACKEND = "dfn3"
@@ -433,7 +465,7 @@ def _denoise_lightweight(au: np.ndarray, sr: int, hp_hz: float = 80.0,
     return y.astype(np.float32)
 
 
-def denoise_wav(wav_in: str, wav_out: str) -> tuple:
+def denoise_wav(wav_in: str, wav_out: str, quality="standard") -> tuple:
     """对 16k 单声道 wav 做降噪，写到 wav_out。
 
     返回 (ok, method, warning)：
@@ -446,7 +478,7 @@ def denoise_wav(wav_in: str, wav_out: str) -> tuple:
     if au.size == 0:
         return False, "none", "denoise_empty_audio"
 
-    y = _denoise_onnx(au, sr)
+    y = _denoise_onnx(au, sr, quality=quality)
     if y is not None:
         try:
             _write_wav(wav_out, y, sr)
@@ -1465,6 +1497,8 @@ _DETAIL_META = {
     "sed_event":      {"flag_disfluency": False, "gap_type": "sed",      "conf": 0.55, "src": "panns_sed"},
     # ② 呼吸专项（Respiro-en 风格；软停顿，不属 hard_remove）
     "resp_breath":    {"flag_disfluency": False, "gap_type": "breath",    "conf": 0.50, "src": "respiro"},
+    # ③ 口吃/重复/拖音（改进 CTC + gap 分类思路；打断语句，属 hard_remove）
+    "stutter":        {"flag_disfluency": True,  "gap_type": "stutter",  "conf": 0.6,  "src": "stutter"},
     # P1 暂停压缩优先：把长停顿压到 targetPause 而非硬删（软停顿，非声音事件）
     "pause_compressed": {"flag_disfluency": False, "gap_type": "pause", "conf": 0.0, "src": "rule"},
 }
@@ -1703,6 +1737,22 @@ def detect_respiro(wav_path: str, words: list, word_pad: float = 0.08,
     return [(s, e) for (s, e, _sc) in evs]
 
 
+def detect_stutter(wav_path: str, words: list, word_pad: float = 0.08,
+                   threshold: float = 0.5, min_dur: float = 0.10,
+                   max_dur: float = 3.0) -> list:
+    """③ 改进 CTC + gap 分类(arXiv:2409.10177 思路)的口吃/重复/拖音检测 P0 落地。
+
+    返回 [(s,e)]；权重缺失/异常 → []。口吃删除打断语句边界，类比咳嗽计入 hard_remove。
+    """
+    if _detect_stutter is None:
+        return []
+    try:
+        return _detect_stutter(wav_path, words, word_pad=word_pad,
+                               threshold=threshold, min_dur=min_dur, max_dur=max_dur)
+    except Exception:
+        return []
+
+
 def analyze(input_path: str, opts: dict) -> dict:
     """
     口播剪辑决策层：分析媒体文件，返回编辑计划（JSON 友好 dict）。
@@ -1808,10 +1858,13 @@ def analyze(input_path: str, opts: dict) -> dict:
     sed_threshold = float(opts.get("sedThreshold", 0.5))
     do_respiro = bool(opts.get("respiroBreath", True))
     respiro_thr = float(opts.get("respiroThreshold", 0.35))
+    do_stutter = bool(opts.get("stutterDetect", True))
+    stutter_threshold = float(opts.get("stutterThreshold", 0.5))
 
     # P0-B：denoise 真正生效（在检测前对 16k 音频降噪）；
     # deess/normalize 仍仅由 Rust 生成阶段使用，analyze 忽略。
     do_denoise = bool(opts.get("denoise", False))
+    denoise_quality = opts.get("denoiseQuality", "standard")
     warnings_out = []
 
     # 临时工作目录（用完即清）
@@ -1858,7 +1911,7 @@ def analyze(input_path: str, opts: dict) -> dict:
         if do_denoise:
             print("[1b] 降噪…", flush=True)
             dn_path = os.path.join(tmp, "_work_denoised.wav")
-            ok_dn, denoise_method, dn_warn = denoise_wav(work_wav, dn_path)
+            ok_dn, denoise_method, dn_warn = denoise_wav(work_wav, dn_path, quality=denoise_quality)
             if ok_dn:
                 work_wav = dn_path
                 print(f"  [OK] 降噪完成（{denoise_method}）", flush=True)
@@ -1915,6 +1968,7 @@ def analyze(input_path: str, opts: dict) -> dict:
             isolated = []
             sed_events = []
             respiro_events = []
+            stutter_events = []
             # 唯一保留的删除来源：VAD 语音段之外、能量确为底噪的长静音间隙
             # （不依赖词，删了也不可能切到语音；音乐/环境音被能量门挡住）。
             vad_sil = _vad_only_silence(work_wav, speech_regs, dur,
@@ -1971,10 +2025,14 @@ def analyze(input_path: str, opts: dict) -> dict:
             respiro_events = detect_respiro(work_wav, words, word_pad=word_pad,
                                             thr=respiro_thr) if do_respiro else []
             print(f"  4h. 呼吸专项(Respiro): {len(respiro_events)} 段", flush=True)
+            stutter_events = detect_stutter(work_wav, words, word_pad=word_pad,
+                                            threshold=stutter_threshold) if do_stutter else []
+            print(f"  4i. 口吃/重复: {len(stutter_events)} 段", flush=True)
 
             # 初始删除集 → 初始保留段
             init_remove = _union(text_fillers + isolated + gap_breath + transients
-                                 + sound_events + sed_events + respiro_events)
+                                 + sound_events + sed_events + respiro_events
+                                 + stutter_events)
             init_keep = _complement(init_remove, dur, min_keep=0.0)
 
             # 4f. 保留段内部未保护区域（词前紧、词后松）
@@ -2008,14 +2066,16 @@ def analyze(input_path: str, opts: dict) -> dict:
             all_remove = _union(text_fillers + isolated + gap_breath +
                                 transients + intra_fillers + sound_events +
                                 sed_events + respiro_events +
+                                stutter_events +
                                 vad_sil + manual)
             keep = _complement(all_remove, dur, min_keep=0.0)
         else:
             keep = []
             for (vs, ve) in speech_regs:
                 rm = [(s, e) for (s, e) in
-                      (text_fillers + isolated + gap_breath + transients +
+                       (text_fillers + isolated + gap_breath + transients +
                        intra_fillers + sound_events + sed_events + respiro_events +
+                       stutter_events +
                        manual)
                       if e > vs and s < ve]
                 if not rm:
@@ -2063,7 +2123,8 @@ def analyze(input_path: str, opts: dict) -> dict:
         # 副语言事件(sed_events)属离散爆发、打断语句，类比咳嗽计入硬删；
         # 呼吸(resp_breath)是软停顿，严禁进 hard_remove——否则复现机关枪 bug。
         hard_remove = _union(text_fillers + transients + cough_events
-                             + sed_events + manual)
+                             + sed_events + manual
+                             + stutter_events)
         keep_out, output_dur, compressed = ([], 0.0, [])
         if pause_compress:
             keep_out, output_dur, compressed = compress_keep_timeline(
@@ -2110,6 +2171,7 @@ def analyze(input_path: str, opts: dict) -> dict:
                          ("tonal_sfx", tonal_events),
                          ("sed_event", sed_events),
                          ("resp_breath", respiro_events),
+                         ("stutter", stutter_events),
                          ("vad_silence", vad_sil),
                          ("manual_exclude", manual)):
             for s, e in ivs:
