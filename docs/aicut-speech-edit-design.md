@@ -17,7 +17,7 @@
 
 | 阶段 | 状态 | Commit | 关键落地内容 |
 |---|---|---|---|
-| P0 精度止血 | ✅ 已落地 | `ea05d79` | CUDA 转写 + 百炼 Paraformer 词级融合；真实降噪接入（部分）；安全阀放宽；ASR 失败 VAD 兜底；§5.5 JSONL 契约 |
+| P0 精度止血 | ✅ 已落地 | `ea05d79` | CUDA 转写 + 百炼 Paraformer 词级融合；真实降噪接入；安全阀放宽；ASR 失败 VAD 兜底；§5.5 JSONL 契约 |
 | P1 能力补全 | ✅ 已落地 | `733125a` | 暂停压缩优先（keepSegmentsOut / outputDuration，纯逻辑）；语速统计；单元测试 |
 | P1→音频落地 | ✅ 已落地 | 本回合 | Rust `speech_assemble` 消费 `keepSegmentsOut`，把暂停压缩真正落到音频（段间插「冻结末帧+静音」短暂停） |
 | P2 关联与体验 | ⏳ 规划 | — | 模式Ⅱ视频同步剪切；能量曲线；批处理；UI 阈值滑杆；偏好记忆 |
@@ -42,7 +42,7 @@
 | 能力 | 位置 | 说明 |
 |---|---|---|
 | CUDA 转写 + Paraformer 词级融合 | `transcribe` `core.py:563`（CUDA EP whisper small）；`paraformer_words` `:460`；`_fuse_cloud_word_times` `:508` | 本地 whisper small 出文本，百炼 Paraformer 出词级时间并融合；`status` 字段回传识别通道状态 |
-| 真实降噪 | `denoise_wav` `:382` → `_denoise_onnx` `:274`（DFN3 ONNX） | **已接入**，但 DFN3 的 3-graph ONNX 在本地不支持时回退 `_denoise_lightweight` `:318`（见剩余项） |
+| 真实降噪 | `denoise_wav` `:418` → `_denoise_onnx` `:310` → `_denoise_dfn3` `:282` → `dfn3.enhance` | ✅ **DFN3 三段图已跑通并默认生效**（`dfn3.py` 纯 numpy+ORT，CUDA EP，69–92x 实时）；`_denoise_lightweight` 降为兜底 |
 | 安全阀放宽 | `detect_cough` `:925`（`keep_ratio=0.5`） | 与词区间重叠时不再整段不删，按重叠比例保守保留 |
 | ASR 失败兜底 | `_vad_only_silence` `:1399` | `words=[]` 时回退 VAD-only 而非静默早退 |
 | §5.5 JSONL 契约 | `_mk_detail` `:1434` + `_DETAIL_META` `:1384` | 每条删除事件带 `type/start/end/conf/src/gap_type` 等字段，供前端可视化与可解释 |
@@ -120,7 +120,7 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 │  ② ASR + 强制对齐 → 词级时间戳 (当前: whisper small+百炼Paraformer; 目标: FunASR+Qwen3-FA) │
 │  ③ 多层检测器: VAD静音 | 填充词/口误 | 咳嗽/喷麦/呼吸/叹气 | 语速异常 │
 │  ④ 决策引擎: 规则 → 事件标记 (带置信度/类型, §5.5 契约)        │
-│  ⑤ 降噪 (DeepFilterNet3 ONNX, 部分落地)                      │
+│  ⑤ 降噪 (DeepFilterNet3 三段图 ONNX, ✅ 已落地)                │
 │  ⑥ [P1] 暂停压缩重映射 → keepSegmentsOut                    │
 └───────────────────────────┬───────────────────────────────┘
                             ▼
@@ -146,7 +146,7 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 | 6 | 重复/自我纠正/残句 | 改进 CTC + gap 分类（arXiv:2409.10177） | ⏳ 未接 |
 | 7 | 副语言事件 | PANNs + Respiro-en + DSP 瞬态 | ⏳ 未接（当前仅有 cough/tonal 声学检测） |
 | 8 | 语速/节奏 | 词级滑窗 + MAD | ✅（`speaking_rate_stats`） |
-| 9 | 降噪/修复 | DeepFilterNet3 ONNX | 🟡 部分（`_denoise_onnx` 已接，3-graph 不支持时回退 lightweight） |
+| 9 | 降噪/修复 | DeepFilterNet3 ONNX | ✅（`dfn3.py` 三段图跑通，CUDA EP；lightweight 仅兜底） |
 | 10 | 决策引擎 | 规则 + 可选 LLM 语义层 | 🟡 规则已落地；LLM 残句判定 ⏳ |
 | 11 | 呈现 | 时间轴可视化标记 | ✅（前端 UI） |
 | 12 | 执行 | ffmpeg 切段 concat + [P1] 暂停插入 + crossfade/declick | ✅（含暂停压缩音频落地） |
@@ -172,7 +172,7 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 
 | 候选 | 结论 | 理由 |
 |---|---|---|
-| **DeepFilterNet3** | 🟡 已接（部分） | MIT/Apache；自带 ONNX 直挂 CUDA EP；DNSMOS SIG 4.19/BAK 4.47。3-graph ONNX 本地不支持时回退 lightweight（剩余项） |
+| **DeepFilterNet3** | ✅ 已落地（默认） | MIT/Apache；三段图直挂 CUDA EP；DNSMOS SIG 4.19/BAK 4.47。实测真实口播叠噪：0dB 档 dSNR +11~+13dB、静音残噪降 50–70dB、样本级零平移（§13.1） |
 | **FRCRN / MossFormer2_SE_48K** | ⏳ 高质量档 | Apache-2.0；PESQ 3.23–3.57。P3 规划 |
 | RNNoise | ❌ 主力剔除 | PESQ 2.33，保真不足 |
 | SIDON | ⚠️ 抢救级可选 | 重合成改音色，权重许可待法务核实 |
@@ -241,7 +241,7 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 
 ## 10. 补充：用户未提到但必要的问题
 
-1. **降噪部分落地**：`_denoise_onnx` 已接 DFN3，但 3-graph 不支持时回退 lightweight（剩余项需修）。
+1. **降噪已落地**：`_denoise_onnx` → `_denoise_dfn3` → `dfn3.py` 三段图跑通，默认生效，lightweight 降为兜底（§13.1 有实测数据）。
 2. **失败不静默**：✅ `_vad_only_silence` 已实现 ASR 失败 VAD 兜底。
 3. **GPU 推理**：✅ 转写已走 CUDA EP；其余检测器（PANNs 等）待接入时统一 CUDA EP。
 4. **预览低延迟**：审核阶段用轻量模型，确认后走高质量（⏳ 规划）。
@@ -261,7 +261,7 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 | 现有问题 | 改造点 | 位置 | 现状 |
 |---|---|---|---|
 | Whisper base 粗时间戳 | CUDA whisper small + 百炼 Paraformer 融合 | `transcribe` `:563` / `paraformer_words` `:460` | ✅（非原 FunASR 方案，见 §1.1） |
-| 降噪空实现 | DFN3 ONNX（3-graph 不支持回退 lightweight） | `denoise_wav` `:382` / `_denoise_onnx` `:274` | 🟡 部分 |
+| 降噪空实现 | DFN3 三段图 ONNX（lightweight 仅兜底） | `denoise_wav` `:418` / `_denoise_onnx` `:310` / `_denoise_dfn3` `:282` / `dfn3.py` | ✅ |
 | 咳嗽/纯音安全阀过度保守 | `keep_ratio=0.5` 按重叠比例保留 | `detect_cough` `:925` | ✅ |
 | ASR 失败静默降级 | VAD-only 回退 | `_vad_only_silence` `:1399` | ✅ |
 | keepNonspeech 默认 true | 保留策略调整（沿用 current） | `analyze` `:1571` | 🟡 |
@@ -281,13 +281,13 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 - **P3（⏳ 规划）**：FRCRN/MossFormer2 离线精修；可选 LLM 残句语义判定；SIDON 抢救（法务核实后）。
 
 ### 剩余项清单（按优先级）
-1. **DFN3 3-graph ONNX 不支持 → 降噪回退**：需确认权重图或回退策略，使真实降噪稳定生效。
-2. **FunASR 本地字级 + Qwen3-FA 强制对齐**：达成「完全本地、零出域、±0.02s」切准目标。
-3. **PANNs / Respiro-en / DSP 瞬态**：副语言事件检测落地。
-4. **改进 CTC 口吃/重复 + gap 分类**：语音级不流畅检测（arXiv:2409.10177）。
-5. **模式Ⅱ视频同步剪切**：Rust `speech_assemble_separated` 消费 keepSegmentsOut。
-6. **偏好记忆 / UI 阈值滑杆 / 能量曲线 / 批处理**。
-7. **P3 FRCRN 高质量档 + LLM 残句判定**。
+1. **FunASR 本地字级 + Qwen3-FA 强制对齐**：达成「完全本地、零出域、±0.02s」切准目标。
+2. **PANNs / Respiro-en / DSP 瞬态**：副语言事件检测落地。
+3. **改进 CTC 口吃/重复 + gap 分类**：语音级不流畅检测（arXiv:2409.10177）。
+4. **模式Ⅱ视频同步剪切**：Rust `speech_assemble_separated` 消费 keepSegmentsOut。
+5. **偏好记忆 / UI 阈值滑杆 / 能量曲线 / 批处理**。
+6. **P3 FRCRN 高质量档 + LLM 残句判定**。
+7. *（可选调优）* 高输入 SNR（≥15dB）时 DFN3 处理为净损失（dSNR -1.2~-1.5dB）。若要消除，方向是 mask 软化（`mask^γ` 或与 1 混合），**不要用官方 lsnr 门控**——实测门控会让 LSD 从 8.8 爆到 28.8（§13.1）。
 
 ---
 
@@ -302,6 +302,49 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 - **回归红线**：现有 declick/deess/normalize/crossfade 改造后保留；`745230d`「无噪音」基线不得劣化。
 - **性能**：10 分钟口播本地全链路 < 2 分钟（GPU）。
 
+### 13.1 DFN3 降噪实测（`bench_denoise.py`，RTX5060Ti / CUDA EP）
+
+评测脚手架 `python/speech_edit/bench_denoise.py`：`synth_*` 合成素材（4 噪声 × 3 SNR）
++ `real_*` 真实口播录音叠已知噪声（有干净参考）+ `real_raw` 原样。
+**质量结论只看 `real_*`**，理由见下方「两个评测陷阱」。
+
+真实口播叠噪，DFN3 vs lightweight 谱减兜底：
+
+| 用例 | dSNR (lw → dfn3) | 静音残噪降低 silR | 语音失真 LSD | 增益 gain |
+|---|---|---|---|---|
+| real_white_0dB | +9.35 → **+11.06** | 12.41 → **55.63** | 24.32 → **20.54** | 0.877 |
+| real_white_5dB | **+8.23** → +7.22 | 12.47 → **54.36** | 22.45 → **18.86** | 0.895 |
+| real_white_15dB | **+5.03** → −1.50 | 12.53 → **50.26** | 18.44 → **16.97** | 0.914 |
+| real_fan_0dB | +11.36 → **+13.05** | 12.19 → **69.82** | 22.11 → **19.56** | 0.923 |
+| real_fan_5dB | **+10.72** → +8.42 | 12.26 → **68.98** | 20.18 → **18.34** | 0.926 |
+| real_fan_15dB | **+7.24** → −1.17 | 12.34 → **67.36** | 17.92 → 17.92 | 0.926 |
+
+- **选 DFN3 的理由**：静音残噪降低 **50–70dB vs 12dB**（碾压），LSD 全面更低。
+  停顿段干净直接决定 VAD/停顿检测与词级切点精度，这正是本模块的核心诉求。
+- **代价**：波形级 dSNR 在中高输入 SNR 档不如温和谱减（lightweight floor 只 −14dB，
+  几乎不动语音所以波形保得住）。ASR 走梅尔谱不看波形相位，此项影响可忽略。
+- **对齐**：全部用例 `lag = 0.000ms`、长度一致、削波 0、无边界尖峰。样本级零平移是硬要求。
+- **实时率**：DFN3 69–92x，lightweight 700–950x。30s 音频约 0.4s，远超实时。
+
+**两个评测陷阱（都已在代码里修掉，勿重犯）**：
+
+1. **lag 假警报**。早期 `best_lag` 用未归一化点积、且拿 *clean* 当参考。准周期语音的
+   互相关在 ±1 个基频周期（±107 样本 @16k）处有近乎等高的次峰（实测 r 差 <0.3%），
+   argmax 随机跳过去 → 报出 `-6.688ms` 的"平移"。修法：参考改 **输入音频**
+   （词级时间戳建立在输入轴上）+ 归一化 + 峰值需超过 `lag=0` 一个 margin。
+   独立用「短时能量包络互相关」复核，全档 lag 恒为 0。
+2. **合成素材 OOD**。早期合成 clean 只有 5 次谐波（750Hz 截止，1kHz 以上能量 0.0%）
+   且高度稳态，落在 DNN 增强模型训练分布外：15dB 档被整体衰减 5.4dB
+   （`gain=0.54`），产出 `dSNR≈−9dB` 的误导值；真实语音同档只 −1.5dB 且
+   `gain=0.91`。已补共振峰 + 摩擦音，但**稳态性**无法靠加谱成分消除
+   （改进后 15dB 档 `gain` 仍只 0.60–0.67）。故新增 `real_*` 叠噪用例作为质量判据，
+   并把 **`gain` 列进表**——它是区分「正常处理失真」与「过抑制」的唯一判据。
+
+**另：官方 lsnr 门控实测不可用**。`tract.rs` 的 `min_db_thresh=-10 /
+max_db_erb_thresh=30 / max_db_df_thresh=20` 分级跳过，实测使 LSD 从 8.77 爆到
+**28.77**（white_0dB）、hum_5dB dSNR 从 +9.13 掉到 −1.29——跳过阶段造成帧间不连续。
+故 `dfn3.enhance(lsnr_gate=False)` 为默认，全帧两阶段。
+
 ---
 
 ### 附：默认技术栈一览（商用友好、本地优先）
@@ -311,7 +354,7 @@ SpeechPanel.handleAnalyze (gui/src/components/panels/SpeechPanel.tsx)
 | 识别（本地） | whisper small (CUDA EP) | MIT/Apache | ✅（P0） |
 | 词级时间（增强） | 百炼 Paraformer API（项目已在用） | 商用 SAAS 按量 | ✅（P0） |
 | 对齐（目标） | Qwen3-ForcedAligner | 待核实(阿里) | ⏳ |
-| 降噪(默认) | DeepFilterNet3 (ONNX) | MIT/Apache | 🟡 部分 |
+| 降噪(默认) | DeepFilterNet3 (ONNX) | MIT/Apache | ✅ |
 | VAD | Silero v6 (ONNX) | MIT | ✅ |
 | 副语言检测 | PANNs + Respiro-en + DSP | MIT | ⏳ |
 | 口吃/重复 | 改进 CTC + gap 分类 | 论文(待核) | ⏳ |

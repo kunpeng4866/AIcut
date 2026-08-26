@@ -223,9 +223,9 @@ def neural_separate(wav16_path: str, out_dir: str, cache_dir: str):
 # ══════════════════════════════════════════════════════
 
 # 权重目录（P0-E 负责下载放置）。DeepFilterNet3 官方权重为 **48k** 模型
-# (enc/erb_dec/df_dec 三段 ONNX)，16k 输入需 16k→48k 升采样再降回；
-# TODO(P0 之后)：在 _denoise_onnx 内接入 DFN3 三段图 + 采样率转换。
-# 期望放置路径：E:/AIcut/python/models/denoise/*.onnx
+# (enc/erb_dec/df_dec 三段 ONNX)，16k 输入在 dfn3.py 内部 16k→48k 升采样再降回。
+# 三段图流水线已实现于 speech_edit/dfn3.py（ERB/DF 特征 + Deep Filtering + 零平移对齐）。
+# 期望放置路径：E:/AIcut/python/models/denoise/{enc,erb_dec,df_dec}.onnx (+ config.ini)
 DENOISE_MODEL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "denoise")
 
@@ -271,26 +271,69 @@ def _onnx_session(model_path: str):
     return None, None
 
 
-def _denoise_onnx(au: np.ndarray, sr: int):
-    """ONNX 降噪接入点（权重就位时启用）。返回降噪后的音频，或 None（不可用）。
+# _denoise_onnx 实际生效的后端名（"dfn3" | "onnx"），供 denoise_wav 回报给前端
+_LAST_ONNX_BACKEND = "onnx"
 
-    当前只支持「波形进 / 波形出」的单图模型（输入 [1,T] float32）。
-    DeepFilterNet3 是 48k 三段图（enc/erb_dec/df_dec），需要额外的 ERB/DF 特征
-    与采样率转换，尚未实现 → 权重缺失时返回 None，由轻量方案兜底。
+
+def _has_dfn3_weights() -> bool:
+    """DENOISE_MODEL_DIR 下是否齐备 DeepFilterNet3 三段图。"""
+    if not os.path.isdir(DENOISE_MODEL_DIR):
+        return False
+    return all(os.path.isfile(os.path.join(DENOISE_MODEL_DIR, f"{n}.onnx"))
+               for n in ("enc", "erb_dec", "df_dec"))
+
+
+def _denoise_dfn3(au: np.ndarray, sr: int):
+    """DeepFilterNet3（enc/erb_dec/df_dec 三段图）降噪。
+
+    实现在 speech_edit/dfn3.py：ERB/DF 特征 → 两阶段增强 → 与输入**样本级零平移**
+    的等长输出（下游词级时间戳依赖此性质）。返回 ndarray 或 None（不可用 → 降级）。
+    """
+    if not _has_dfn3_weights():
+        return None
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        import dfn3  # noqa: E402  (同目录模块)
+        y = dfn3.enhance(au, sr, DENOISE_MODEL_DIR, _onnx_session)
+        if y is None:
+            return None
+        y = np.asarray(y, dtype=np.float32).reshape(-1)
+        if y.size != au.size:
+            sys.stderr.write(
+                f"[denoise] DFN3 输出长度异常({y.size}!={au.size})，回退\n")
+            return None
+        return np.clip(y, -1.0, 1.0)
+    except Exception as e:
+        sys.stderr.write(f"[denoise] DFN3 降噪失败({e})，回退下一级方案\n")
+        return None
+
+
+def _denoise_onnx(au: np.ndarray, sr: int):
+    """ONNX 降噪接入点。返回降噪后的音频，或 None（不可用）。
+
+    优先级：DeepFilterNet3 三段图（_denoise_dfn3）→ 单图「波形进/波形出」模型
+    （输入 [1,T] float32）→ None（由轻量方案兜底）。
     """
     try:
         if not os.path.isdir(DENOISE_MODEL_DIR):
             return None
+        global _LAST_ONNX_BACKEND
+        y = _denoise_dfn3(au, sr)
+        if y is not None:
+            _LAST_ONNX_BACKEND = "dfn3"
+            return y
+        _LAST_ONNX_BACKEND = "onnx"
         import glob as _glob
         cands = sorted(_glob.glob(os.path.join(DENOISE_MODEL_DIR, "*.onnx")))
         if not cands:
             return None
-        # DeepFilterNet3 的分段图暂不支持（需 ERB/DF 特征流水线）
+        # 三段图的分片不能当单图跑，排除掉
         single = [p for p in cands
                   if not any(k in os.path.basename(p).lower()
                              for k in ("enc", "erb_dec", "df_dec"))]
         if not single:
-            sys.stderr.write("[denoise] 仅发现 DeepFilterNet3 分段图，尚未支持，跳过 ONNX\n")
             return None
         model_path = single[0]
         sess, ep = _onnx_session(model_path)
@@ -396,7 +439,7 @@ def denoise_wav(wav_in: str, wav_out: str) -> tuple:
     if y is not None:
         try:
             _write_wav(wav_out, y, sr)
-            return True, "onnx", ""
+            return True, _LAST_ONNX_BACKEND, ""
         except Exception as e:
             return False, "none", f"denoise_write_failed:{e}"
 
