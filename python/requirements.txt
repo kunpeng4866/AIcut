@@ -2,8 +2,14 @@
 #
 # 安装目标 venv：
 #   C:\Users\Administrator\.workbuddy\binaries\python\envs\default
-# 安装命令（清华镜像）：
-#   python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+#
+# ⚠️ 不要直接 `pip install -r requirements.txt`：faster-whisper / demucs / silero-vad 会经
+#    `onnxruntime<2,>=1.14` 拉回基础版 onnxruntime，与 onnxruntime-directml 争抢同一模块目录，
+#    可能静默覆盖、丢掉 DML 跨显卡加速。请用配套安装器：
+#       python install_deps.py                 # 默认清华镜像
+#       MIRROR=https://pypi.org/simple python install_deps.py
+#   安装器对语音包用 --no-deps 安装再补依赖，确保环境里只有 onnxruntime-directml。
+#   版本锁定见 constraints.txt（仅 pin，无法禁基础版；禁基础版靠 install_deps.py）。
 #
 # 抠像推理后端（发布态）：ONNX Runtime DirectML —— 走系统 DX12，对 NVIDIA / AMD / Intel
 # 全显卡硬件加速。选 DML 而非 CUDA EP，是因为软件面向终端用户，不能把加速锁死在开发者

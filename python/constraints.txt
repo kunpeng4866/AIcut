@@ -1,0 +1,16 @@
+# AIcut Python 依赖约束文件（supplementary）
+#
+# 作用：锁定抠像推理后端 onnxruntime-directml 的版本，确保跨显卡 DML 加速。
+#   onnxruntime-directml 本身即完整 onnxruntime（含 DML EP），对所有 DX12 显卡生效；
+#   开发者本地若另装 onnxruntime-gpu，则 CUDA→DML→CPU 兜底链会优先走 CUDA。
+#
+# 重要：本文件【不能单独禁止】基础版 onnxruntime——基础版被 faster-whisper/demucs/
+# silero-vad 经 `onnxruntime<2,>=1.14` 声明依赖，pip 约束只能限版本、不能禁装。
+# 真正「禁止基础版 onnxruntime 被引入」由 python/install_deps.py 完成（对语音包
+# 用 --no-deps 安装，再补其非 onnxruntime 依赖）。请用：
+#     python install_deps.py
+# 若临时用裸命令，务必：
+#     python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -c constraints.txt -r requirements.txt
+# 并在装完后确认环境中只有 onnxruntime-directml（无基础版、无 onnxruntime-gpu、无 nvidia-*）。
+
+onnxruntime-directml==1.24.4
