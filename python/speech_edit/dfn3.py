@@ -77,6 +77,10 @@ MIN_DB_THRESH = -10.0
 MAX_DB_ERB_THRESH = 30.0
 MAX_DB_DF_THRESH = 20.0
 
+# mask 软化（#7）：仅对「已较干净」的频带（ERB 增益 ≥ 此阈值）朝原频谱回混；
+# 增益低于阈值的频带视为仍需降噪 → 全增强。阈值取 0.5（中点），可按听感微调。
+MASK_SOFTEN_GAIN_FLOOR = 0.5
+
 # ONNX 分块推理
 CHUNK_FRAMES = 2000     # 每块帧数（20s @48k）
 CHUNK_OVERLAP = 200     # 块间重叠帧数（1s 供 GRU 收敛，取中间有效区）
@@ -342,7 +346,7 @@ def _run_chunk(sessions: dict, feat_erb: np.ndarray, feat_spec: np.ndarray):
 # ══════════════════════════════════════════════════════
 
 def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
-            lsnr_gate: bool = False):
+            lsnr_gate: bool = False, mask_soften: bool = True):
     """对单声道波形做 DFN3 降噪。返回与输入等长的 float32，或 None（不可用 → 调用方降级）。
 
     参数
@@ -351,11 +355,20 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
       model_dir       : 含 enc/erb_dec/df_dec.onnx 的目录
       session_factory : (model_path) -> (session, ep)，由 core._onnx_session 注入
       lsnr_gate       : 是否启用 tract 的 lsnr 分级跳过（默认 False = 全帧两阶段，质量优先）
+      mask_soften     : 高 SNR 时 mask 软化（默认 True）。用 ERB 掩码增益本身做连续混合
+                        权重（**不用**官方 lsnr 二进制门控）：仅当某频带增益 ≥ 阈值
+                        （MASK_SOFTEN_GAIN_FLOOR，默认 0.5，即「已较干净」）才朝原始频谱
+                        回混以保留干净语音、抑制 deep filtering 在净区引入的染色；增益低于
+                        阈值的频带视为仍需降噪 → 全增强。纯频谱线性运算，零平移不变。可用
+                        环境变量 AICUT_DFN3_SOFTEN=0 关闭（退回硬掩码 + 硬 DF 覆盖）。
     """
     x = np.asarray(au, dtype=np.float32).reshape(-1)
     n_in = int(x.size)
     if n_in == 0:
         return None
+
+    # 高 SNR mask 软化开关（环境变量逃生，默认开）
+    mask_soften = bool(mask_soften) and os.environ.get("AICUT_DFN3_SOFTEN", "1") != "0"
 
     max_sec = float(os.environ.get("AICUT_DFN3_MAX_SEC", "900"))
     if n_in / float(sr) > max_sec:
@@ -435,7 +448,6 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
             # ── ERB 掩码：整带广播乘（lib.rs:314-326，无插值）──
             g_full = np.repeat(gains, widths, axis=1)                  # [n,481]
             g_full = np.where(erb_on[:, None], g_full, np.float32(1.0))
-            spec_enh[jj] = spec[jj] * g_full
 
             # ── Deep filtering：改写前 NB_DF 频点（tract.rs:586-597 + df :713-767）──
             # coefs 末维 10 = (df_order=5, 2)，2 为 (实,虚)（tract.rs:499）
@@ -447,10 +459,30 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
                            spec[np.clip(idx, 0, T - 1)][:, :, :NB_DF],
                            np.complex64(0))
             df_val = (cc * wnd).sum(axis=1)                            # [n,96]
-            sel = df_on
-            if sel.any():
-                rows = jj[sel]
-                spec_enh[rows[:, None], np.arange(NB_DF)[None, :]] = df_val[sel]
+
+            if mask_soften:
+                # 高 SNR mask 软化：用 ERB 掩码增益本身做**连续**混合权重
+                # （不用官方 lsnr 二进制门控）。增益≈1 → 该频带本就干净 → 朝原
+                # 频谱回混以保留干净语音、抑制 DF 在净区引入的染色；增益低 → 全增强。
+                # 纯频谱线性运算，零平移不变。
+                c_clean = np.clip((g_full - MASK_SOFTEN_GAIN_FLOOR) / (1.0 - MASK_SOFTEN_GAIN_FLOOR),
+                                  0.0, 1.0)                            # [n,481] 干净度权重
+                # ERB 阶段：把 (spec*g_full) 按 c 朝原频谱回混
+                spec_enh[jj] = spec[jj] * (c_clean + (1.0 - c_clean) * g_full)
+                # Deep filtering 阶段：前 NB_DF 频点按 c 回混原频谱
+                c_df = c_clean[:, :NB_DF]                              # [n,96]
+                df_blend = c_df * spec[jj][:, :NB_DF] + (1.0 - c_df) * df_val
+                sel = df_on
+                if sel.any():
+                    rows = jj[sel]
+                    spec_enh[rows[:, None], np.arange(NB_DF)[None, :]] = df_blend[sel]
+            else:
+                # 原行为：硬掩码乘 + 硬 DF 覆盖
+                spec_enh[jj] = spec[jj] * g_full
+                sel = df_on
+                if sel.any():
+                    rows = jj[sel]
+                    spec_enh[rows[:, None], np.arange(NB_DF)[None, :]] = df_val[sel]
         if s1 >= T:
             break
         s0 += step
@@ -461,5 +493,5 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
         y48 = np.concatenate([y48, np.zeros(n48 - y48.size, dtype=np.float32)])
 
     y = _resample_down(y48, up, n_in) if up > 1 else y48[:n_in]
-    sys.stderr.write(f"[dfn3] DeepFilterNet3 降噪完成（{T} 帧 @ {ep}, gate={lsnr_gate}）\n")
+    sys.stderr.write(f"[dfn3] DeepFilterNet3 降噪完成（{T} 帧 @ {ep}, gate={lsnr_gate}, soften={mask_soften}）\n")
     return np.clip(y, -1.0, 1.0).astype(np.float32)
