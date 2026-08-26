@@ -27,11 +27,11 @@ import urllib.request
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-# P6-CUDA：onnxruntime-gpu 1.28 (CUDA 13.0) 依赖 nvidia-* pip 包提供的 CUDA/cuDNN
-# DLL（cublasLt64_13.dll / cudnn64_9.dll 等），但 ORT 不会自动把它们加入 PATH，
-# 缺失时 CUDA EP 报 "cublasLt64_13.dll which is missing" 而静默回退 CPU。这里在导入
-# onnxruntime 前把对应 bin 目录注入 PATH（仅当目录存在时，onnxruntime-directml
-# 环境无此目录，语句无害）。
+# 仅当安装了 onnxruntime-gpu（开发者本地调试用）时，CUDA EP 才依赖 nvidia-* pip 包提供的
+# CUDA/cuDNN DLL（cublasLt64_13.dll / cudnn64_9.dll 等）；ORT 不会自动把它们加入 PATH，
+# 缺失时 CUDA EP 会报 "cublasLt64_13.dll which is missing" 而静默回退。这里在导入
+# onnxruntime 前把对应 bin 目录注入 PATH。发布态装的是 onnxruntime-directml（无 nvidia 目录），
+# 此函数找不到目录、自动 no-op，语句无害。
 def _prepend_cuda_dll_path() -> None:
     # 用 glob 匹配 nvidia/*/bin 与 nvidia/*/bin/x86_64，兼容 cu13→cu14 等未来升级，
     # 避免硬编码 cu13 在 nvidia pip 包升版本后路径断裂、CUDA EP 静默回退 CPU。
@@ -248,14 +248,12 @@ class _Predictor:
                 if self.model_kind != "rmbg2":
                     so.intra_op_num_threads = 1
                     so.inter_op_num_threads = 1
-                # P6：推理 provider 兜底链 CUDA → DML → CPU，逐个 EP 独立尝试，
-                # 任一 EP 初始化失败不影响其他 EP。升级 NVIDIA 驱动(≥580, 含
-                # CUDA 13.x) + onnxruntime-gpu 1.28.0 后，CUDA EP 在本机
-                # Blackwell(sm_120) 可用，优先走 CUDA（最快）；拿不到 CUDA 时
-                # 回退 DirectML（DML，Windows 自带 GPU 加速，本机 RTX 5060 Ti
-                # 实测 ~0.58s/帧 vs CPU 5.9s/帧 ≈ 10×）；最后回退 CPU。
-                # 注：onnxruntime-gpu 不含 DmlExecutionProvider，故 DML 分支仅在
-                # 装了 onnxruntime-directml 时生效；CUDA 失败时由本兜底链接住。
+                # 推理 provider 兜底链 CUDA → DML → CPU，逐个 EP 独立尝试，任一初始化失败不影响其他。
+                # 发布态默认装 onnxruntime-directml：DML 走系统 DX12，对 NVIDIA/AMD/Intel 全显卡加速
+                #（本机 RTX 5060 Ti 实测 DML ~0.58s/帧 vs CPU 5.9s/帧 ≈ 10×）。开发者本地若另装
+                # onnxruntime-gpu，则 CUDA EP 优先（最快）；二者实际可用 EP 取决于装的是哪个包。最后 CPU 兜底。
+                # 注：onnxruntime-gpu 不含 DmlExecutionProvider，onnxruntime-directml 不含
+                # CUDAExecutionProvider，故本兜底链自动只挑当前安装包支持的 EP。
                 _avail = ort.get_available_providers()
                 self.session = None
                 ep_tag = None

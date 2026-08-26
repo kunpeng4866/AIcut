@@ -5,22 +5,15 @@
 # 安装命令（清华镜像）：
 #   python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 #
-# 重要：本机 RTX 5060 Ti（Blackwell, sm_120）走 ONNX Runtime CUDA EP 加速抠像推理。
-# onnxruntime-gpu 必须搭配 nvidia-* pip 包（提供 cublas/cudnn 等 DLL），否则 CUDA EP
-# 会静默回退 CPU。以下版本为 2026-08-01 在本机实测可用的组合，请勿随意降版本。
+# 抠像推理后端（发布态）：ONNX Runtime DirectML —— 走系统 DX12，对 NVIDIA / AMD / Intel
+# 全显卡硬件加速。选 DML 而非 CUDA EP，是因为软件面向终端用户，不能把加速锁死在开发者
+# 本机那张 RTX 5060 Ti（Blackwell, sm_120）上：onnxruntime-gpu + nvidia-* 仅对 NVIDIA 且
+# 驱动/CUDA 匹配时有效，AMD/Intel 用户会被静默打到 CPU（~10x 慢）；DML 则对所有 DX12 显卡生效。
+# 开发者本地若另装 onnxruntime-gpu，provider 兜底链（CUDA→DML→CPU）会自动优先 CUDA，开发态仍最快。
+# 实测 onnxruntime-directml 1.24.4 在 sm_120 上 DML EP 正常、较 CPU 快 ~7.8x、无回归。
 
-# ---- 抠像推理（ONNX Runtime CUDA EP，优先于 DML/CPU）----
-onnxruntime-gpu==1.28.0
-nvidia-cublas==13.6.0.2
-nvidia-cuda-nvrtc==13.3.33
-nvidia-cuda-runtime==13.3.29
-nvidia-cudnn-cu13==9.24.0.43
-nvidia-cufft==12.3.0.29
-nvidia-curand==10.4.3.29
-nvidia-nvjitlink==13.3.33
-
-# 注：onnxruntime-directml 不在此固定。抠像 provider 兜底链为 CUDA → DML → CPU，
-# 仅当显式安装 onnxruntime-directml 时 DML 分支才生效（本机当前未装，CUDA 优先）。
+# ---- 抠像推理（ONNX Runtime DirectML，跨显卡硬件加速）----
+onnxruntime-directml==1.24.4
 
 # ---- 美颜皮肤 mask（纯 numpy/scipy，无 ONNX/模型）----
 numpy==2.5.1
