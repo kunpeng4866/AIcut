@@ -725,6 +725,33 @@ fn speech_assemble_separated(input: &str, opts: &SpeechAssembleOptions) -> Resul
     let normalize = opts.normalize.unwrap_or(false);
     let cf = opts.crossfade_ms / 1000.0;
 
+    // ── 暂停压缩路径判定（分离路径 P1：消费 keepSegmentsOut）──
+    // 与非分离路径一致：keep_segments_out 是输出时间轴（含被压缩后的短停顿），与 keep_segments
+    // 索引一一对应、段长相等。仅当其有效（长度匹配、段长一致、首段始于≈0）且确实存在正暂停时
+    // 启用；否则回退到下方「按源时间轴铺满」的既有行为（零回归）。
+    let mut sep_segments = opts.keep_segments.clone();
+    sep_segments.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    sep_segments.retain(|(s, e)| (e - s) > 1e-4);
+    let mut sep_out = opts.keep_segments_out.clone().unwrap_or_default();
+    sep_out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let sep_valid = !sep_segments.is_empty()
+        && !sep_out.is_empty()
+        && sep_out.len() == sep_segments.len()
+        && sep_out[0].0 <= 1e-3
+        && (0..sep_out.len()).all(|i| {
+            let a = (sep_segments[i].1 - sep_segments[i].0).abs();
+            let b = (sep_out[i].1 - sep_out[i].0).abs();
+            (a - b).abs() < 5e-3
+        });
+    let sep_has_pause = (0..sep_out.len().saturating_sub(1))
+        .any(|i| (sep_out[i + 1].0 - sep_out[i].1) > 1e-3);
+    if sep_valid && sep_has_pause {
+        return speech_assemble_separated_pause(
+            input, opts, &ff, has_video, vocal, accomp, &sep_segments, &sep_out,
+            declick, deess, normalize,
+        );
+    }
+
     // 构造按时间升序的音频段：
     //   - 每个 keep_segment  → 混合段   = amix(vocal 截[s,e], accomp 截[s,e])
     //   - 每个 music_segment → 纯伴奏段 = accomp 截[s,e]
@@ -870,6 +897,325 @@ fn speech_assemble_separated(input: &str, opts: &SpeechAssembleOptions) -> Resul
         "duration": out_duration,
         "ok": true
     }))
+}
+
+/// 分离路径「暂停压缩」实现：按 keepSegmentsOut 输出时间轴组装音频。
+///
+/// 算法要点：
+///   - vocal 段 i：从 vocal/accomp stem 各 atrim 源 `[keep_segments[i]]` 后 amix（人声 + 该段背景音乐），
+///     时长 = 源段长 L_i（compress_keep_timeline 保证 keep_segments 与 keep_segments_out 段长相等）。
+///   - 间隙 i（vocal i 与 i+1 之间）：输出间隙 `gap_dur = keep_segments_out[i+1].0 - keep_segments_out[i].1`；
+///       * 若 `gap_dur > 1ms`：找覆盖源 gap `(keep_segments[i].1, keep_segments[i+1].0)` 的 `music_segment`
+///         （重叠即 `m.start < gap_b && m.end > gap_a`，多者取重叠最大）；命中则从 accomp stem atrim
+///         其前 `gap_dur` 秒（取该背景音乐前段 → 实现压缩），未命中（静音无音乐）用 anullsrc 静音 `gap_dur` 秒。
+///       * 若 `gap_dur <= 1ms`：跳过（无暂停，硬切到下一 vocal 段）。
+///   - 各输出段按序用 concat demuxer 直连（暂停压缩禁用 crossfade，避免语音 crossfade 进静音/音乐）；
+///     末级统一施加 de-ess/declick/normalize。
+///   - 视频沿用既有 full-input + `-shortest` 行为（不逐段冻结），保证与修改前一致、不引入回归。
+fn speech_assemble_separated_pause(
+    input: &str,
+    opts: &SpeechAssembleOptions,
+    ff: &str,
+    has_video: bool,
+    vocal: &str,
+    accomp: &str,
+    segments: &[(f64, f64)],
+    out_segs: &[(f64, f64)],
+    declick: bool,
+    deess: bool,
+    normalize: bool,
+) -> Result<Value, AppError> {
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+
+    let mut clips: Vec<PathBuf> = Vec::with_capacity(segments.len() * 2);
+    let mut clip_durations: Vec<f64> = Vec::with_capacity(segments.len() * 2);
+
+    // 预解析 music_segments（源坐标）供间隙桥接查找（构造上 ⊆ 源 gap）。
+    let music = opts.music_segments.clone().unwrap_or_default();
+
+    for i in 0..segments.len() {
+        let (vs, ve) = segments[i];
+        // 1) vocal Mix 段：vocal + accomp 各 atrim[vs,ve] 后 amix。
+        let mix_path = temp_dir.join(format!("aicut_sep_mix_{}_{}.m4a", pid, i));
+        if let Err(e) = build_vocal_mix_clip(ff, vocal, accomp, vs, ve, &mix_path) {
+            cleanup(&clips, None);
+            return Err(e);
+        }
+        clips.push(mix_path);
+        clip_durations.push((ve - vs).max(0.0));
+
+        // 2) 间隙段（vocal i 与 i+1 之间）。
+        if i + 1 < segments.len() {
+            let gap_dur = (out_segs[i + 1].0 - out_segs[i].1).max(0.0);
+            if gap_dur > 1e-3 {
+                let gap_a = ve; // 源 gap 起点 = vocal i 源终点
+                let gap_b = segments[i + 1].0; // 源 gap 终点 = vocal i+1 源起点
+                // 找覆盖源 gap 的 music_segment（重叠最大者优先）。
+                let mut best: Option<(f64, f64)> = None;
+                let mut best_overlap = 0.0_f64;
+                for &(m_s, m_e) in &music {
+                    if m_s < gap_b && m_e > gap_a {
+                        let ov = (m_e.min(gap_b) - m_s.max(gap_a)).max(0.0);
+                        if ov > best_overlap {
+                            best_overlap = ov;
+                            best = Some((m_s, m_e));
+                        }
+                    }
+                }
+                if let Some((m_s, _)) = best {
+                    // 命中：从 accomp stem 取该背景音乐前 gap_dur 秒（压缩到间隙时长）。
+                    let br_path = temp_dir.join(format!("aicut_sep_br_{}_{}.m4a", pid, i));
+                    if let Err(e) = build_accomp_bridge_clip(ff, accomp, m_s, gap_dur, &br_path) {
+                        cleanup(&clips, None);
+                        return Err(e);
+                    }
+                    clips.push(br_path);
+                } else {
+                    // 未命中（gap 是纯静音无音乐）：生成 gap_dur 秒静音桥接。
+                    let sl_path = temp_dir.join(format!("aicut_sep_sil_{}_{}.m4a", pid, i));
+                    if let Err(e) = build_silence_audio_clip(ff, gap_dur, &sl_path) {
+                        cleanup(&clips, None);
+                        return Err(e);
+                    }
+                    clips.push(sl_path);
+                }
+                clip_durations.push(gap_dur);
+            }
+        }
+    }
+
+    // 3) concat demuxer 直连各段（均为 aac/48k/2ch，可 -c copy）。
+    let combined = temp_dir.join(format!("aicut_sep_combined_{}.m4a", pid));
+    let list_path = temp_dir.join(format!("aicut_sep_list_{}.txt", pid));
+    {
+        let mut content = String::new();
+        for p in &clips {
+            content.push_str(&format!("file '{}'\n", p.to_string_lossy().replace('\\', "/")));
+        }
+        if let Err(e) = std::fs::write(&list_path, content) {
+            cleanup(&clips, None);
+            return Err(AppError::Render(format!("写入 concat 列表失败: {}", e)));
+        }
+    }
+    let concat_args: Vec<String> = vec![
+        "-y".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        list_path.to_string_lossy().replace('\\', "/"),
+        "-c".into(),
+        "copy".into(),
+        combined.to_string_lossy().replace('\\', "/"),
+    ];
+    let out = Command::new(ff)
+        .args(&concat_args)
+        .output()
+        .map_err(|e| {
+            cleanup(&clips, Some(&list_path));
+            AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e))
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        cleanup(&clips, Some(&list_path));
+        return Err(AppError::Render(format!(
+            "分离路径暂停压缩合成失败 (退出码 {:?}): {}",
+            out.status.code(),
+            stderr.chars().take(800).collect::<String>()
+        )));
+    }
+    cleanup(&clips, Some(&list_path));
+
+    // 4) 末级 mux：原视频流 0:v（若有） + 合并音频（统一后处理），-shortest 截断到音频时长。
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        input.to_string(),
+        "-i".into(),
+        combined.to_string_lossy().replace('\\', "/"),
+    ];
+    if let Some(af) = audio_post_filters(declick, deess, normalize) {
+        args.push("-filter_complex".into());
+        args.push(format!("[1:a]{}[aout];", af));
+        args.push("-map".into());
+        if has_video {
+            args.push("0:v".into());
+            args.push("-map".into());
+        }
+        args.push("[aout]".into());
+    } else {
+        args.push("-map".into());
+        if has_video {
+            args.push("0:v".into());
+            args.push("-map".into());
+        }
+        args.push("1:a".into());
+    }
+    args.push("-c:v".into());
+    args.push("libx264".into());
+    args.push("-pix_fmt".into());
+    args.push("yuv420p".into());
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-shortest".into());
+    args.push(opts.output_path.clone());
+
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let _ = std::fs::remove_file(&combined);
+        return Err(AppError::Render(format!(
+            "分离路径末级 mux 失败 (退出码 {:?}): {}",
+            out.status.code(),
+            stderr.chars().take(800).collect::<String>()
+        )));
+    }
+    let _ = std::fs::remove_file(&combined);
+
+    let out_duration: f64 = clip_durations.iter().sum();
+    let real_dur = probe(&opts.output_path)
+        .map(|m| m.duration)
+        .unwrap_or(out_duration);
+    Ok(json!({
+        "outputPath": opts.output_path.clone(),
+        "duration": real_dur,
+        "ok": true
+    }))
+}
+
+/// 生成 vocal Mix 段：vocal/accomp stem 各 atrim 源 [s,e] 后 amix（人声 + 该段背景音乐）。
+/// 输出音频统一为 aac/48k/2ch，便于后续 concat demuxer -c copy。
+fn build_vocal_mix_clip(
+    ff: &str,
+    vocal: &str,
+    accomp: &str,
+    s: f64,
+    e: f64,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
+    let out_str = out_path.to_string_lossy().replace('\\', "/");
+    let fc = format!(
+        "[0]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[vt];\
+         [1]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[at];\
+         [vt][at]amix=inputs=2:duration=longest[mo];",
+        s, e, s, e
+    );
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        vocal.to_string(),
+        "-i".into(),
+        accomp.to_string(),
+        "-filter_complex".into(),
+        fc,
+        "-map".into(),
+        "[mo]".into(),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "2".into(),
+        "-c:a".into(),
+        "aac".into(),
+        out_str,
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "vocal Mix 段切割失败 (退出码 {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(600).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+/// 生成 accomp 桥接段：从 accomp stem atrim 源 [m_start, m_start+gap_dur]，
+/// 取该背景音乐的前 gap_dur 秒（实现压缩到输出间隙时长）。
+fn build_accomp_bridge_clip(
+    ff: &str,
+    accomp: &str,
+    m_start: f64,
+    gap_dur: f64,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
+    let out_str = out_path.to_string_lossy().replace('\\', "/");
+    let fc = format!(
+        "[0]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[a];",
+        m_start,
+        m_start + gap_dur
+    );
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        accomp.to_string(),
+        "-filter_complex".into(),
+        fc,
+        "-map".into(),
+        "[a]".into(),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "2".into(),
+        "-c:a".into(),
+        "aac".into(),
+        out_str,
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "accomp 桥接段切割失败 (退出码 {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(600).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+/// 生成静音桥接段（gap 无背景音乐时）：anullsrc 生成 gap_dur 秒静音，音频 aac/48k/2ch。
+/// 注意：分离路径只桥接音频，不需冻结视频帧（与非分离路径的 build_pause_clip 不同，勿误用）。
+fn build_silence_audio_clip(
+    ff: &str,
+    gap_dur: f64,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
+    let out_str = out_path.to_string_lossy().replace('\\', "/");
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        format!("anullsrc=r=48000:cl=stereo:d={:.6}", gap_dur),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "2".into(),
+        "-c:a".into(),
+        "aac".into(),
+        out_str,
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "静音桥接段生成失败 (退出码 {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(600).collect::<String>()
+        )));
+    }
+    Ok(())
 }
 
 /// 尽力清理临时片段文件与 concat 列表（失败忽略）。
