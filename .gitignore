@@ -23,6 +23,8 @@ tmp_corrupted_backup/
 
 # 测试导出产物（生成物，非源码）
 *.mp4
+# 例外：口播暂停压缩集成测试所需的合成 fixture（源码级测试资产，需纳入版本控制）
+!tests/assets/pause_compress_input.mp4
 
 # 口播剪辑：Demucs 分离出的 stem 缓存（生成物，非源码）
 .aicut_speech/
