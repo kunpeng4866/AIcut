@@ -37,6 +37,12 @@ struct SpeechEditOptions {
 #[serde(rename_all = "camelCase")]
 struct SpeechAssembleOptions {
     keep_segments: Vec<(f64, f64)>,
+    /// 输出时间轴保留段（暂停压缩后；由 Python analyze 的 keepSegmentsOut 提供）。
+    /// 与 keep_segments 一一对应且索引对齐：段 i 的源区间 = keep_segments[i]，
+    /// 输出区间 = keep_segments_out[i]，段长度保持一致；相邻输出段之间的间隙 = 需插入的暂停时长。
+    /// 缺省（None/空/长度不匹配）时回退到「间隙全删」的旧行为。
+    #[serde(default)]
+    keep_segments_out: Option<Vec<(f64, f64)>>,
     output_path: String,
     /// 交叉淡入淡出时长（毫秒）。默认 20ms：>0 且保留片段数 >= 2 时启用 crossfade。
     #[serde(default = "default_crossfade_ms")]
@@ -123,6 +129,107 @@ fn audio_post_filters(declick: bool, deess: bool, normalize: bool) -> Option<Str
     } else {
         Some(af.join(","))
     }
+}
+
+/// 生成「暂停」片段：冻结 `prev_seg` 的末帧并叠加静音音频，时长 `pause` 秒。
+/// 输入无视频流时仅生成静音音频片段。供暂停压缩路径在保留段之间插入短停顿，
+/// 使输出节奏自然（不被压成机关枪）。返回生成的片段路径。
+fn build_pause_clip(
+    ff: &str,
+    fps: f64,
+    has_video: bool,
+    prev_seg: &PathBuf,
+    pause: f64,
+    idx: usize,
+    temp_dir: &std::path::Path,
+    pid: u32,
+) -> Result<PathBuf, AppError> {
+    let blank = temp_dir.join(format!("aicut_speech_pause_{}_{}.mp4", pid, idx));
+    let blank_str = blank.to_string_lossy().replace('\\', "/");
+    let prev_str = prev_seg.to_string_lossy().replace('\\', "/");
+    let args: Vec<String> = if has_video {
+        // 取 prev_seg 末帧 → 冻结为 pause 秒静帧（避免暂停时黑屏/跳变）。
+        let last_png = temp_dir.join(format!("aicut_speech_pause_last_{}_{}.png", pid, idx));
+        let last_str = last_png.to_string_lossy().replace('\\', "/");
+        let ext = Command::new(ff)
+            .args([
+                "-y",
+                "-sseof",
+                "-0.04",
+                "-i",
+                &prev_str,
+                "-vf",
+                "select=eq(n\\,0)",
+                "-frames:v",
+                "1",
+                &last_str,
+            ])
+            .output()
+            .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+        if !ext.status.success() {
+            return Err(AppError::Render(format!(
+                "暂停片段提取末帧失败 (退出码 {:?}): {}",
+                ext.status.code(),
+                String::from_utf8_lossy(&ext.stderr).chars().take(400).collect::<String>()
+            )));
+        }
+        vec![
+            "-y".into(),
+            "-loop".into(),
+            "1".into(),
+            "-i".into(),
+            last_str,
+            "-f".into(),
+            "lavfi".into(),
+            "-i".into(),
+            format!("anullsrc=r=48000:cl=stereo:d={:.6}", pause),
+            "-t".into(),
+            format!("{:.6}", pause),
+            "-c:v".into(),
+            "libx264".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-ar".into(),
+            "48000".into(),
+            "-ac".into(),
+            "2".into(),
+            "-r".into(),
+            format!("{:.4}", fps),
+            "-shortest".into(),
+            blank_str,
+        ]
+    } else {
+        vec![
+            "-y".into(),
+            "-f".into(),
+            "lavfi".into(),
+            "-i".into(),
+            format!("anullsrc=r=48000:cl=stereo:d={:.6}", pause),
+            "-t".into(),
+            format!("{:.6}", pause),
+            "-c:a".into(),
+            "aac".into(),
+            "-ar".into(),
+            "48000".into(),
+            "-ac".into(),
+            "2".into(),
+            blank_str,
+        ]
+    };
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        return Err(AppError::Render(format!(
+            "暂停片段生成失败 (退出码 {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(400).collect::<String>()
+        )));
+    }
+    Ok(blank)
 }
 
 /// 解析 bridge.py 路径：
@@ -274,6 +381,28 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         return Err(AppError::Render("保留片段均无效（长度为 0），无法合成".into()));
     }
 
+    // 输入是否含视频流（暂停压缩路径据此决定「冻结末帧+静音」还是纯静音片段）。
+    let has_video = has_video_stream(input)?;
+
+    // ── 暂停压缩路径判定（P1：消费 keepSegmentsOut）──
+    // keep_segments_out 是输出时间轴（含被压缩后插入的短停顿），与 keep_segments 同源排序、
+    // 索引一一对应：段 i 的源区间 = keep_segments[i]，输出区间 = keep_segments_out[i]，段长不变。
+    // 相邻输出段之间的间隙 = 需插入的暂停时长。仅当其有效（长度匹配、段长一致、首段始于 0）
+    // 且确实存在正暂停时启用；否则回退到「间隙全删」旧行为（并尊重 crossfade）。
+    let mut out_segs = opts.keep_segments_out.clone().unwrap_or_default();
+    out_segs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let segs_valid = !out_segs.is_empty()
+        && out_segs.len() == segments.len()
+        && out_segs[0].0 <= 1e-3
+        && (0..out_segs.len()).all(|i| {
+            let a = (segments[i].1 - segments[i].0).abs();
+            let b = (out_segs[i].1 - out_segs[i].0).abs();
+            (a - b).abs() < 5e-3
+        });
+    let has_positive_pause = (0..out_segs.len().saturating_sub(1))
+        .any(|i| (out_segs[i + 1].0 - out_segs[i].1) > 1e-3);
+    let use_pause_compress = segs_valid && has_positive_pause;
+
     let mut seg_paths: Vec<PathBuf> = Vec::with_capacity(segments.len());
     let mut seg_durations: Vec<f64> = Vec::with_capacity(segments.len());
     let mut duration = 0.0_f64;
@@ -303,12 +432,17 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             "yuv420p".into(),
             "-c:a".into(),
             "aac".into(),
+            // 固定音频规格（48k/立体声），保证「段 + 暂停静音片段」在 concat -c copy 下参数一致。
+            "-ar".into(),
+            "48000".into(),
+            "-ac".into(),
+            "2".into(),
         ];
 
         // 音频后处理滤镜（declick / de-ess / loudnorm）。
-        // 注意：仅在非 crossfade 路径把它烘焙进片段；crossfade 路径会在
+        // 注意：仅在非 crossfade 路径（及暂停压缩路径）把它烘焙进片段；crossfade 路径会在
         // filter_complex 末级统一施加，避免重复处理音频。
-        let af_opt: Option<String> = if use_crossfade {
+        let af_opt: Option<String> = if use_crossfade && !use_pause_compress {
             None
         } else {
             audio_post_filters(declick, deess, normalize)
@@ -344,10 +478,84 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         seg_paths.push(seg_path);
     }
 
+    // ── 暂停压缩路径（P1）：按 keepSegmentsOut 在保留段之间插入「冻结末帧+静音」短暂停 ──
+    // keepSegmentsOut 已在源时间轴切好的各段间补入 targetPause 量级的停顿（而非全删），
+    // 避免「机关枪」节奏。段本身仍按源 keep_segments 精确切割（零回归），只在拼接处补暂停。
+    if use_pause_compress {
+        let out_dur: f64 = out_segs.last().map(|&(_, e)| e).unwrap_or(0.0);
+        // 组装 [段0, 暂停0, 段1, 暂停1, ...] 的 concat 列表（仅正暂停插片段）
+        let mut concat_paths: Vec<PathBuf> = Vec::with_capacity(seg_paths.len() * 2);
+        for i in 0..segments.len() {
+            concat_paths.push(seg_paths[i].clone());
+            if i + 1 < segments.len() {
+                let pause = (out_segs[i + 1].0 - out_segs[i].1).max(0.0);
+                if pause > 1e-3 {
+                    match build_pause_clip(&ff, fps, has_video, &seg_paths[i], pause, i, &temp_dir, pid) {
+                        Ok(p) => concat_paths.push(p),
+                        Err(e) => {
+                            cleanup(&seg_paths, None);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+        let list_path = temp_dir.join(format!("aicut_speech_list_{}.txt", pid));
+        let mut list_content = String::new();
+        for p in &concat_paths {
+            list_content.push_str(&format!("file '{}'\n", p.to_string_lossy().replace('\\', "/")));
+        }
+        if let Err(e) = std::fs::write(&list_path, list_content) {
+            cleanup(&concat_paths, Some(&list_path));
+            return Err(AppError::Render(format!("写入 concat 列表失败: {}", e)));
+        }
+        let concat_args: Vec<String> = vec![
+            "-y".into(),
+            "-f".into(),
+            "concat".into(),
+            "-safe".into(),
+            "0".into(),
+            "-i".into(),
+            list_path.to_string_lossy().replace('\\', "/"),
+            "-c".into(),
+            "copy".into(),
+            opts.output_path.clone(),
+        ];
+        let out = Command::new(&ff)
+            .args(&concat_args)
+            .output()
+            .map_err(|e| {
+                cleanup(&concat_paths, Some(&list_path));
+                AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e))
+            });
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => return Err(e),
+        };
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            cleanup(&concat_paths, Some(&list_path));
+            return Err(AppError::Render(format!(
+                "暂停压缩合成失败 (退出码 {:?}): {}",
+                out.status.code(),
+                stderr.chars().take(800).collect::<String>()
+            )));
+        }
+        cleanup(&concat_paths, Some(&list_path));
+        // 返回真实输出时长（concat -c copy 后实测），保证落轨片段长度与实际文件一致。
+        let real_dur = probe(&opts.output_path)
+            .map(|m| m.duration)
+            .unwrap_or(out_dur);
+        return Ok(json!({
+            "outputPath": opts.output_path.clone(),
+            "duration": real_dur,
+            "ok": true
+        }));
+    }
+
     // 根据是否启用 crossfade 选择合成路径。
     let (output_path, out_duration) = if use_crossfade {
         // ---- 交叉淡入淡出路径：消除拼接处的硬切「卡顿」 ----
-        let has_video = has_video_stream(input)?;
         let cf = opts.crossfade_ms / 1000.0;
         let durs: Vec<f64> = seg_durations.clone();
         let n = segments.len();

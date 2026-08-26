@@ -322,6 +322,10 @@ export interface SpeechEditResult {
   vocalPath?: string;                     // 分离出的人声 stem 路径（separated 时存在）
   accompPath?: string;                    // 分离出的伴奏 stem 路径（separated 时存在）
   musicSegments?: [number, number][];     // 非语音但含音乐/环境音的区间（秒），assemble 时作为「纯伴奏桥接段」保留，gap 音乐不丢
+  pauseCompress?: boolean;                // 是否启用暂停压缩优先（P1）
+  keepSegmentsOut?: [number, number][];   // ★ 输出时间轴保留段（暂停压缩后；与 keepSegments 索引一一对应，段长一致，相邻段间隙=插入的短暂停）。Rust assemble 消费它把暂停真正落到音频
+  outputDuration?: number;                // 输出总时长（<= duration，停顿被压缩）
+  speakingRate?: any;                     // 语速统计（overall_cps / median_cps / windows / anomalies）
 }
 
 // assemble（生成清洗文件）的输出
@@ -343,6 +347,7 @@ export interface SpeechAssembleOptions {
   vocalPath?: string;   // 人声 stem 路径（separated 时提供）
   accompPath?: string;  // 伴奏 stem 路径（separated 时提供）
   musicSegments?: [number, number][]; // 纯伴奏桥接段（separated 时与 keepSegments 交替拼接，gap 音乐不丢）
+  keepSegmentsOut?: [number, number][]; // 输出时间轴保留段（暂停压缩后）；提供时 Rust assemble 在段间插入短暂停而非全删
 }
 
 export interface SpeechAPI {

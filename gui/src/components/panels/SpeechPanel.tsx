@@ -65,6 +65,16 @@ const patchDeletion = (
   return newKeep;
 };
 
+// 判断两段保留区间数组是否逐段相等（用于识别用户是否手动精修过时间轴）。
+// 若手动改过，analyze 时计算的 keepSegmentsOut（输出时间轴）与当前 keepSegments 索引已不对齐，
+// 此时不应下发 keepSegmentsOut，避免 Rust 按错误的输出偏移拼接。
+const segsEqual = (a?: [number, number][], b?: [number, number][]): boolean => {
+  if (!a || !b || a.length !== b.length) return false;
+  const sa = [...a].sort((x, y) => x[0] - y[0]);
+  const sb = [...b].sort((x, y) => x[0] - y[0]);
+  return sa.every((s, i) => Math.abs(s[0] - sb[i][0]) < 1e-4 && Math.abs(s[1] - sb[i][1]) < 1e-4);
+};
+
 // 删除某个删除区间（把该区间并入保留：相邻保留段合并 / 延长到首尾）
 const deleteDeletion = (
   keep: [number, number][],
@@ -147,6 +157,12 @@ export default function SpeechPanel() {
   const [result, setResult] = useState<SpeechEditResult | null>(null);
   // 实时片段：用户在时间轴拖动精修后的值优先（speechOverlay），否则回退到分析原始值
   const liveKeepSegments = speechOverlay?.keepSegments ?? result?.keepSegments ?? [];
+  // 暂停压缩输出时间轴（keepSegmentsOut）：仅当用户未手动精修时间轴时下发——
+  // 手动改过会让 keepSegments 与 analyze 时计算的 keepSegmentsOut 索引错位，此时回退到「间隙全删」。
+  const editedTimeline = !segsEqual(speechOverlay?.keepSegments, result?.keepSegments);
+  const liveKeepSegmentsOut = (!editedTimeline && result?.keepSegmentsOut && result.keepSegmentsOut.length === liveKeepSegments.length)
+    ? result.keepSegmentsOut
+    : undefined;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -239,6 +255,7 @@ export default function SpeechPanel() {
       const outputPath = selectedAsset.path.replace(/\.[^.]+$/, '_preview.mp4');
       const asmOpts: SpeechAssembleOptions = {
         keepSegments: liveKeepSegments,
+        keepSegmentsOut: liveKeepSegmentsOut,
         outputPath,
         crossfadeMs,
         declick,
@@ -321,6 +338,7 @@ export default function SpeechPanel() {
       const outputPath = original.path.replace(/\.[^.]+$/, '_speechcut.mp4'); // 写到源文件旁边
       const asmOpts: SpeechAssembleOptions = {
         keepSegments: liveKeepSegments,
+        keepSegmentsOut: liveKeepSegmentsOut,
         outputPath,
         crossfadeMs,
         declick,
