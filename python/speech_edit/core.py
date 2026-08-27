@@ -187,6 +187,103 @@ def _has_video(path: str) -> bool:
         return False
 
 
+def _audio_channels(path: str) -> int:
+    """探测首条音频流的通道数（失败按 1 处理）。"""
+    try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "a:0",
+                            "-show_entries", "stream=channels",
+                            "-of", "csv=p=0", path], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        v = int(float((r.stdout or "1").strip().splitlines()[0]))
+        return max(1, min(8, v))
+    except Exception:
+        return 1
+
+
+def _read_wav_any(path: str) -> tuple:
+    """读 16bit PCM wav（mono/interleaved 多声道）→ (float32 [frames, ch], sr)。"""
+    wf = wave.open(path, "rb")
+    sr = wf.getframerate()
+    ch = wf.getnchannels()
+    frames = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+    wf.close()
+    shape = (-1, ch) if ch > 1 else (-1, 1)
+    return frames.reshape(shape), sr
+
+
+def _write_wav_any(path: str, audio: np.ndarray, sr: int) -> None:
+    """写 16bit PCM wav，支持 mono [n] / 多声道 [n, ch]。"""
+    a = np.asarray(audio, dtype=np.float32)
+    if a.ndim == 1:
+        a = a[:, None]
+    a = np.clip(a, -1.0, 1.0)
+    pcm = (a * 32767.0).astype(np.int16)
+    wf = wave.open(path, "wb")
+    wf.setnchannels(a.shape[1])
+    wf.setsampwidth(2)
+    wf.setframerate(int(sr))
+    wf.writeframes(pcm.tobytes())
+    wf.close()
+
+
+def _persist_enhanced_audio(input_path: str, dn16k_path: str, method: str,
+                            mask_soften: bool, mask_soften_floor: float) -> tuple:
+    """「干净人声直接入片」：把降噪波形持久化为源文件旁 <stem>_denoised.wav。
+
+    - method='dfn3'（标准档）：权重为**全带宽 48k 模型**——从源媒体直接提取 48k 音频
+      （保留原通道数，>2 声道降混为立体声），逐通道过一遍 DFN3（含软化阈值），得到
+      齿音/气声/泛音完整的全带宽增强人声。dfn3.enhance 零平移不变，与源时间轴严格对齐。
+    - 其它方法（frcrn 高质量档 / lightweight）：仅支持 16k —— 直接持久化 16k 波形，
+      FRCRN 链路行为完全不变。
+    全带宽任一环节失败都回退为拷贝 16k 版本并告警；彻底失败返回空路径（成片用原声）。
+    返回 (path_or_"", warning_or_"")。
+    """
+    out_path = os.path.splitext(input_path)[0] + "_denoised.wav"
+    if method != "dfn3":
+        try:
+            shutil.copyfile(dn16k_path, out_path)
+            return out_path, ""
+        except Exception as e:
+            return "", f"enhanced_audio_copy_failed: {e}"
+
+    # ── DFN3 全带宽通道 ──
+    tmp48 = out_path + ".fb48k.tmp.wav"
+    fallback_warn = ""
+    try:
+        ch = min(2, max(1, _audio_channels(input_path)))
+        _run_ffmpeg(["-i", input_path, "-vn", "-ac", str(ch),
+                     "-ar", "48000", "-f", "wav", tmp48])
+        au48, sr48 = _read_wav_any(tmp48)
+        if au48.shape[0] == 0:
+            raise RuntimeError("empty_audio")
+        import dfn3  # noqa: E402  (同目录模块；模型 SR=48000，sr==SR_MODEL 走原生全带宽)
+        outs = np.zeros_like(au48)
+        for c in range(au48.shape[1]):
+            y = dfn3.enhance(np.ascontiguousarray(au48[:, c], dtype=np.float32), sr48,
+                             DENOISE_MODEL_DIR, _onnx_session,
+                             mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
+            if y is None or y.shape[0] != au48.shape[0]:
+                raise RuntimeError("dfn3_fullband_unavailable")
+            outs[:, c] = y
+        _write_wav_any(out_path, outs if outs.shape[1] > 1 else outs[:, 0], sr48)
+        return out_path, ""
+    except Exception as e:
+        fallback_warn = f"enhanced_audio_fullband_fallback_16k: {e}"
+        sys.stderr.write(f"[denoise] 全带宽增强失败({e})，回退 16k 波形\n")
+    finally:
+        try:
+            if os.path.exists(tmp48):
+                os.remove(tmp48)
+        except OSError:
+            pass
+    # 回退：16k 结果直接落盘
+    try:
+        shutil.copyfile(dn16k_path, out_path)
+        return out_path, fallback_warn
+    except Exception as e:
+        return "", fallback_warn or f"enhanced_audio_copy_failed: {e}"
+
+
 # ══════════════════════════════════════════════════════
 # [1] Demucs 声源分离（分析辅助；失败回退原始音频）
 # ══════════════════════════════════════════════════════
@@ -1652,16 +1749,16 @@ def analyze(input_path: str, opts: dict) -> dict:
                 mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
             if ok_dn:
                 work_wav = dn_path
-                # 「干净人声直接入片」：把降噪后的波形持久化到源文件旁并随结果返回；
+                # 「干净人声直接入片」：把降噪波形持久化到源文件旁并随结果返回；
                 # Rust 组装端检测到 enhancedAudioPath 时用它重建成片音轨（波形与源
-                # 时间轴零平移对齐）。复制失败不阻断分析，仅告警并回退原声成片。
-                try:
-                    enhanced_audio_path = os.path.splitext(input_path)[0] + "_denoised.wav"
-                    shutil.copyfile(dn_path, enhanced_audio_path)
-                except Exception as copy_err:
-                    enhanced_audio_path = ""
-                    warnings_out.append(f"enhanced_audio_copy_failed: {copy_err}")
-                    print(f"  [WARN] 降噪波形持久化失败({copy_err})，成片将用原声", flush=True)
+                # 时间轴零平移对齐）。标准档(DFN3)走全带宽 48k 通道（保留齿音/气声/
+                # 泛音），高质量档(FRCRN)仅 16k 维持原样；失败回退、不阻断分析。
+                enhanced_audio_path, fb_warn = _persist_enhanced_audio(
+                    input_path, dn_path, denoise_method,
+                    mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
+                if fb_warn:
+                    warnings_out.append(fb_warn)
+                    print(f"  [WARN] {fb_warn}", flush=True)
                 print(f"  [OK] 降噪完成（{denoise_method}）", flush=True)
             else:
                 print(f"  [SKIP] 降噪未生效（{dn_warn}），使用原音频", flush=True)
