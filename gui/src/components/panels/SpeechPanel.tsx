@@ -6,7 +6,7 @@
 //   3) 展示压缩统计 + 保留/删除时间轴可视化
 //   4) 点「生成清洗片段」调用 window.aicut.speech.assemble → 落轨（原片段保留）
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
 import type { ClipConfig, SpeechEditOptions, SpeechEditResult, SpeechAssembleOptions } from '../../types';
@@ -333,6 +333,10 @@ export default function SpeechPanel() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewNonce, setPreviewNonce] = useState(0);
   const [previewBusy, setPreviewBusy] = useState(false);
+  // 试听片段在时间轴上的落位（新音频轨）：{clipId, trackId}；null=尚未生成过
+  const previewClipRef = useRef<{ clipId: string; trackId: string } | null>(null);
+  // 是否已生成过试听：此后每次手动调整 keepSegments 自动重渲试听（用户要求②）
+  const previewAutoRef = useRef(false);
 
   // 把预览播放头(时间轴时间)映射回选中素材的源时间（供「捕获」按钮取逐帧时间）
   const captureSourceTime = (): number => {
@@ -381,6 +385,68 @@ export default function SpeechPanel() {
   };
   const captureNewStart = () => setNewDelStart(captureSourceTime());
   const captureNewEnd = () => setNewDelEnd(captureSourceTime());
+
+  // ── 试听片段落轨：在「新音频轨」上创建/替换清洗试听片段 ──
+  // 位置对齐源素材片段的 timelineIn → 播放头移动时，源轨与试听轨同步发声，
+  // 便于对照判断删除位置与 AI 分析结果（用户要求①）。
+  // 已存在试听片段时只替换其资产/时长（同 clipId）→ 不产生重复堆积（用户要求③的基础）。
+  const upsertPreviewOnTrack = (assetPath: string, dur: number, isFinal = false) => {
+    if (!selectedAsset) return;
+    const st = useProjectStore.getState();
+    const previewAsset = {
+      id: uid('asset'),
+      type: 'audio' as const,          // 试听对照轨恒为音频轨（视频源产出的 mp4 也只用其音轨对照）
+      path: assetPath,
+      duration: dur,
+      fps: selectedAsset.fps,
+    };
+    st.addAsset(previewAsset);
+    // 定位/创建试听轨：优先复用已有试听片段所在的轨
+    let trackId = previewClipRef.current?.trackId;
+    let track = trackId ? st.project.tracks.find((t) => t.id === trackId) : undefined;
+    if (!track) {
+      const tid = st.addTrack('audio'); // 新音频轨（排列在既有音频轨之下）
+      trackId = tid;
+      track = useProjectStore.getState().project.tracks.find((t) => t.id === tid);
+    }
+    if (!track) return;
+    // 与源素材片段对齐：播放头一致性对照
+    const srcClip = st.project.tracks
+      .flatMap((t) => t.clips)
+      .find((c) => c.assetId === selectedAsset.id);
+    const tin = srcClip ? srcClip.timelineIn : 0;
+    const existingId = previewClipRef.current?.clipId;
+    const existing = existingId ? track.clips.find((c) => c.id === existingId) : undefined;
+    if (existingId && existing) {
+      st.updateClip(track.id, existingId, {
+        assetId: previewAsset.id,
+        src_range: { start: 0, end: dur },
+        timelineIn: tin,
+        timelineOut: tin + dur,
+      });
+    } else {
+      const clip: ClipConfig = {
+        id: uid('clip'),
+        assetId: previewAsset.id,
+        src_range: { start: 0, end: dur },
+        timelineIn: tin,
+        timelineOut: tin + dur,
+        transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
+        volume: 1,
+        speed: 1,
+        effects: [],
+        masks: [],
+        filters: [],
+        keyframes: {},
+      };
+      st.addClip(track.id, clip);
+      previewClipRef.current = { clipId: clip.id, trackId: track.id };
+    }
+    setMsg(isFinal
+      ? '已生成最终清洗片段并替换时间轴上的试听片段（原素材保留，可对比）。'
+      : '试听片段已放到时间轴新音频轨（与源素材对齐）。此后每次手动调整会自动更新这条试听轨。');
+  };
+
   const handlePreview = async () => {
     if (!selectedAsset || !result) return;
     setPreviewBusy(true); setMsg(null);
@@ -413,11 +479,23 @@ export default function SpeechPanel() {
           : `aicut-asset:///${raw}?v=${Date.now()}`;
         setPreviewUrl(assetUrl);
         setPreviewNonce((n) => n + 1);
+        // 用户要求①：试听片段同步落到时间轴新音频轨（与源素材对齐）
+        previewAutoRef.current = true; // 此后手动调整自动重渲试听
+        upsertPreviewOnTrack(String(res.data.outputPath), Number(res.data.duration) || 0);
       } else setMsg(res.error || '试听生成失败');
     } finally {
       setPreviewBusy(false);
     }
   };
+
+  // 用户要求②：生成过一次试听后，手动调整 keepSegments 自动重渲试听片段
+  // （700ms 防抖；编辑瞬间先失效内嵌旧试听，杜绝「改了但听到的还是旧结果」）
+  useEffect(() => {
+    if (!previewAutoRef.current) return;
+    setPreviewUrl(null);
+    const t = setTimeout(() => { if (!previewBusy) void handlePreview(); }, 700);
+    return () => clearTimeout(t);
+  }, [JSON.stringify(liveKeepSegments)]);
 
   const numInput: React.CSSProperties = { width: 74, background: '#0b1a2e', color: C.textMain, border: `1px solid ${C.border}`, borderRadius: 3, padding: '2px 4px', fontSize: 11 };
   const miniBtn: React.CSSProperties = { fontSize: 11, padding: '2px 6px', background: C.control, color: C.textMain, border: `1px solid ${C.border}`, borderRadius: 3, cursor: 'pointer' };
@@ -475,6 +553,19 @@ export default function SpeechPanel() {
       };
       const res2 = await window.aicut.speech.assemble(original.path, JSON.stringify(asmOpts));
       if (res2.success && res2.data) {
+        const finalDur = Number(res2.data.duration) || 0;
+        // 用户要求③：时间轴上已有试听片段 → 用最终清洗片段【替换】它（位置不变），
+        // 不再追加重复片段；原素材片段保留可对比。
+        const pc = previewClipRef.current;
+        const previewAlive = pc
+          ? useProjectStore.getState().project.tracks
+              .find((t) => t.id === pc.trackId)?.clips.some((c) => c.id === pc.clipId)
+          : false;
+        if (previewAlive && pc) {
+          upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
+          setMsg('已生成最终清洗片段并替换时间轴上的试听片段（原素材保留，可对比）。建议标记仍保留，可继续微调后再次生成。');
+          return;
+        }
         clearSpeechOverlay();
         const asset = {
           id: uid('asset'),
