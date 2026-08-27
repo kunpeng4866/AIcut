@@ -490,7 +490,7 @@ ipcMain.handle('assets:status', async () => {
     baseUrl: manifest.baseUrl,
     isPlaceholder: manifest.baseUrl === DEFAULT_CDN_BASE,
     status,
-    entries: manifest.entries.map((e) => ({ id: e.id, name: e.name, size: e.size, requiredBy: e.requiredBy, hasDirect: !!e.absoluteUrl })),
+    entries: manifest.entries.map((e) => ({ id: e.id, name: e.name, size: e.size, requiredBy: e.requiredBy, hasDirect: !!(e.domesticUrl || e.externalUrl || e.absoluteUrl) })),
   };
 });
 
@@ -498,20 +498,28 @@ ipcMain.handle('assets:download', async (event, opts?: { ids?: string[] }) => {
   const manifest = getManifest(await readCdnBaseUrl());
   const ids = opts?.ids && opts.ids.length ? opts.ids : manifest.entries.map((e) => e.id);
   const entries = manifest.entries.filter((e) => ids.includes(e.id));
-  // 仅当待下载条目中「存在无绝对直链（absoluteUrl）的条目」时才要求 CDN 基础地址已配置；
-  // 有 absoluteUrl 的条目（如 rmbg2 走 ModelScope 直链）不依赖 cdnBaseUrl。
-  if (manifest.baseUrl === DEFAULT_CDN_BASE && entries.some((e) => !e.absoluteUrl)) {
-    const msg = '请先在「设置 → AI 组件管理」中填写 CDN 基础地址，再执行补全。';
+  // 仅当待下载条目中「存在无任何直链（domestic/external/absolute）的条目」时才要求
+  // CDN 基础地址已配置；有免费镜像直链的条目（rmbg2/qwen3_fa/frcrn 等）不依赖 cdnBaseUrl。
+  const hasAnyDirect = (e: typeof entries[number]) => !!(e.domesticUrl || e.externalUrl || e.absoluteUrl);
+  if (manifest.baseUrl === DEFAULT_CDN_BASE && entries.some((e) => !hasAnyDirect(e))) {
+    const msg = '当前条目缺少免费镜像直链且未配置自建 CDN：请先在「设置 → AI 组件管理」中填写 CDN 基础地址，再执行补全。';
     event.sender.send('assets:progress', { phase: 'error', error: msg });
     return { success: false, error: msg };
   }
   let doneCount = 0;
   for (const e of entries) {
     const cdnUrl = manifest.baseUrl.replace(/\/$/, '') + '/' + e.remoteRel;
-    // 绝对直链（如 rmbg2 走 ModelScope）优先，用户自建 CDN 兜底（若已配置）。
-    const urls = e.absoluteUrl
-      ? [e.absoluteUrl, ...(manifest.baseUrl !== DEFAULT_CDN_BASE ? [cdnUrl] : [])]
-      : [cdnUrl];
+    // 开源免费分发策略：国内免费镜像优先（ModelScope，实测可 fetch），失败自动回退
+    // 外网直链（huggingface.co/github，海外或代理用户），再回退旧 absoluteUrl，
+    // 最后回退用户自建 CDN（若已配置）。任一候选哈希校验不过即尝试下一候选。
+    const urlCandidates: string[] = [];
+    for (const u of [e.domesticUrl, e.externalUrl, e.absoluteUrl]) {
+      if (u && !urlCandidates.includes(u)) urlCandidates.push(u);
+    }
+    if (manifest.baseUrl !== DEFAULT_CDN_BASE && !urlCandidates.includes(cdnUrl)) {
+      urlCandidates.push(cdnUrl);
+    }
+    const urls = urlCandidates;
     event.sender.send('assets:progress', { id: e.id, name: e.name, phase: 'start', received: 0, total: e.size, percent: 0 });
     try {
       if (e.kind === 'file') {
