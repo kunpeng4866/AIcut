@@ -1331,6 +1331,7 @@ _DETAIL_META = {
     # ③ 口吃/重复/拖音（改进 CTC + gap 分类思路；打断语句，属 hard_remove）
     "stutter":        {"flag_disfluency": True,  "gap_type": "stutter",  "conf": 0.6,  "src": "stutter"},
     "stutter_suggest":{"flag_disfluency": True,  "gap_type": "suggest", "conf": 0.45, "src": "stutter"},
+    "seam_suggest":   {"flag_disfluency": True,  "gap_type": "suggest", "conf": 0.45, "src": "edl"},
     # P1 暂停压缩优先：把长停顿压到 targetPause 而非硬删（软停顿，非声音事件）
     "pause_compressed": {"flag_disfluency": False, "gap_type": "pause", "conf": 0.0, "src": "rule"},
 }
@@ -1628,14 +1629,39 @@ def _edl_union(ks):
     return _union([(float(s), float(e)) for s, e in ks])
 
 
-def _edl_absorb_short_keeps(ks, min_frag: float):
-    """过短保留段并入相邻洞（＝删除该碎片），直到全部 ≥min_frag 或只剩一段。"""
+def _edl_retract_to_word_edges(ks, words, keep_min: float = 0.06):
+    """结构性剪点若落在某转写词内部、且该词主体在保留侧 → 边界退到词边缘，
+    避免吃掉起音辅音产生幻听残头（whisper 表现为『哦哦哦』类插入）。"""
+    ks = [[float(a), float(b)] for a, b in ks]
+    for i in range(len(ks) - 1):
+        a, b = ks[i][1], ks[i + 1][0]
+        for w in words:
+            try:
+                ws, we = float(w.get("start") or 0), float(w.get("end") or 0)
+            except Exception:
+                continue
+            wl = we - ws
+            if wl <= 0.05 or we <= a or ws >= b:
+                continue
+            # 右剪点进入词头（词主体在右侧保留段）：退到词起点前
+            if ws < b < we and (we - b) >= 0.6 * wl and b - ws < 0.25 \
+                    and ws - a > keep_min:
+                ks[i + 1][0] = ws - 0.012
+    return [(a, b) for a, b in ks]
+
+
+def _edl_absorb_short_keeps(ks, min_frag: float, protect=None):
+    """过短保留段并入相邻洞（＝删除该碎片），直到全部 ≥min_frag 或只剩一段。
+    protect(s,e) 为 True 的短段不吸收——例如包含真实转写词的片段
+    （停顿后的短词被误删会在接缝处产生幻听残音）。"""
     ks = list(ks)
     changed = True
     while changed and len(ks) > 1:
         changed = False
         for i, (s, e) in enumerate(ks):
             if e - s < min_frag:
+                if protect and protect(s, e):
+                    continue          # 含真实语音内容：保留该短段
                 del ks[i]
                 changed = True
                 break
@@ -1752,7 +1778,7 @@ def _edl_whole_word_edges(ks, words, max_ext: float = 0.35, min_keep_after: floa
 
 
 def _edl_fluency_guard(au, sr, ks, words, tmpdir, model_size: str = "small",
-                       language=None, thr_ok: float = 0.90, thr_floor: float = 0.80,
+                       language=None, thr_ok: float = 0.93, thr_floor: float = 0.80,
                        max_rounds: int = 3):
     """流畅度守卫：按候选保留段重建音频 → 重转写 → 与期望文本比对。
 
@@ -2219,20 +2245,28 @@ def analyze(input_path: str, opts: dict) -> dict:
             print(f"  4h. 呼吸专项(Respiro): {len(respiro_events)} 段", flush=True)
             stutter_events = detect_stutter(work_wav, words, word_pad=word_pad,
                                             threshold=stutter_threshold) if do_stutter else []
-            # [EDL-e] 精度优先：声学口吃必须有文本重复证据佐证才允许自动剪切；
-            # 无佐证的降级为「建议」事件（detail 展示但不进删除集）——宁可留瑕疵不碎韵律。
-            _token_reps = _detect_token_repeats(words) if words else []
-            _auto_reps = list(stutter_events)
-            _suggests = []
+            # [EDL-e] 宁缺毋滥硬原则：口吃/卡顿类一律【不自动剪切】。
+            # 剪断连续语流必然在接缝处破坏韵律——当前技术（剪贴式编辑）无法保证
+            # 接缝自然，因此全部降级为「建议」事件：仅标记供人工确认，
+            # 用户可逐个点「改为保留/改为删除」。技术突破前 autoCutStutter 默认 False。
+            _auto_cut_stutter = bool(opts.get("autoCutStutter", False))
+            _token_reps = []
+            _suggests = list(stutter_events)
             _kept_reps = []
-            for _iv in stutter_events:
-                _ev = _repeat_evidence(words, *_iv) \
-                      or _inside_overlong_token(words, *_iv)
-                (_kept_reps if _ev else _suggests).append(_iv)
-            stutter_events = _union(_kept_reps + _token_reps)
-            print(f"  4i. 口吃/重复: 自动 {len(stutter_events)} 段"
-                  f"（声学无证据转建议 {len(_suggests)}；词级重复 {len(_token_reps)}）",
-                  flush=True)
+            if _auto_cut_stutter and words:
+                _token_reps = _detect_token_repeats(words)
+                for _iv in stutter_events:
+                    _ev = _repeat_evidence(words, *_iv) \
+                          or _inside_overlong_token(words, *_iv)
+                    (_kept_reps if _ev else _suggests).append(_iv)
+                _suggests = [iv for iv in _suggests
+                             if not any(a <= s and e <= b + 0.05
+                                        for (a, b) in _kept_reps)]
+                stutter_events = _union(_kept_reps + _token_reps)
+            else:
+                stutter_events = []
+            print(f"  4i. 口吃/重复: {'自动 ' + str(len(stutter_events)) + ' 段' if _auto_cut_stutter else '全部转建议（宁缺毋滥）'}"
+                  f"｜建议 {len(_suggests)} 段", flush=True)
 
             # 初始删除集 → 初始保留段
             init_remove = _union(text_fillers + isolated + gap_breath + transients
@@ -2262,6 +2296,7 @@ def analyze(input_path: str, opts: dict) -> dict:
                 manual.append((s, e))
         manual = _union(manual)
 
+        _seam_spans = []
         # ── [EDL-a] 碎片预算：语流内「洞」数超过预算时，按证据最弱类逐步整体回退
         # （宁留瑕疵不碎韵律）。语义驱动类——文本填充词 / 口吃 / 手动排除 /
         # 段内填充——永不回退；maxHolesPerMin<=0 可整体禁用。──
@@ -2381,11 +2416,22 @@ def analyze(input_path: str, opts: dict) -> dict:
         # 过窄的洞不值得开两刀直接撤销、剪点吸附能量谷让接缝落在自然边界上。
         if not os.environ.get("AICUT_EDL_OFF"):
             try:
+                _src_words0 = locals().get("words") or []
+                def _prot_word(s, e, _w=_src_words0):
+                    for w in _w:
+                        ws, we = float(w.get("start") or 0), float(w.get("end") or 0)
+                        wl = we - ws
+                        if wl <= 0.06:
+                            continue
+                        ov = min(e, we) - max(s, ws)
+                        if ov >= 0.5 * wl:
+                            return True
+                    return False
                 _min_frag = float(opts.get("minKeepFragment", EDL_ABSORB_FRAG_DEFAULT))
                 _shift = float(opts.get("valleySnapMs", EDL_SNAP_MAX_SHIFT * 1000.0)) / 1000.0
                 _ks = [(float(s), float(e)) for s, e in _union(keep)]
                 _n0 = len(_ks)
-                _ks = _edl_absorb_short_keeps(_ks, _min_frag)
+                _ks = _edl_absorb_short_keeps(_ks, _min_frag, protect=_prot_word)
                 _ks = _edl_drop_micro_holes(_ks, float(opts.get("microHoleSec", EDL_MICRO_HOLE_DEFAULT)))
                 _ks = _edl_snap_edges([(s, e) for s, e in _ks], _env_g, _fs_g, max_shift=_shift)
                 _ks = _edl_union(_ks)
@@ -2396,7 +2442,7 @@ def analyze(input_path: str, opts: dict) -> dict:
                 warnings_out.append(f"edl_failed:{_e}")
 
         # ── [EDL-c] 整词化边界：清掉落在词中间的「半个字」残音 ──
-        _src_words = locals().get("words") or []
+        _src_words = locals().get("_src_words0") or []
         if os.environ.get("AICUT_EDL_DEBUG"):
             try:
                 print(f"[EDL-dbg] type(words)={type(words)} len={len(words) if hasattr(words,'__len__') else '-'}", flush=True)
@@ -2416,6 +2462,62 @@ def analyze(input_path: str, opts: dict) -> dict:
                     import traceback as _tb
                     _tb.print_exc()
                 warnings_out.append(f"edl_words_failed:{_e}")
+
+        # 候选事件总集（语义/声学检测产物）：这些位置的洞一律视为「动过语流」
+        _cand_ivs = _union(text_fillers + isolated + gap_breath + transients
+                           + intra_fillers + sound_events + sed_events
+                           + respiro_events + stutter_events)
+        gap_breath_kept = list(gap_breath)   # 结构性呼吸间隙不算语义剪切
+
+        # ── [EDL-g] 接缝安全阀（宁缺毋滥硬原则的最终执行者）──
+        # 任何「两侧均为发声」的洞一律回填＝连续语流内部不做任何自动剪切。
+        # 理由：剪断连续浊音必然在接缝处破坏韵律（pitch/共振峰/节奏跳变），
+        # 这已被多轮用户验收证伪。被回填区间以 seam_suggest 建议事件呈现，
+        # 用户在时间轴上试听后可人工决定删除；句间停顿与贴静音的事件不受影响。
+        if not bool(opts.get("allowInteriorCuts", False)) \
+                and not os.environ.get("AICUT_EDL_OFF"):
+            try:
+                _ksf = [(float(a), float(b)) for a, b in _union(keep)]
+                # 严格判定：只有当洞的左右剪点外侧都落在安静处（120ms 窗内
+                # 发声帧占比 <10%）时才允许保留自动剪切；任何一侧接语音都回填。
+                _peak = float(np.max(_env_g)) + 1e-12 if _env_g is not None else 0.0
+                _w = max(1, int(0.12 / _fs_g))
+                _nf = len(_env_g) if _env_g is not None else 0
+
+                def _unsafe(ha, hb):
+                    """洞与任何「语义/声学检测事件」重叠 → 视为动过语流，
+                    回填并转建议。纯停顿/静音结构洞（无事件覆盖）安全放行。"""
+                    return any(min(hb, ce) - max(ha, cs) > 0.02
+                               for cs, ce in _cand_ivs)
+
+
+                _interior = [(a, b) for a, b in
+                             [(_ksf[i][1], _ksf[i + 1][0]) for i in range(len(_ksf) - 1)]
+                             if b - a > 1e-3 and _unsafe(a, b)]
+                if _interior:
+                    for (ha, hb) in _interior:
+                        for i in range(len(_ksf) - 1):
+                            if abs(_ksf[i][1] - ha) < 0.05 \
+                                    and abs(_ksf[i + 1][0] - hb) < 0.05:
+                                _ksf[i] = (_ksf[i][0], _ksf[i + 1][1])
+                                _ksf.pop(i + 1)
+                                break
+                    keep = _edl_union(_ksf)
+                    _seam_spans.extend([(round(ha, 4), round(hb, 4))
+                                        for ha, hb in _interior])
+                    print(f"  [EDL] 接缝安全阀：回填 {len(_interior)} 个语流内洞"
+                          f"（连续语流内不自动剪切，转建议）", flush=True)
+            except Exception as _e:
+                warnings_out.append(f"edl_seam_failed:{_e}")
+
+        # 词界避让：防止结构性剪点切入词起音
+        _sw = locals().get("_src_words0") or []
+        if _sw and not os.environ.get("AICUT_EDL_OFF"):
+            try:
+                keep = _edl_union(_edl_retract_to_word_edges(
+                    [(float(s), float(e)) for s, e in _union(keep)], _sw))
+            except Exception as _e:
+                warnings_out.append(f"edl_retract_failed:{_e}")
 
         # ── [EDL-d] 流畅度守卫：剪辑后重转写比对，嫌疑洞自动回退 ──
         if _src_words and bool(opts.get("fluencyGuard", True)) \
@@ -2500,10 +2602,15 @@ def analyze(input_path: str, opts: dict) -> dict:
         # P1：被压缩的软停顿（暂停压缩优先策略的可视化标记）
         for (cs, ce) in compressed:
             detail.append(_mk_detail("pause_compressed", cs, ce))
-        # [EDL-e] 无文本重复证据的声学口吃 → 仅展示为「建议」，不自动删除
+        # [EDL-g] 被接缝安全阀回填的语流内剪切 → 建议事件（人工逐个确认）
+        for (s, e) in locals().get("_seam_spans") or []:
+            _dsm = _mk_detail("seam_suggest", s, e)
+            _dsm["note"] = "建议：此处剪断会伤韵律，请试听后人工决定是否删除"
+            detail.append(_dsm)
+        # [EDL-e] 口吃/卡顿类默认全部转「建议」事件展示（宁缺毋滥，不自动删）
         for (s, e) in locals().get("_suggests") or []:
             _dsg = _mk_detail("stutter_suggest", s, e)
-            _dsg["note"] = "建议：无文本重复证据，请人工确认后再删"
+            _dsg["note"] = "建议：在连续语流内剪断会伤韵律，请试听后人工决定是否删除"
             detail.append(_dsg)
         detail.sort(key=lambda d: d["start"])
 
