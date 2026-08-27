@@ -1976,8 +1976,13 @@ def analyze(input_path: str, opts: dict) -> dict:
             "assembleHints": {"declick": bool(do_denoise)},
             # P1：暂停压缩优先（输出时间轴增量）+ 语速统计
             "pauseCompress": bool(pause_compress),
-            "keepSegmentsOut": [[float(s), float(e)] for s, e in (keep_out or keep)],
-            "outputDuration": (output_dur if keep_out else round(dur, 6)),
+            # 「真剪掉」守卫：仅当暂停压缩真的产生了更紧凑的输出时间轴（keep_out != keep）
+            # 时才下发 keepSegmentsOut。恒等回退会让 Rust 暂停路径把删除区当成"插入的停顿"
+            # 补成等长静音/冻结帧——删除区变哑段、总时长不缩短，与用户直觉相悖。
+            "keepSegmentsOut": ([[float(s), float(e)] for s, e in keep_out]
+                                if keep_out and keep_out != keep else None),
+            "outputDuration": (round(output_dur, 6) if (keep_out and keep_out != keep)
+                               else round(sum(e - s for s, e in keep), 6)),
             "speakingRate": speaking_rate_stats(words, dur, window=rate_window),
             "energyCurve": energy_curve,
         }

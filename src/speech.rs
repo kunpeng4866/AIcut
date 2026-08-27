@@ -549,7 +549,17 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         });
     let has_positive_pause = (0..out_segs.len().saturating_sub(1))
         .any(|i| (out_segs[i + 1].0 - out_segs[i].1) > 1e-3);
-    let use_pause_compress = segs_valid && has_positive_pause;
+    // 「真剪掉」守卫：暂停压缩仅在输出时间轴确实比源更紧凑（总间隙被压缩）时启用。
+    // keepSegmentsOut 与 keepSegments 恒等时（分析端未做暂停压缩），段间"间隙"其实是
+    // 被删除的内容——若仍走暂停路径会插入等长静音/冻结帧，删除区变哑段、时长不缩短。
+    let src_gaps: f64 = (0..segments.len().saturating_sub(1))
+        .map(|i| (segments[i + 1].0 - segments[i].1).max(0.0))
+        .sum();
+    let out_gaps: f64 = (0..out_segs.len().saturating_sub(1))
+        .map(|i| (out_segs[i + 1].0 - out_segs[i].1).max(0.0))
+        .sum();
+    let is_compressed = out_gaps < src_gaps - 1e-3;
+    let use_pause_compress = segs_valid && has_positive_pause && is_compressed;
 
     let mut seg_paths: Vec<PathBuf> = Vec::with_capacity(segments.len());
     let mut seg_durations: Vec<f64> = Vec::with_capacity(segments.len());
