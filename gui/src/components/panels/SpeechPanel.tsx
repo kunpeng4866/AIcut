@@ -449,6 +449,11 @@ export default function SpeechPanel() {
         previewAutoRef.current = true; // 此后手动调整自动重渲试听
         const up = await upsertPreviewOnTrack(String(res.data.outputPath), Number(res.data.duration) || 0);
         if (!up.ok) setMsg(`试听片段落轨失败：${up.error || '未知原因'}（内嵌播放器仍可试听）`);
+        else if (up.trackId) {
+          const idx = useProjectStore.getState().project.tracks.findIndex((t) => t.id === up.trackId);
+          document.querySelector(`[data-track-id="${up.trackId}"]`)?.scrollIntoView({ block: 'center' });
+          setMsg(`试听片段已放到时间轴第 ${idx + 1} 条轨（源素材轨下方，源轨已自动静音以便对照）`);
+        }
       } else setMsg(res.error || '试听生成失败');
     } catch (e) {
       setMsg(`试听异常：${e instanceof Error ? e.message : String(e)}`);
@@ -532,6 +537,10 @@ export default function SpeechPanel() {
         // 原始素材所在轨道永远不动，源片段保留供对比（用户硬性要求）。
         const up2 = await upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
         if (!up2.ok) { setError(`落轨失败：${up2.error || '未知原因'}`); return; }
+        if (up2.trackId) {
+          const idx = useProjectStore.getState().project.tracks.findIndex((t) => t.id === up2.trackId);
+          document.querySelector(`[data-track-id="${up2.trackId}"]`)?.scrollIntoView({ block: 'center' });
+        }
         setMsg('已生成最终清洗片段（独立轨，覆盖试听片段；原始素材保留，可对比）。建议标记仍保留，可继续微调后再次生成。');
       } else {
         setError(res2.error || '生成失败');
@@ -589,43 +598,11 @@ export default function SpeechPanel() {
         };
         const res2 = await window.aicut.speech.assemble(a.path, JSON.stringify(asmOpts));
         if (!res2.success || !res2.data) throw new Error(res2.error || '生成失败');
-        const asset = {
-          id: uid('asset'),
-          type: a.type, // 'video' | 'audio'
-          path: res2.data.outputPath,
-          duration: res2.data.duration,
-          fps: a.fps,
-        };
-        useProjectStore.getState().addAsset(asset);
-        // 落轨：音频源产物落音频轨、视频源产物落主视频轨（与单片段一致）。
-        const st = useProjectStore.getState();
-        let track = a.type === 'audio'
-          ? st.project.tracks.find((t) => t.type === 'audio')
-          : st.getMainVideoTrack();
-        if (!track) {
-          const tid = st.addTrack(a.type === 'audio' ? 'audio' : 'video');
-          track = st.project.tracks.find((t) => t.id === tid);
-        }
-        if (track) {
-          const lastClip = track.clips[track.clips.length - 1];
-          const start = lastClip ? lastClip.timelineOut : 0;
-          const duration = res2.data.duration || asset.duration || 5;
-          const clip: ClipConfig = {
-            id: uid('clip'),
-            assetId: asset.id,
-            src_range: { start: 0, end: duration },
-            timelineIn: start,
-            timelineOut: start + duration,
-            transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
-            volume: 1,
-            speed: 1,
-            effects: [],
-            masks: [],
-            filters: [],
-            keyframes: {},
-          };
-          st.addClip(track.id, clip);
-        }
+        // 硬约束统一：批量产物同样落「独立新轨」（绝不落在源素材所在轨道），
+        // 并自动静音源轨进入对照模式；每段素材各自一条新轨，互不覆盖。
+        await upsertPreviewOnTrack(String(res2.data.outputPath), Number(res2.data.duration) || 0, true);
+        // 批量场景下每段素材需要独立轨道：重置引用，让下一段强制新建
+        previewClipRef.current = null;
         setBatchItems((prev) => prev.map((it, i) => (i === idx ? { ...it, status: 'ok', msg: '已生成' } : it)));
       } catch (e) {
         setBatchItems((prev) => prev.map((it, i) => (i === idx ? { ...it, status: 'fail', msg: e instanceof Error ? e.message : String(e) } : it)));
