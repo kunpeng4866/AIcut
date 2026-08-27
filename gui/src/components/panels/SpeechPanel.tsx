@@ -395,7 +395,9 @@ export default function SpeechPanel() {
     const st = useProjectStore.getState();
     const previewAsset = {
       id: uid('asset'),
-      type: 'audio' as const,          // 试听对照轨恒为音频轨（视频源产出的 mp4 也只用其音轨对照）
+      // 视频源产出的 mp4 含视频轨，试听/成品轨与源同类型（视频源→视频轨），
+      // 保证成品在时间轴上既有画面也有声音
+      type: (selectedAsset.type === 'video' ? 'video' : 'audio') as 'video' | 'audio',
       path: assetPath,
       duration: dur,
       fps: selectedAsset.fps,
@@ -405,11 +407,20 @@ export default function SpeechPanel() {
     let trackId = previewClipRef.current?.trackId;
     let track = trackId ? st.project.tracks.find((t) => t.id === trackId) : undefined;
     if (!track) {
-      const tid = st.addTrack('audio'); // 新音频轨（排列在既有音频轨之下）
+      const tid = st.addTrack(selectedAsset.type === 'video' ? 'video' : 'audio');
       trackId = tid;
       track = useProjectStore.getState().project.tracks.find((t) => t.id === tid);
     }
     if (!track) return;
+    // 硬约束：试听/成品轨绝不允许是原始素材所在的轨道（源素材保留做对照）
+    const srcTrackId = st.project.tracks
+      .find((t) => t.clips.some((c) => c.assetId === selectedAsset.id))?.id;
+    if (srcTrackId && track.id === srcTrackId) {
+      const tid = st.addTrack(selectedAsset.type === 'video' ? 'video' : 'audio');
+      trackId = tid;
+      track = useProjectStore.getState().project.tracks.find((t) => t.id === tid);
+      if (!track) return;
+    }
     // 与源素材片段对齐：播放头一致性对照
     const srcClip = st.project.tracks
       .flatMap((t) => t.clips)
@@ -554,58 +565,11 @@ export default function SpeechPanel() {
       const res2 = await window.aicut.speech.assemble(original.path, JSON.stringify(asmOpts));
       if (res2.success && res2.data) {
         const finalDur = Number(res2.data.duration) || 0;
-        // 用户要求③：时间轴上已有试听片段 → 用最终清洗片段【替换】它（位置不变），
-        // 不再追加重复片段；原素材片段保留可对比。
-        const pc = previewClipRef.current;
-        const previewAlive = pc
-          ? useProjectStore.getState().project.tracks
-              .find((t) => t.id === pc.trackId)?.clips.some((c) => c.id === pc.clipId)
-          : false;
-        if (previewAlive && pc) {
-          upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
-          setMsg('已生成最终清洗片段并替换时间轴上的试听片段（原素材保留，可对比）。建议标记仍保留，可继续微调后再次生成。');
-          return;
-        }
-        clearSpeechOverlay();
-        const asset = {
-          id: uid('asset'),
-          type: original.type, // 'video' | 'audio'
-          path: res2.data.outputPath,
-          duration: res2.data.duration,
-          fps: original.fps,
-        };
-        useProjectStore.getState().addAsset(asset);
-        // 严禁乱放：按素材类型落轨——音频源产物落音频轨、视频源产物落主视频轨。
-        // 口播清洗对纯音频源（如 m4a）产出的 _speechcut.mp4 是纯音频，必须落音频轨，绝不能放视频轨。
-        const st = useProjectStore.getState();
-        let track = original.type === 'audio'
-          ? st.project.tracks.find((t) => t.type === 'audio')
-          : st.getMainVideoTrack();
-        if (!track) {
-          const tid = st.addTrack(original.type === 'audio' ? 'audio' : 'video');
-          track = st.project.tracks.find((t) => t.id === tid);
-        }
-        if (track) {
-          const lastClip = track.clips[track.clips.length - 1];
-          const start = lastClip ? lastClip.timelineOut : 0;
-          const duration = res2.data.duration || asset.duration || 5;
-          const clip: ClipConfig = {
-            id: uid('clip'),
-            assetId: asset.id,
-            src_range: { start: 0, end: duration },
-            timelineIn: start,
-            timelineOut: start + duration,
-            transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
-            volume: 1,
-            speed: 1,
-            effects: [],
-            masks: [],
-            filters: [],
-            keyframes: {},
-          };
-          st.addClip(track.id, clip);
-        }
-        setMsg('已生成清洗片段并加入时间轴（原片段保留，可对比）。');
+        // 统一落位：无论是否生成过试听，最终清洗片段都在「独立新轨」上——
+        // 已有试听片段则【替换】它（同 clipId、位置不变）；没有则在该轨新建。
+        // 原始素材所在轨道永远不动，源片段保留供对比（用户硬性要求）。
+        upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
+        setMsg('已生成最终清洗片段（独立轨，覆盖试听片段；原始素材保留，可对比）。建议标记仍保留，可继续微调后再次生成。');
       } else {
         setError(res2.error || '生成失败');
       }
