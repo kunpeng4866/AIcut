@@ -25,6 +25,7 @@ gap 标为「含语音（空 gap 里有口吃/重复音）」或「空 gap（纯
 即可，detect_stutter 接口签名保持不变（见文末 _backbone 注释）。
 """
 import os
+import sys
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -287,6 +288,143 @@ def _detect_block(env: np.ndarray, sr: int, thr: float,
 
 
 # ───────────────────────── 顶层接口 ─────────────────────────
+# ───────────────────── 词内连读重复（gap-less 口吃，音节脉冲链判据） ─────────────────────
+# 背景：Whisper 有"流利化"倾向，会把「我我我觉得」合并转写成单个词 [我觉得]，词时间戳
+# 覆盖全部三个"我"。① 文本匹配通道没有独立 token；② 外部声学事件被词保护区安全阀丢弃。
+#
+# 判据（**音节脉冲一致性链**）：
+#   在 ASR 词区间内按能量谷切分「音节脉冲」——同一字的重复（我/我/我）其整段频谱
+#   包络高度一致（逐对余弦 ≥ 阈值），而正常相连的不同字（我→觉→得）彼此显著不同。
+#   因此：连续 ≥3 个"两两一致的相同脉冲链"即判定为口吃重复，删除该链但保留最后一个
+#   脉冲（最后一个往往承载真实语义并与后文连读）。
+# 守卫（整体防误伤）：常见叠词白名单（妈妈/谢谢等）/ 单脉冲不足跳过 / 删除段 ≤ 词跨度
+#   70% 且最短 0.15s / 全局每次分析最多保留 8 个。返回的事件 **绕过词保护区安全阀**。
+_LEXICAL_REDUP = {
+    "妈妈", "爸爸", "爷爷", "奶奶", "叔叔", "阿姨", "舅舅", "姥姥", "哥哥", "弟弟", "姐姐",
+    "谢谢", "刚刚", "慢慢", "渐渐", "轻轻", "常常", "往往", "天天", "年年", "人人", "家家",
+    "宝宝", "乖乖", "试试", "看看", "听听", "想想", "讲讲", "说说", "读读", "写写", "瞧瞧",
+    "纷纷", "久久", "悄悄", "恰恰", "仅仅", "统统", "种种", "点点",
+}
+_FUNC_TAIL = set("的呢吧嘛啊呀哦嗯哩咯哟")
+
+
+def _strip_punct(t: str) -> str:
+    return "".join(ch for ch in t if ch.isalnum())
+
+
+def _detect_inword_repeat(au: np.ndarray, sr: int, words: list,
+                          threshold: float) -> list:
+    """词内连读重复（音节脉冲链）。返回 [(s,e)]，按长度降序、最多 8 个。"""
+    if not words or len(words) < 3 or len(au) < int(0.5 * sr):
+        return []
+    # 相邻同文 token 预合并：「我」「我」「我」这类口吃重复在 Whisper 词级输出里
+    # 常是多个独立的短 token（各 ~0.15s，单看都够不到检测下限）。把相邻且转写文本
+    # 相同的 token 合并成一个长区间（span 取并集），后续脉冲链判据在其上工作。
+    merged_words = []
+    for w in words:
+        try:
+            s = max(0.0, float(w["start"]))
+            e = min(len(au) / sr, float(w["end"]))
+        except Exception:
+            continue
+        t = _strip_punct(str(w.get("word", w.get("text", ""))))
+        if not t:
+            continue
+        if merged_words and merged_words[-1]["txt"] == t and s - merged_words[-1]["end"] < 0.25:
+            merged_words[-1]["end"] = max(merged_words[-1]["end"], e)
+            continue
+        merged_words.append({"start": s, "end": e, "txt": t})
+    words = merged_words
+    fsec = 0.005
+    fh = max(1, int(sr * fsec))
+    nf = len(au) // fh
+    au0 = au[:nf * fh] - np.mean(au[:nf * fh])
+    rms = np.sqrt(np.mean(au0.reshape(nf, fh) ** 2, axis=1))
+    g_max = float(np.max(rms)) + 1e-9
+
+    edges = np.logspace(np.log10(80.0), np.log10(min(4000.0, sr / 2 * 0.95)), 25)
+    sim_thr = max(0.68, 0.90 - threshold)
+
+    results = []
+    for w in words:
+        s, e = float(w["start"]), float(w["end"])
+        txt = w["txt"]
+        chars = len(txt)
+        if not txt or (e - s) < 0.30 or txt in _LEXICAL_REDUP:
+            continue
+        i0, i1 = int(s / fsec), min(nf, int(e / fsec))
+        seg_rms = rms[i0:i1]
+        if seg_rms.size < 20:
+            continue
+        lo = float(np.max(seg_rms)) * 0.32          # 局部谷阈值：低于它的连续帧为音节间隙
+        # ── 按谷切分脉冲 ──
+        pulses = []
+        k = 0
+        while k < seg_rms.size:
+            if seg_rms[k] > lo:
+                j = k
+                while j < seg_rms.size and seg_rms[j] > lo:
+                    j += 1
+                if (j - k) * fsec >= 0.05:          # 脉冲最短 50ms
+                    pulses.append((i0 + k, i0 + j))
+                k = j
+            else:
+                k += 1
+        if len(pulses) < 3 or len(pulses) > 14:
+            continue
+        # ── 脉冲特征（核心 60% 帧的频带均值，log 压缩，L2 归一化）──
+        feats = []
+        for (pa, pb) in pulses:
+            plen = pb - pa
+            ca = pa + int(plen * 0.15)
+            cb = pa + max(ca + fh + 1, int(plen * 0.85))
+            nfr = cb - ca
+            sub = au[ca * fh:cb * fh] + 1e-12
+            wl = len(sub)
+            mag = np.abs(np.fft.rfft(sub * np.hanning(wl)) + 1e-12)
+            freqs = np.fft.rfftfreq(wl, 1.0 / sr)
+            f = np.array([float(np.mean(mag[(freqs >= a) & (freqs < b_)]))
+                          for a, b_ in zip(edges[:-1], edges[1:])], dtype=np.float32)
+            f = np.log1p(f)
+            feats.append(f / (np.linalg.norm(f) + 1e-6))
+        # ── 相邻脉冲一致性链 ──
+        cons = [float(np.dot(feats[k], feats[k + 1])) for k in range(len(feats) - 1)]
+        # 找最长连续高相似 run（允许单对谷值一次豁免，应对轻微断续）
+        best_len, best_i, miss_used = 1, 0, False
+        cur_len, cur_i = 1, 0
+        for k, c in enumerate(cons):
+            if c >= sim_thr:
+                cur_len += 1
+            elif not miss_used and cur_len >= 2:
+                miss_used = True                    # 一帧浅谷豁免
+            else:
+                if cur_len > best_len:
+                    best_len, best_i = cur_len, cur_i
+                cur_len, cur_i = 1, k + 1
+        if cur_len > best_len:
+            best_len, best_i = cur_len, cur_i
+        if best_len < 3:
+            continue                                 # 至少 3 个相同脉冲才算口吃链
+        # 删除链中「除最后一个脉冲外」的全部重复，保留末脉冲（承载真实语义并与后文连读）
+        keep_idx = best_i + best_len - 1                      # 末脉冲索引
+        rm_first = pulses[best_i][0]
+        rm_last = pulses[max(best_i, keep_idx - 1)][1]        # 删到倒数第二个脉冲为止
+        rs_t = rm_first * fsec          # 帧索引 → 秒（5ms 网格）
+        re_t = rm_last * fsec
+        if re_t - rs_t < 0.14 or (re_t - rs_t) > 0.78 * (e - s):
+            continue
+        # 单字功能词短跨度更像自然拖长音
+        if chars <= 2 and txt[-1] in _FUNC_TAIL and (e - s) < 0.55:
+            continue
+        out_s = round(rs_t, 4)
+        out_e = round(re_t - min(0.04, (re_t - rs_t) * 0.2), 4)   # 尾部略收保护后续内容
+        if out_e - out_s >= 0.15:
+            results.append((out_s, out_e))
+
+    results.sort(key=lambda x: -(x[1] - x[0]))
+    return results[:8]
+
+
 def detect_stutter(wav_path, words, word_pad: float = 0.08, threshold: float = 0.5,
                    min_dur: float = 0.10, max_dur: float = 3.0) -> list:
     """口吃/重复/拖音检测（P0 声学落地）。返回 list[(start, end)]（源秒）。
@@ -332,7 +470,21 @@ def detect_stutter(wav_path, words, word_pad: float = 0.08, threshold: float = 0
     if words:
         word_ivs = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
                            for w in words if "start" in w and "end" in w])
-    return _apply_word_safety(ivs, word_ivs) if word_ivs else ivs
+    safe = _apply_word_safety(ivs, word_ivs) if word_ivs else ivs
+    # 词内连读重复（gap-less 口吃，如「我我我觉得」被 ASR 流利化成 [我觉得]）：
+    # 绕过词保护区安全阀（其天然位于词内部），自带叠词白名单/语速门控/跨度上限三重守卫。
+    try:
+        inword = _detect_inword_repeat(au, sr, words, threshold)
+        if os.environ.get("AICUT_STUTTER_DEBUG"):
+            sys.stderr.write(
+                f"[stutter-debug] merged_words={[(round(w['start'],2), round(w['end'],2), w['txt']) for w in words]}\n"
+                f"[stutter-debug] inword={inword}\n")
+    except Exception as _e:
+        if os.environ.get("AICUT_STUTTER_DEBUG"):
+            import traceback
+            traceback.print_exc()
+        inword = []
+    return _union(safe + inword)
 
 
 # ───────────────────────── 方案 A 接入预留（当前未启用） ─────────────────────────
