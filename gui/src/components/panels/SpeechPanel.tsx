@@ -11,6 +11,7 @@ import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
 import type { ClipConfig, SpeechEditOptions, SpeechEditResult, SpeechAssembleOptions } from '../../types';
 import { useConfigStore } from '../../store/configStore';
+import { upsertPreviewOnTrack as upsertPreviewTrack } from '../../utils/speechPreviewTrack';
 
 // 生成唯一ID（与 MediaPanel.tsx 同款实现）
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -390,80 +391,16 @@ export default function SpeechPanel() {
   // 位置对齐源素材片段的 timelineIn → 播放头移动时，源轨与试听轨同步发声，
   // 便于对照判断删除位置与 AI 分析结果（用户要求①）。
   // 已存在试听片段时只替换其资产/时长（同 clipId）→ 不产生重复堆积（用户要求③的基础）。
-  const upsertPreviewOnTrack = async (assetPath: string, dur: number, isFinal = false) => {
-    if (!selectedAsset) return;
-    let assetPathOut = assetPath;
-    // 视频源产出的 mp4 含视频轨：抽成纯音频 m4a 后再上轨。
-    // 若直接把视频资产放上音频轨，addClip 的类型纠偏守卫会把它重定向回
-    // 主视频轨（=原素材所在轨道），造成「试听片段覆盖原始素材」。
-    if (selectedAsset.type === 'video') {
-      const m4a = assetPath.replace(/\.mp4$/i, '_preview.m4a');
-      const r = await window.aicut.media.extractAudio(assetPath, m4a);
-      if (!r.success || !r.path) {
-        setMsg(`试听音频轨抽取失败：${r.error || '未知错误'}`);
-        return;
-      }
-      assetPathOut = r.path;
-    }
-    const st = useProjectStore.getState();
-    const previewAsset = {
-      id: uid('asset'),
-      type: 'audio' as const,          // 对照轨恒为音频轨：与源视频轨互不干扰
-      path: assetPathOut,
-      duration: dur,
-      fps: selectedAsset.fps,
-    };
-    st.addAsset(previewAsset);
-    const tracksNow = () => useProjectStore.getState().project.tracks;
-    // 定位/创建试听轨：优先复用已有试听片段所在的轨
-    let trackId = previewClipRef.current?.trackId;
-    let track = trackId ? tracksNow().find((t) => t.id === trackId) : undefined;
-    if (!track) {
-      const tid = st.addTrack('audio');
-      track = tracksNow().find((t) => t.id === tid);
-    }
-    if (!track) return;
-    // 硬约束：试听/成品轨绝不允许是原始素材所在的轨道（源素材保留做对照）
-    const srcTrackId = tracksNow()
-      .find((t) => t.clips.some((c) => c.assetId === selectedAsset.id))?.id;
-    if (srcTrackId && track.id === srcTrackId) {
-      const tid = st.addTrack('audio');
-      track = tracksNow().find((t) => t.id === tid);
-      if (!track) return;
-    }
-    // 与源素材片段对齐：播放头一致性对照
-    const srcClip = tracksNow()
-      .flatMap((t) => t.clips)
-      .find((c) => c.assetId === selectedAsset.id);
-    const tin = srcClip ? srcClip.timelineIn : 0;
-    const existingId = previewClipRef.current?.clipId;
-    const existing = existingId ? track.clips.find((c) => c.id === existingId) : undefined;
-    if (existingId && existing) {
-      st.updateClip(track.id, existingId, {
-        assetId: previewAsset.id,
-        src_range: { start: 0, end: dur },
-        timelineIn: tin,
-        timelineOut: tin + dur,
-      });
-    } else {
-      const clip: ClipConfig = {
-        id: uid('clip'),
-        assetId: previewAsset.id,
-        src_range: { start: 0, end: dur },
-        timelineIn: tin,
-        timelineOut: tin + dur,
-        transform: { x: 0.5, y: 0.5, scale_x: 1, scale_y: 1, rotation: 0, opacity: 1 },
-        volume: 1,
-        speed: 1,
-        effects: [],
-        masks: [],
-        filters: [],
-        keyframes: {},
-      };
-      st.addClip(track.id, clip);
-      previewClipRef.current = { clipId: clip.id, trackId: track.id };
-    }
-  };
+
+  // 落轨逻辑在 utils/speechPreviewTrack.ts（可测模块）；此处仅注入依赖
+  const upsertPreviewOnTrack = (assetPath: string, dur: number, isFinal = false) =>
+    upsertPreviewTrack({
+      getStore: useProjectStore.getState,
+      selectedAsset,
+      extractAudio: (s, d) => window.aicut.media.extractAudio(s, d),
+      previewRef: previewClipRef,
+      onMessage: (m) => setMsg(m),
+    }, assetPath, dur, isFinal);
 
   const handlePreview = async () => {
     if (!selectedAsset || !result) return;
