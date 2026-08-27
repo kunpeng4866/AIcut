@@ -1913,6 +1913,10 @@ def analyze(input_path: str, opts: dict) -> dict:
                                 sed_events + respiro_events +
                                 stutter_events +
                                 vad_sil + manual)
+            if os.environ.get("AICUT_KEEP_DEBUG"):
+                import sys as _s
+                _hit = [(round(s,2), round(e,2)) for s,e in _union(all_remove) if e > 12.4 and s < 14.6]
+                print(f"[keep-debug] all_remove@12.4-14.6: {_hit}", file=_s.stderr)
             keep = _complement(all_remove, dur, min_keep=0.0)
         else:
             keep = []
@@ -1923,6 +1927,11 @@ def analyze(input_path: str, opts: dict) -> dict:
                        stutter_events +
                        manual)
                       if e > vs and s < ve]
+                if os.environ.get("AICUT_KEEP_DEBUG"):
+                    _near = [(round(s2,2), round(e2,2)) for s2,e2 in rm if e2>12.4 and s2<14.6]
+                    _hit = [x for x,_n in zip([1],_near)] and any(e2>13.21 and s2<13.43 for s2,e2 in _near)
+                    import sys as _s
+                    print(f"[keep-debug] reg {round(vs,2)}-{round(ve,2)} rm@12.4-14.6={_near} 目标在rm={bool(_near) and any(1 for _a,_b in _near if _b>13.21 and _a<13.43)}", file=_s.stderr)
                 if not rm:
                     keep.append((vs, ve))
                     continue
