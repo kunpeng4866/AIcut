@@ -2519,6 +2519,26 @@ def analyze(input_path: str, opts: dict) -> dict:
             except Exception as _e:
                 warnings_out.append(f"edl_retract_failed:{_e}")
 
+        # ── [EDL-h] 首尾词保护：任何转写词都不允许被头部/尾部裁剪吞掉 ──
+        # （问候语「大家好」被头删吃掉 = 不可接受的用户可见错误）
+        if _sw and not os.environ.get("AICUT_EDL_OFF"):
+            try:
+                _kkh = [(float(a), float(b)) for a, b in _union(keep)]
+                _fw = min(float(w.get("start") or 0) for w in _sw)
+                _lw = max(float(w.get("end") or 0) for w in _sw)
+                changed = False
+                if _kkh[0][0] > _fw + 0.03:      # 头部裁剪吃掉了首个词
+                    _kkh[0] = (max(0.0, _fw - 0.04), _kkh[0][1])
+                    changed = True
+                if _kkh[-1][1] < _lw - 0.03:     # 尾部裁剪吃掉了末个词
+                    _kkh[-1] = (_kkh[-1][0], min(dur, _lw + 0.06))
+                    changed = True
+                if changed:
+                    keep = _edl_union(_kkh)
+                    print(f"  [EDL] 首尾词保护：开头/结尾裁剪退回到词边界", flush=True)
+            except Exception as _e:
+                warnings_out.append(f"edl_headtail_failed:{_e}")
+
         # ── [EDL-d] 流畅度守卫：剪辑后重转写比对，嫌疑洞自动回退 ──
         if _src_words and bool(opts.get("fluencyGuard", True)) \
                 and not os.environ.get("AICUT_EDL_OFF"):
