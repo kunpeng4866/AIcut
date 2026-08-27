@@ -1643,6 +1643,7 @@ def analyze(input_path: str, opts: dict) -> dict:
         # 降噪后的音频既进 ASR 也进各声学检测器（噪声底更低 → 事件 onset 更干净）；
         # 失败一律 no-op 降级 + warning，绝不阻断分析。
         denoise_method = "none"
+        enhanced_audio_path = ""
         if do_denoise:
             print("[1b] 降噪…", flush=True)
             dn_path = os.path.join(tmp, "_work_denoised.wav")
@@ -1651,6 +1652,16 @@ def analyze(input_path: str, opts: dict) -> dict:
                 mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
             if ok_dn:
                 work_wav = dn_path
+                # 「干净人声直接入片」：把降噪后的波形持久化到源文件旁并随结果返回；
+                # Rust 组装端检测到 enhancedAudioPath 时用它重建成片音轨（波形与源
+                # 时间轴零平移对齐）。复制失败不阻断分析，仅告警并回退原声成片。
+                try:
+                    enhanced_audio_path = os.path.splitext(input_path)[0] + "_denoised.wav"
+                    shutil.copyfile(dn_path, enhanced_audio_path)
+                except Exception as copy_err:
+                    enhanced_audio_path = ""
+                    warnings_out.append(f"enhanced_audio_copy_failed: {copy_err}")
+                    print(f"  [WARN] 降噪波形持久化失败({copy_err})，成片将用原声", flush=True)
                 print(f"  [OK] 降噪完成（{denoise_method}）", flush=True)
             else:
                 print(f"  [SKIP] 降噪未生效（{dn_warn}），使用原音频", flush=True)
@@ -1959,6 +1970,9 @@ def analyze(input_path: str, opts: dict) -> dict:
             # P0-B：denoise 标志透传 —— Rust speech_assemble 可据此启用 declick/adeclick
             "denoise": bool(do_denoise),
             "denoiseMethod": denoise_method,
+            # 「干净人声直接入片」：降噪成功时为源旁的 *_denoised.wav 持久化路径（16k mono）；
+            # Rust assemble 检测到该字段且文件存在时用它重建成片音轨
+            "enhancedAudioPath": enhanced_audio_path,
             "assembleHints": {"declick": bool(do_denoise)},
             # P1：暂停压缩优先（输出时间轴增量）+ 语速统计
             "pauseCompress": bool(pause_compress),

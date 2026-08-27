@@ -335,6 +335,7 @@ export interface SpeechEditResult {
   outputDuration?: number;                // 输出总时长（<= duration，停顿被压缩）
   speakingRate?: any;                     // 语速统计（overall_cps / median_cps / windows / anomalies）
   energyCurve?: number[];                 // 帧 RMS 能量曲线(相对量纲, 前端自行归一化), 约300点
+  enhancedAudioPath?: string;             // 「干净人声直接入片」：降噪成功时为源旁 *_denoised.wav 路径；assemble 时透传给 Rust 重建成片音轨
 }
 
 // assemble（生成清洗文件）的输出
@@ -358,6 +359,7 @@ export interface SpeechAssembleOptions {
   musicSegments?: [number, number][]; // 纯伴奏桥接段（separated 时与 keepSegments 交替拼接，gap 音乐不丢）
   keepSegmentsOut?: [number, number][]; // 输出时间轴保留段（暂停压缩后）；提供时 Rust assemble 在段间插入短暂停而非全删
   videoSync?: boolean; // Mode Ⅱ 视频同步剪切（默认 true）：分离重组时视频按与音频相同的源区间逐段切+concat，保持同步；false=Mode Ⅰ 保留整段原视频仅换音轨
+  enhancedAudioPath?: string; // 「干净人声直接入片」：降噪波形路径（analyze 返回 enhancedAudioPath 时透传）；Rust 用它按 keepSegments 重建成片音轨替换原声
 }
 
 export interface SpeechAPI {

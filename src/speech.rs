@@ -72,6 +72,10 @@ struct SpeechAssembleOptions {
     /// 纯伴奏桥接段（separated 时与 keep_segments 交替拼接，gap 音乐不丢）。
     #[serde(default)]
     music_segments: Option<Vec<(f64, f64)>>,
+    /// 「干净人声直接入片」：Python analyze 持久化的降噪波形（16k mono wav，与源时间轴
+    /// 零平移对齐）。提供且文件存在时，成片音轨改由该波形按 keep_segments 重建（替换原声）。
+    #[serde(default)]
+    enhanced_audio_path: Option<String>,
 }
 
 fn default_crossfade_ms() -> f64 {
@@ -135,6 +139,144 @@ fn audio_post_filters(declick: bool, deess: bool, normalize: bool) -> Option<Str
     } else {
         Some(af.join(","))
     }
+}
+
+/// 「干净人声直接入片」后处理：用 Python analyze 持久化的降噪波形重建成片音轨并替换。
+///
+/// 降噪波形与源时间轴零平移对齐（dfn3/frcrn 均为纯频谱运算、无时移），因此直接按
+/// keep_segments 相同的源区间切割拼接即可与视频严格同步：
+/// - 普通/crossfade 路径：各段 atrim 后 concat，段首尾 5ms 微淡入出防拼接咔哒；
+///   crossfade 路径视频本就是 concat 硬切（无重叠），音频同样用普通 concat 保持逐点同步
+///   （若沿用旧 acrossfade 链会累计比视频短 cf*(n-1)）；
+/// - 暂停压缩路径：段间按 keepSegmentsOut 的间隙插入等长数字静音（anullsrc），与冻结帧对齐。
+/// 最后视频 `-c:v copy` 与重建音轨封装（音频重编 48k 立体声 AAC）；纯音频输入（无视频轨）
+/// 则直接把重建音轨编码为输出文件。末级追加减 click/de-ess/normalize（与原链路一致）。
+fn replace_audio_with_enhanced(
+    ff: &str,
+    output_path: &str,
+    enhanced_wav: &str,
+    segments: &[(f64, f64)],
+    use_pause_compress: bool,
+    out_segs: &[(f64, f64)],
+    has_video: bool,
+    post_af: Option<&str>,
+) -> Result<(), AppError> {
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let track_path = temp_dir.join(format!("aicut_speech_enh_{}.wav", pid));
+    let track_str = track_path.to_string_lossy().replace('\\', "/");
+
+    // 1) 构建 filter_complex：按源区间从降噪波形切段（暂停路径在段间补等长静音桥）
+    let mut fc = String::new();
+    let mut labels: Vec<String> = Vec::new();
+    for (i, (s, e)) in segments.iter().enumerate() {
+        let dur = (e - s).max(0.0);
+        let mut chain = format!("[0:a]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS", s, e);
+        // 段首尾 5ms 微淡入出（段长 <20ms 时跳过，防 afade 参数越界）
+        if dur > 0.02 {
+            chain.push_str(&format!(
+                ",afade=t=in:st=0:d=0.005,afade=t=out:st={:.6}:d=0.005",
+                dur - 0.005
+            ));
+        }
+        fc.push_str(&chain);
+        fc.push_str(&format!("[a{}];", i));
+        labels.push(format!("a{}", i));
+        if use_pause_compress && i + 1 < segments.len() {
+            let gap = (out_segs[i + 1].0 - out_segs[i].1).max(0.0);
+            if gap > 1e-3 {
+                fc.push_str(&format!(
+                    "anullsrc=r=16000:cl=mono,atrim=start=0:end={:.6},asetpts=PTS-STARTPTS[g{}];",
+                    gap, i
+                ));
+                labels.push(format!("g{}", i));
+            }
+        }
+    }
+    let ins: String = labels.iter().map(|l| format!("[{}]", l)).collect();
+    fc.push_str(&format!("{}concat=n={}:v=0:a=1[cat];", ins, labels.len()));
+    match post_af {
+        Some(af) if !af.is_empty() => fc.push_str(&format!("[cat]{}[aout]", af)),
+        _ => fc.push_str("[cat]anull[aout]"),
+    }
+
+    // 2) 从降噪波形合成完整音轨（pcm wav 中转）
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        enhanced_wav.to_string(),
+        "-filter_complex".into(),
+        fc,
+        "-map".into(),
+        "[aout]".into(),
+        "-c:a".into(),
+        "pcm_s16le".into(),
+        track_str.clone(),
+    ];
+    let out = Command::new(ff)
+        .args(&args)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let _ = std::fs::remove_file(&track_path);
+        return Err(AppError::Render(format!(
+            "降噪音轨重建失败 (退出码 {:?}): {}",
+            out.status.code(),
+            stderr.chars().take(800).collect::<String>()
+        )));
+    }
+
+    // 3) 封装：视频 copy + 音轨替换；无视频轨（纯音频输入）直接编码输出。
+    //    临时文件必须与输出同目录：跨盘 rename 会失败（os error 17），同目录 rename 原子且必有同一卷。
+    let tmp_out = std::path::PathBuf::from(format!("{}.enh_tmp.mp4", output_path));
+    let tmp_str = tmp_out.to_string_lossy().replace('\\', "/");
+    let _ = std::fs::remove_file(&tmp_out);
+    let mut mux: Vec<String> = vec!["-y".into()];
+    if has_video {
+        mux.push("-i".into());
+        mux.push(output_path.to_string());
+    }
+    mux.push("-i".into());
+    mux.push(track_str.clone());
+    if has_video {
+        mux.push("-map".into());
+        mux.push("0:v".into());
+        mux.push("-map".into());
+        mux.push("1:a".into());
+        mux.push("-c:v".into());
+        mux.push("copy".into());
+    } else {
+        mux.push("-map".into());
+        mux.push("0:a".into());
+    }
+    mux.push("-c:a".into());
+    mux.push("aac".into());
+    mux.push("-b:a".into());
+    mux.push("160k".into());
+    mux.push("-ar".into());
+    mux.push("48000".into());
+    mux.push("-ac".into());
+    mux.push("2".into());
+    mux.push("-shortest".into());
+    mux.push(tmp_str.clone());
+    let out = Command::new(ff)
+        .args(&mux)
+        .output()
+        .map_err(|e| AppError::Render(format!("无法启动 ffmpeg ({}): {}", ff, e)))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let _ = std::fs::remove_file(&track_path);
+        return Err(AppError::Render(format!(
+            "降噪音轨封装失败 (退出码 {:?}): {}",
+            out.status.code(),
+            stderr.chars().take(800).collect::<String>()
+        )));
+    }
+    std::fs::rename(&tmp_out, output_path)
+        .map_err(|e| AppError::Render(format!("替换音轨后回写失败: {}", e)))?;
+    let _ = std::fs::remove_file(&track_path);
+    Ok(())
 }
 
 /// 生成「暂停」片段：冻结 `prev_seg` 的末帧并叠加静音音频，时长 `pause` 秒。
@@ -548,6 +690,21 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
             )));
         }
         cleanup(&concat_paths, Some(&list_path));
+        // 「干净人声直接入片」：提供降噪波形时重建成片音轨（暂停路径：段间补等长静音桥）
+        if let Some(enh) = opts.enhanced_audio_path.as_deref() {
+            if !enh.is_empty() && std::path::Path::new(enh).exists() {
+                replace_audio_with_enhanced(
+                    &ff,
+                    &opts.output_path,
+                    enh,
+                    &segments,
+                    true,
+                    &out_segs,
+                    has_video,
+                    audio_post_filters(declick, deess, normalize).as_deref(),
+                )?;
+            }
+        }
         // 返回真实输出时长（concat -c copy 后实测），保证落轨片段长度与实际文件一致。
         let real_dur = probe(&opts.output_path)
             .map(|m| m.duration)
@@ -703,6 +860,23 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         cleanup(&seg_paths, Some(&list_path));
         (opts.output_path.clone(), duration)
     };
+
+    // 「干净人声直接入片」：提供降噪波形时重建音轨替换成片音频
+    // （覆盖 crossfade 与普通 concat 两条路径；音频用普通 concat 与视频 concat 硬切逐点同步）。
+    if let Some(enh) = opts.enhanced_audio_path.as_deref() {
+        if !enh.is_empty() && std::path::Path::new(enh).exists() {
+            replace_audio_with_enhanced(
+                &ff,
+                &output_path,
+                enh,
+                &segments,
+                false,
+                &out_segs,
+                has_video,
+                audio_post_filters(declick, deess, normalize).as_deref(),
+            )?;
+        }
+    }
 
     Ok(json!({
         "outputPath": output_path,

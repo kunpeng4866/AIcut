@@ -395,6 +395,7 @@ export default function SpeechPanel() {
         deess,
         normalize,
         videoSync: true, // Mode Ⅱ：视频按与音频相同源区间同步切（默认；item ④ 实现）
+        enhancedAudioPath: result.enhancedAudioPath,
         ...('separated' in result && result.separated
           ? { separated: true, vocalPath: result.vocalPath, accompPath: result.accompPath, musicSegments: result.musicSegments }
           : {}),
@@ -467,6 +468,7 @@ export default function SpeechPanel() {
         deess,
         normalize,
         videoSync: true, // Mode Ⅱ：视频按与音频相同源区间同步切（默认；item ④ 实现）
+        enhancedAudioPath: result.enhancedAudioPath,
         ...('separated' in result && result.separated
           ? { separated: true, vocalPath: result.vocalPath, accompPath: result.accompPath, musicSegments: result.musicSegments }
           : {}),
@@ -562,6 +564,7 @@ export default function SpeechPanel() {
           deess,
           normalize,
           videoSync: true,
+          enhancedAudioPath: res.data.enhancedAudioPath,
           ...('separated' in res.data && res.data.separated
             ? { separated: true, vocalPath: res.data.vocalPath, accompPath: res.data.accompPath, musicSegments: res.data.musicSegments }
             : {}),
