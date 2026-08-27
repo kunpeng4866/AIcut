@@ -104,8 +104,11 @@ python/sr/_*.py
 .playwright-cli/
 
 # ===== 上传 GitHub 前补充：构建/暂存/测试巨目录，严禁入库 =====
-# 打包 staging（含 win-unpacked 未压缩发布目录），仅本地分发用，不入库
-gui/dist-full/
+# 全版本打包产物（4.1GB+ 未压缩发布目录，仅本地分发，不入库）
+dist-full/
+build_dist_full.log
+# 验证/调试临时目录（公式单测、权重回归脚本等），非源码
+verify_tmp/
 gui/dist-lite*/
 # vite 旧 bundle 回收目录（emptyOutDir:false 的代价，由 moveStaleAssets 插件搬运）
 gui/.build-trash/
