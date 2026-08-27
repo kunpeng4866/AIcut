@@ -1148,41 +1148,10 @@ def detect_tonal_sfx(wav_path: str, words: list, win_ms: int = 30, hop_ms: int =
     return _apply_word_safety(events, word_ivs, keep_ratio=overlap_keep_ratio)
 
 
+
 # ══════════════════════════════════════════════════════
-# [4f-4i] 保留段内部精细化（保留以备参考；analyze 不调用其中改写音频者）
+# [4f-4i] 保留段内部精细化（仅保留被 analyze 实际调用的子检测器）
 # ══════════════════════════════════════════════════════
-
-def _cleanup_wordless(keep: list, words: list) -> list:
-    """移除没有任何词覆盖的保留段。"""
-    if not words:
-        return keep
-    word_ivs = _union([(w["start"], w["end"]) for w in words])
-    out = []
-    for ks, ke in keep:
-        if any(not (ke <= ws or ks >= we) for ws, we in word_ivs):
-            out.append((ks, ke))
-    return out
-
-
-def _tighten_to_words(keep: list, words: list, pad_head: float, pad_tail: float) -> list:
-    """非对称收紧保留段边界: 词前紧(抓填充词), 词后松(保尾音)。"""
-    if not words:
-        return keep
-    word_ivs = _union([(max(0.0, w["start"] - pad_head), w["end"] + pad_tail) for w in words])
-    new_keep = []
-    for ks, ke in keep:
-        new_s, new_e = None, None
-        for ws, we in word_ivs:
-            if we <= ks or ws >= ke:
-                continue
-            if new_s is None:
-                new_s = max(ks, ws)
-            new_e = min(ke, we)
-        if new_s is not None and new_e is not None and new_e - new_s >= 0.1:
-            new_keep.append((new_s, new_e))
-    return _union(new_keep)
-
-
 def detect_intra_keep(wav_path: str, keep: list, words: list,
                       pad_head: float = 0.03, pad_tail: float = 0.15,
                       min_gap: float = 0.04, voiced_min: float = 0.06) -> list:
@@ -1224,43 +1193,6 @@ def detect_intra_keep(wav_path: str, keep: list, words: list,
     return _union(fillers)
 
 
-def _expand_tails(keep: list, words: list, pad_tail: float, dur: float) -> list:
-    """扩展每个保留段的尾部至最后词的 pad_tail 保护区。"""
-    if not words:
-        return keep
-    word_tail_prot = {w["end"]: w["end"] + pad_tail for w in words}
-    new_keep = []
-    for ks, ke in keep:
-        best_tail = ke
-        for we, wp in word_tail_prot.items():
-            if ks - 0.05 <= we <= ke + 0.05:
-                best_tail = max(best_tail, wp)
-        new_keep.append((ks, min(best_tail, dur)))
-    return _union(new_keep)
-
-
-def _merge_same_sentence(keep: list, words: list, sentence_gap: float = 0.35) -> list:
-    """合并属于同一句话的保留段。"""
-    if len(keep) <= 1 or not words:
-        return keep
-    sw = sorted(words, key=lambda w: w["start"])
-    merged = [keep[0]]
-    for i in range(1, len(keep)):
-        gs, ge = merged[-1][1], keep[i][0]
-        same_sent = False
-        for j in range(len(sw) - 1):
-            a, b = sw[j], sw[j + 1]
-            if a["end"] <= gs + 0.08 and b["start"] >= ge - 0.08:
-                if b["start"] - a["end"] < sentence_gap:
-                    same_sent = True
-                break
-        if same_sent:
-            merged[-1] = (merged[-1][0], keep[i][1])
-        else:
-            merged.append(keep[i])
-    return merged
-
-
 def _gap_is_filler(au: np.ndarray, s: float, e: float, sr: int,
                    noise_floor: float, voiced_min: float) -> bool:
     """判定一个未保护子段是否是填充词或噪声（应该删除）。"""
@@ -1274,210 +1206,6 @@ def _gap_is_filler(au: np.ndarray, s: float, e: float, sr: int,
     if seg_rms > noise_floor * 3 and (hf > 0.25 or zcr > 0.08):
         return True
     return False
-
-
-def refine_keep(wav_path: str, keep: list, words: list,
-                hf_thr: float = 0.28, zcr_thr: float = 0.08,
-                min_dur: float = 0.04, word_pad: float = 0.06) -> list:
-    """从保留段内部挖除气声(呼吸/齿音尾)，词保护区不挖。"""
-    au, sr = _read_wav(wav_path)
-    frame = int(0.020 * sr)
-    hop = int(0.010 * sr)
-    nh = (len(au) - frame) // hop + 1
-    hf = np.zeros(nh)
-    zcr_arr = np.zeros(nh)
-    for i in range(0, len(au) - frame, hop):
-        seg = au[i:i + frame]
-        win = seg * np.hanning(seg.size)
-        N = 1 << int(np.ceil(np.log2(max(seg.size, 256))))
-        mag = np.abs(np.fft.rfft(win, N))
-        fr = np.fft.rfftfreq(N, 1 / sr)
-        hf[i // hop] = mag[fr >= 2000].sum() / (mag.sum() + 1e-12)
-        zcr_arr[i // hop] = np.mean(np.diff(np.sign(seg)) != 0)
-    t_arr = np.arange(nh) * hop / sr
-    breath_mask = (hf > hf_thr) & (zcr_arr > zcr_thr)
-
-    _bad = set(FILLERS) | set(_SINGLE_FILLER)
-    prot = _union([(max(0.0, w["start"] - word_pad), w["end"] + word_pad)
-                   for w in words if w["word"].strip(_PUNCT).lower() not in _bad])
-
-    new_keep = []
-    for ks, ke in keep:
-        cuts = []
-        i = 0
-        while i < len(breath_mask):
-            if breath_mask[i] and t_arr[i] >= ks and t_arr[i] <= ke:
-                j = i
-                while j < len(breath_mask) and breath_mask[j] and t_arr[j] <= ke:
-                    j += 1
-                bs, be = t_arr[i], t_arr[min(j, len(t_arr) - 1)]
-                if be - bs >= min_dur and not any(bs < pe and be > ps for ps, pe in prot):
-                    cuts.append((bs, be))
-                i = j
-            else:
-                i += 1
-        if not cuts:
-            new_keep.append((ks, ke))
-            continue
-        cur = ks
-        for cs, ce in cuts:
-            if cs - cur >= 0.04:
-                new_keep.append((cur, cs))
-            cur = max(cur, ce)
-        if ke - cur >= 0.04:
-            new_keep.append((cur, ke))
-    return _union(new_keep)
-
-
-# ══════════════════════════════════════════════════════
-# [5] 去齿音（DSP，仅保留参考；analyze 不调用）
-# ══════════════════════════════════════════════════════
-
-def deess(audio: np.ndarray, sr: int, freq_low: int = 4000,
-          freq_high: int = 10000, threshold_ratio: float = 0.30,
-          reduction_db: float = 8.0, attack_ms: float = 2.0,
-          release_ms: float = 15.0) -> np.ndarray:
-    """对过度齿音做高频动态压缩（不切除，保留擦音可懂度）。"""
-    n_fft = 1024
-    hop = n_fft // 4
-    n_frames = (len(audio) - n_fft) // hop + 1
-    if n_frames <= 0:
-        return audio.copy()
-
-    spec = np.zeros((n_fft // 2 + 1, n_frames), dtype=np.complex128)
-    win = np.hanning(n_fft)
-    for i in range(n_frames):
-        seg = audio[i * hop:i * hop + n_fft] * win
-        spec[:, i] = np.fft.rfft(seg)
-
-    freqs = np.fft.rfftfreq(n_fft, 1 / sr)
-    hf_bins = (freqs >= freq_low) & (freqs <= freq_high)
-
-    attack_coef = min(0.99, 3.0 / max(1, int(attack_ms / 1000 * sr / hop)))
-    release_coef = min(0.99, 3.0 / max(1, int(release_ms / 1000 * sr / hop)))
-    target_gr = 10 ** (-reduction_db / 20)
-    gain_reduction = np.ones(n_frames, dtype=np.float32)
-    gr_smooth = 1.0
-
-    for i in range(n_frames):
-        mag = np.abs(spec[:, i])
-        total_e = float(np.sum(mag ** 2)) + 1e-12
-        hf_e = float(np.sum(mag[hf_bins] ** 2))
-        if hf_e / total_e > threshold_ratio:
-            gr_smooth += (target_gr - gr_smooth) * attack_coef
-        else:
-            gr_smooth += (1.0 - gr_smooth) * release_coef
-        gr_smooth = max(target_gr * 0.5, min(1.0, gr_smooth))
-        gain_reduction[i] = float(gr_smooth)
-
-    spec_out = spec.copy()
-    for i in range(n_frames):
-        gr = gain_reduction[i]
-        if gr < 0.99:
-            spec_out[hf_bins, i] *= gr
-
-    out = np.zeros(len(audio) + n_fft, dtype=np.float64)
-    norm = np.zeros(len(audio) + n_fft, dtype=np.float64)
-    for i in range(n_frames):
-        seg = np.fft.irfft(spec_out[:, i])
-        out[i * hop:i * hop + n_fft] += seg * win
-        norm[i * hop:i * hop + n_fft] += win ** 2
-    norm[norm < 1e-8] = 1.0
-    result = out[:len(audio)] / norm[:len(audio)]
-    return result.astype(np.float32)
-
-
-# ══════════════════════════════════════════════════════
-# [6] 智能拼接 / 响度归一化（DSP，仅保留参考；analyze 不调用）
-# ══════════════════════════════════════════════════════
-
-def _crossfade(a: np.ndarray, b: np.ndarray, sr: int, cf_ms: int = 20) -> np.ndarray:
-    cf_n = min(int(cf_ms / 1000 * sr), len(a) // 4)
-    if cf_n < 4:
-        return np.concatenate([a, b])
-    fo = np.linspace(1, 0, cf_n, dtype=np.float32)
-    b_safe = b.copy()
-    b_safe[:4] *= np.linspace(0.7, 1, 4)
-    return np.concatenate([a[:-cf_n], a[-cf_n:] * fo, b_safe])
-
-
-def _edge_fade(seg: np.ndarray, sr: int, fade_ms: int = 8) -> np.ndarray:
-    fn = int(fade_ms / 1000 * sr)
-    if len(seg) > 2 * fn:
-        seg = seg.copy()
-        seg[:fn] *= np.linspace(0, 1, fn)
-        seg[-fn:] *= np.linspace(1, 0, fn)
-    return seg
-
-
-def smart_assemble(wav_path: str, keep: list, dur: float, words: list,
-                   sentence_gap: float = 0.30, pause_len: float = 0.22,
-                   xfade_inner_ms: int = 20, xfade_outer_ms: int = 40,
-                   fade_edge_ms: int = 8) -> np.ndarray:
-    """上下文感知拼接（仅供参考，analyze 不调用）。"""
-    au, sr = _read_wav(wav_path)
-    if not keep:
-        return np.zeros(int(0.1 * sr), dtype=np.float32)
-    segs = []
-    for s, e in keep:
-        a, b = max(0, int(s * sr)), min(len(au), int(e * sr))
-        if b > a:
-            segs.append(au[a:b].copy())
-    if not segs:
-        return np.zeros(int(0.1 * sr), dtype=np.float32)
-    if len(segs) == 1:
-        return _edge_fade(segs[0], sr, fade_edge_ms)
-
-    result = _edge_fade(segs[0], sr, fade_edge_ms)
-    for i in range(1, len(segs)):
-        gap = keep[i][0] - keep[i - 1][1]
-        cur = segs[i]
-        if gap < sentence_gap:
-            result = _crossfade(result, cur, sr, xfade_inner_ms)
-        else:
-            gs, ge = keep[i - 1][1], keep[i][0]
-            result = _insert_pause(result, cur, au, sr, gs, ge, pause_len, xfade_outer_ms)
-    return result
-
-
-def _insert_pause(a: np.ndarray, b: np.ndarray, au: np.ndarray, sr: int,
-                  gs: float, ge: float, pause_len: float = 0.22,
-                  fade_ms: int = 20) -> np.ndarray:
-    gap_audio = au[int(gs * sr):int(ge * sr)]
-    pn = int(pause_len * sr)
-    if gap_audio.size >= pn:
-        st = max(0, (gap_audio.size - pn) // 2)
-        sil = gap_audio[st:st + pn].astype(np.float32)
-        if float(np.sqrt(np.mean(sil ** 2))) > 0.015:
-            sil = np.zeros(pn, dtype=np.float32)
-    else:
-        sil = np.zeros(pn, dtype=np.float32)
-
-    fn = int(fade_ms / 1000 * sr)
-    if len(a) > fn and len(b) > 4:
-        fo = np.linspace(1, 0, fn, dtype=np.float32)
-        b_safe = b.copy()
-        b_safe[:4] *= np.linspace(0.7, 1, 4)
-        return np.concatenate([a[:-fn], a[-fn:] * fo, sil, b_safe])
-    return np.concatenate([a, sil, b])
-
-
-def normalize_lufs(audio: np.ndarray, sr: int, target_lufs: float = -16.0) -> np.ndarray:
-    """简单集成 LUFS 归一化（仅供参数参考，analyze 不调用）。"""
-    peak = float(np.abs(audio).max())
-    if peak < 1e-6:
-        return audio
-    rms = float(np.sqrt(np.mean(audio ** 2))) + 1e-10
-    current_db = 20 * np.log10(rms)
-    gain_db = target_lufs - current_db
-    peak_db = 20 * np.log10(peak)
-    max_gain = -1.0 - peak_db
-    gain_db = min(gain_db, max_gain)
-    gain_linear = 10 ** (gain_db / 20)
-    result = audio * gain_linear
-    return np.clip(result, -1.0, 1.0).astype(np.float32)
-
-
 # ══════════════════════════════════════════════════════
 # 主分析入口（决策层，仅返回 JSON 计划，不生成任何媒体文件）
 # ══════════════════════════════════════════════════════
@@ -1692,8 +1420,9 @@ def detect_panns_sed(wav_path: str, words: list, word_pad: float = 0.04,
     """PANNs(Cnn14_DecisionLevelMax) 帧级声音事件检测（副语言/非语音事件）。
 
     仅取与既有检测器不重复的副语言类（Laughter/Sigh/Sniffing/Wheeze/Burping/
-    Sneeze/Breathing/Respiration/Shuffling/Clapping），过滤掉 Cough/Throat clearing
-    以免与 detect_cough 双标。模型权重 MIT，放置 python/models/panns/。
+    Sneeze/Shuffling/Clapping），过滤掉 Cough/Throat clearing 以免与 detect_cough 双标。
+    注：呼吸类(Breathing/Respiration)交由 detect_respiro 作软停顿（resp_breath）处理，
+    严禁进 sed_event→hard_remove（否则会复现“机关枪式拼接”bug）。模型权重 MIT，放置 python/models/panns/。
     """
     if not _PANNS_OK or not _panns_available():
         return []
@@ -1708,8 +1437,6 @@ def detect_panns_sed(wav_path: str, words: list, word_pad: float = 0.04,
         "Wheeze": threshold,
         "Burping, eructation": threshold,
         "Sneeze": threshold,
-        "Breathing": max(0.20, threshold - 0.20),
-        "Respiration": max(0.25, threshold - 0.15),
         "Shuffling": threshold,
         "Clapping": threshold,
     }
@@ -1769,7 +1496,7 @@ def analyze(input_path: str, opts: dict) -> dict:
     opts : dict
         选项（均可选，含默认值）：
           modelSize   (str,  默认 'small') whisper 模型大小（P0-A：由 'base' 提升）
-          useDemucs   (bool, 默认 True)    是否用 Demucs 做人声分离（分析辅助）
+          useDemucs   (bool, 默认 False)   是否用 Demucs 做人声分离（分析辅助）
           vadThreshold(float, 默认 0.25)    Silero VAD 阈值
           minGap      (float, 默认 0.18)    最短可切除静音间隙（s）
           wordPad     (float, 默认 0.04)    词保护边距（s）

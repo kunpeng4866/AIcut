@@ -498,4 +498,6 @@ def enhance(au: np.ndarray, sr: int, model_dir: str, session_factory,
 
     y = _resample_down(y48, up, n_in) if up > 1 else y48[:n_in]
     sys.stderr.write(f"[dfn3] DeepFilterNet3 降噪完成（{T} 帧 @ {ep}, gate={lsnr_gate}, soften={mask_soften}）\n")
+    if not np.isfinite(y).all():
+        return None  # 与 frcrn 对齐：NaN/Inf 守卫，交由上层降级而非产出静音段
     return np.clip(y, -1.0, 1.0).astype(np.float32)

@@ -545,7 +545,8 @@ export default function SpeechPanel() {
       targets.map((a) => ({ name: (a.path.split(/[\\/]/).pop() || a.path), status: 'pending' as const, msg: '' })),
     );
     setMsg(null);
-    for (let idx = 0; idx < targets.length; idx++) {
+    try {
+      for (let idx = 0; idx < targets.length; idx++) {
       const a = targets[idx];
       try {
         const opts = buildOpts();
@@ -609,7 +610,9 @@ export default function SpeechPanel() {
         setBatchItems((prev) => prev.map((it, i) => (i === idx ? { ...it, status: 'fail', msg: e instanceof Error ? e.message : String(e) } : it)));
       }
     }
-    setBatchRunning(false);
+    } finally {
+      setBatchRunning(false);
+    }
     setMsg(`批量处理完成：共 ${targets.length} 段素材（见下方明细）。`);
   };
 
@@ -891,10 +894,10 @@ export default function SpeechPanel() {
                         {!isKeep && (
                           <>
                             <span style={{ color: C.textSub }}>起</span>
-                            <input type="number" step={0.001} value={dv[0]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'start', parseFloat(e.target.value))} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
+                            <input type="number" step={0.001} value={dv[0]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'start', parseFloat(e.target.value) || 0)} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
                             <button onClick={() => s.delIdx !== undefined && captureTo(s.delIdx, 'start')} title="用预览播放头（已映射回源时间）设为起点" style={miniBtn}>捕获</button>
                             <span style={{ color: C.textSub }}>止</span>
-                            <input type="number" step={0.001} value={dv[1]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'end', parseFloat(e.target.value))} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
+                            <input type="number" step={0.001} value={dv[1]} onChange={(e) => s.delIdx !== undefined && updateDraft(s.delIdx, 'end', parseFloat(e.target.value) || 0)} onBlur={() => s.delIdx !== undefined && commitDraft(s.delIdx)} style={numInput} />
                             <button onClick={() => s.delIdx !== undefined && captureTo(s.delIdx, 'end')} title="用预览播放头设为终点" style={miniBtn}>捕获</button>
                             <button onClick={() => s.delIdx !== undefined && handleConvertDeleteToKeep(s.delIdx)} title="这段其实要保留：把删除段改回保留" style={{ ...miniBtn, color: C.keep }}>改为保留</button>
                           </>

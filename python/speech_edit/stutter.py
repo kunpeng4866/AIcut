@@ -27,12 +27,6 @@ gap 标为「含语音（空 gap 里有口吃/重复音）」或「空 gap（纯
 import os
 import numpy as np
 
-# 顶层导入约束：模块间互相引用用「先相对后绝对」兜底（对齐 panns_sed / respiro）。
-try:
-    from .core import _read_wav as _core_read_wav  # noqa: F401
-except ImportError:
-    _core_read_wav = None
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT = os.path.dirname(_HERE)
 STUTTER_MODEL_DIR = os.path.join(_PROJECT, "models", "stutter")  # 方案 A 权重目录（当前空）

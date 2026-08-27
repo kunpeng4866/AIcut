@@ -18,12 +18,6 @@ import os
 import numpy as np
 
 try:
-    import torch  # noqa: F401
-    _TORCH_OK = True
-except Exception:  # pragma: no cover
-    _TORCH_OK = False
-
-try:
     from .panns_sed import (panns_sed, _SAMPLE_RATE as PANNS_SR, panns_available)
 except ImportError:  # 顶层模块导入（sys.path.insert 场景）
     from panns_sed import (panns_sed, _SAMPLE_RATE as PANNS_SR, panns_available)
