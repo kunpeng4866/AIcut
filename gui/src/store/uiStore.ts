@@ -135,3 +135,8 @@ export const useUIStore = create<UIState>((set) => ({
   setRightPanelWidth: (w) => set({ rightPanelWidth: Math.max(180, Math.min(500, w)) }),
   setTimelineHeight: (h) => set({ timelineHeight: Math.max(120, Math.min(500, h)) }),
 }));
+
+// [TEST HOOK] 供 CDP 自动化验证读写业务状态（业务零副作用，长期保留）
+if (typeof window !== 'undefined') {
+  (window as any).__uiStore = useUIStore;
+}

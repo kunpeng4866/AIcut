@@ -638,3 +638,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     },
   };
 });
+
+// [TEST HOOK] 供 CDP 自动化验证读写业务状态（业务零副作用，长期保留）
+if (typeof window !== 'undefined') {
+  (window as any).__projectStore = useProjectStore;
+}

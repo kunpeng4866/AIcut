@@ -336,6 +336,12 @@ export default function SpeechPanel() {
   const [previewBusy, setPreviewBusy] = useState(false);
   // 试听片段在时间轴上的落位（新音频轨）：{clipId, trackId}；null=尚未生成过
   const previewClipRef = useRef<{ clipId: string; trackId: string } | null>(null);
+  // 本次分析锁定的素材：试听/生成/落轨以它为准，与时间轴选中态解耦
+  // （用户取消时间轴选中/点了别处后，试听仍应工作——此前 selectedAsset 变 null 导致静默无操作）
+  const [analyzedAsset, setAnalyzedAsset] = useState<{ id: string; type: 'video' | 'audio'; path: string; duration?: number; fps?: number } | null>(null);
+  // 有效操作素材：分析锁定优先，回退到当前选中素材
+  const effectiveAsset = analyzedAsset
+    ?? (selectedAsset as { id: string; type: 'video' | 'audio'; path: string; duration: number; fps?: number } | null);
   // 是否已生成过试听：此后每次手动调整 keepSegments 自动重渲试听（用户要求②）
   const previewAutoRef = useRef(false);
 
@@ -393,20 +399,25 @@ export default function SpeechPanel() {
   // 已存在试听片段时只替换其资产/时长（同 clipId）→ 不产生重复堆积（用户要求③的基础）。
 
   // 落轨逻辑在 utils/speechPreviewTrack.ts（可测模块）；此处仅注入依赖
-  const upsertPreviewOnTrack = (assetPath: string, dur: number, isFinal = false) =>
-    upsertPreviewTrack({
+  const upsertPreviewOnTrack = async (assetPath: string, dur: number, isFinal = false) => {
+    if (!effectiveAsset) { setMsg('试听/生成失败：请先在时间轴选中要清洗的素材片段，再重新点「分析」'); return { ok: false }; }
+    return upsertPreviewTrack({
       getStore: useProjectStore.getState,
-      selectedAsset,
+      selectedAsset: effectiveAsset,
       extractAudio: (s, d) => window.aicut.media.extractAudio(s, d),
       previewRef: previewClipRef,
       onMessage: (m) => setMsg(m),
     }, assetPath, dur, isFinal);
+  };
 
   const handlePreview = async () => {
-    if (!selectedAsset || !result) return;
+    if (!effectiveAsset || !result) {
+      setMsg(!result ? '请先点「分析」完成分析，再试听' : '未找到要清洗的素材，请重新分析');
+      return;
+    }
     setPreviewBusy(true); setMsg(null);
     try {
-      const outputPath = selectedAsset.path.replace(/\.[^.]+$/, '_preview.mp4');
+      const outputPath = effectiveAsset.path.replace(/\.[^.]+$/, '_preview.mp4');
       const asmOpts: SpeechAssembleOptions = {
         keepSegments: liveKeepSegments,
         keepSegmentsOut: liveKeepSegmentsOut,
@@ -421,7 +432,7 @@ export default function SpeechPanel() {
           ? { separated: true, vocalPath: result.vocalPath, accompPath: result.accompPath, musicSegments: result.musicSegments }
           : {}),
       };
-      const res = await window.aicut.speech.assemble(selectedAsset.path, JSON.stringify(asmOpts));
+      const res = await window.aicut.speech.assemble(effectiveAsset.path, JSON.stringify(asmOpts));
       if (res.success && res.data) {
         // 修复「试听缓存」：预览输出文件名固定为 *_preview.mp4，第二次点击时
         // setPreviewUrl 设置的是完全相同的字符串 → 浏览器不重载、继续播首次
@@ -436,8 +447,11 @@ export default function SpeechPanel() {
         setPreviewNonce((n) => n + 1);
         // 用户要求①：试听片段同步落到时间轴新音频轨（与源素材对齐）
         previewAutoRef.current = true; // 此后手动调整自动重渲试听
-        await upsertPreviewOnTrack(String(res.data.outputPath), Number(res.data.duration) || 0);
+        const up = await upsertPreviewOnTrack(String(res.data.outputPath), Number(res.data.duration) || 0);
+        if (!up.ok) setMsg(`试听片段落轨失败：${up.error || '未知原因'}（内嵌播放器仍可试听）`);
       } else setMsg(res.error || '试听生成失败');
+    } catch (e) {
+      setMsg(`试听异常：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setPreviewBusy(false);
     }
@@ -467,6 +481,7 @@ export default function SpeechPanel() {
       if (res.success && res.data) {
         setResult(res.data);
         setError(null);
+        setAnalyzedAsset({ id: selectedAsset.id, type: selectedAsset.type as 'video' | 'audio', path: selectedAsset.path, duration: selectedAsset.duration, fps: selectedAsset.fps ?? undefined });   // 锁定本次分析的素材：后续试听/生成不再依赖时间轴选中态
         setSpeechOverlay({
           assetPath: selectedAsset.path,
           keepSegments: res.data.keepSegments,
@@ -486,11 +501,14 @@ export default function SpeechPanel() {
 
   // ── 生成清洗片段并落轨（镜像 MediaPanel.handleAddToTimeline）──
   const handleAssemble = async () => {
-    if (!selectedAsset || !result) return;
+    if (!effectiveAsset || !result) {
+      setMsg(!result ? '请先点「分析」完成分析，再生成' : '未找到要清洗的素材，请重新分析');
+      return;
+    }
     setError(null);
     setMsg(null);
     try {
-      const original = selectedAsset;
+      const original = effectiveAsset;
       const outputPath = original.path.replace(/\.[^.]+$/, '_speechcut.mp4'); // 写到源文件旁边
       const asmOpts: SpeechAssembleOptions = {
         keepSegments: liveKeepSegments,
@@ -512,7 +530,8 @@ export default function SpeechPanel() {
         // 统一落位：无论是否生成过试听，最终清洗片段都在「独立新轨」上——
         // 已有试听片段则【替换】它（同 clipId、位置不变）；没有则在该轨新建。
         // 原始素材所在轨道永远不动，源片段保留供对比（用户硬性要求）。
-        await upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
+        const up2 = await upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
+        if (!up2.ok) { setError(`落轨失败：${up2.error || '未知原因'}`); return; }
         setMsg('已生成最终清洗片段（独立轨，覆盖试听片段；原始素材保留，可对比）。建议标记仍保留，可继续微调后再次生成。');
       } else {
         setError(res2.error || '生成失败');
