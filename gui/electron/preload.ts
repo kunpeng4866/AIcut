@@ -85,6 +85,12 @@ contextBridge.exposeInMainWorld('aicut', {
       ipcRenderer.invoke('speech:separate', input, optsJson),
   },
 
+  // ── 媒体工具 ──
+  media: {
+    extractAudio: (src: string, dst: string) =>
+      ipcRenderer.invoke('media:extract-audio', src, dst),
+  },
+
   // ── 智能抠像 ──
   keying: {
     generate: (input: string, optsJson: string) =>

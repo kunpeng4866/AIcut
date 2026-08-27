@@ -403,6 +403,10 @@ export interface AicutAPI {
   asr: AsrAPI;
   // 口播剪辑
   speech: SpeechAPI;
+  // 媒体工具（试听对照轨用：视频源产物抽纯音轨）
+  media: {
+    extractAudio(src: string, dst: string): Promise<{ success: boolean; path?: string; error?: string }>;
+  };
   // 视频超清增强（导出级后处理）
   sr: {
     generate(input: string, optsJson: string): Promise<{ success: boolean; data?: SRResult; error?: string }>;

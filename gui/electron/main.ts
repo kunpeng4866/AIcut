@@ -899,6 +899,28 @@ ipcMain.handle('render:export', async (_e, command: string, outputPath: string) 
   });
 });
 
+// ── 抽取音频轨（口播试听对照轨专用）──
+// 视频源产出的清洗 mp4 → 纯音频 m4a。原因：addClip 有「素材类型↔轨道类型」
+// 纠偏守卫，视频资产放音频轨会被重定向回主视频轨（=原素材所在轨道），造成
+// 试听片段覆盖原素材。抽成纯音频后天然落独立音频轨，源视频轨零改动。
+ipcMain.handle('media:extract-audio', async (_e, srcPath: string, dstPath: string) => {
+  return new Promise((resolve) => {
+    const ff = process.env.AICUT_FFMPEG || 'ffmpeg';
+    const child = spawn(ff, ['-y', '-i', srcPath, '-vn', '-map', '0:a:0', '-c:a', 'copy', dstPath],
+      { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.on('close', (code) => {
+      if (code === 0) resolve({ success: true, path: dstPath });
+      else {
+        const errLine = stderr.split('\n').filter((l) => l.includes('Error') || l.includes('error')).pop();
+        resolve({ success: false, error: errLine || stderr.slice(-300) || `FFmpeg退出码: ${code}` });
+      }
+    });
+    child.on('error', (e) => resolve({ success: false, error: e.message }));
+  });
+});
+
 // ── 视频导出（带进度） ──
 let currentExportProcess: ReturnType<typeof spawn> | null = null;
 

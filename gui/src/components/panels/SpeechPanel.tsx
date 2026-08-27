@@ -390,39 +390,49 @@ export default function SpeechPanel() {
   // 位置对齐源素材片段的 timelineIn → 播放头移动时，源轨与试听轨同步发声，
   // 便于对照判断删除位置与 AI 分析结果（用户要求①）。
   // 已存在试听片段时只替换其资产/时长（同 clipId）→ 不产生重复堆积（用户要求③的基础）。
-  const upsertPreviewOnTrack = (assetPath: string, dur: number, isFinal = false) => {
+  const upsertPreviewOnTrack = async (assetPath: string, dur: number, isFinal = false) => {
     if (!selectedAsset) return;
+    let assetPathOut = assetPath;
+    // 视频源产出的 mp4 含视频轨：抽成纯音频 m4a 后再上轨。
+    // 若直接把视频资产放上音频轨，addClip 的类型纠偏守卫会把它重定向回
+    // 主视频轨（=原素材所在轨道），造成「试听片段覆盖原始素材」。
+    if (selectedAsset.type === 'video') {
+      const m4a = assetPath.replace(/\.mp4$/i, '_preview.m4a');
+      const r = await window.aicut.media.extractAudio(assetPath, m4a);
+      if (!r.success || !r.path) {
+        setMsg(`试听音频轨抽取失败：${r.error || '未知错误'}`);
+        return;
+      }
+      assetPathOut = r.path;
+    }
     const st = useProjectStore.getState();
     const previewAsset = {
       id: uid('asset'),
-      // 视频源产出的 mp4 含视频轨，试听/成品轨与源同类型（视频源→视频轨），
-      // 保证成品在时间轴上既有画面也有声音
-      type: (selectedAsset.type === 'video' ? 'video' : 'audio') as 'video' | 'audio',
-      path: assetPath,
+      type: 'audio' as const,          // 对照轨恒为音频轨：与源视频轨互不干扰
+      path: assetPathOut,
       duration: dur,
       fps: selectedAsset.fps,
     };
     st.addAsset(previewAsset);
+    const tracksNow = () => useProjectStore.getState().project.tracks;
     // 定位/创建试听轨：优先复用已有试听片段所在的轨
     let trackId = previewClipRef.current?.trackId;
-    let track = trackId ? st.project.tracks.find((t) => t.id === trackId) : undefined;
+    let track = trackId ? tracksNow().find((t) => t.id === trackId) : undefined;
     if (!track) {
-      const tid = st.addTrack(selectedAsset.type === 'video' ? 'video' : 'audio');
-      trackId = tid;
-      track = useProjectStore.getState().project.tracks.find((t) => t.id === tid);
+      const tid = st.addTrack('audio');
+      track = tracksNow().find((t) => t.id === tid);
     }
     if (!track) return;
     // 硬约束：试听/成品轨绝不允许是原始素材所在的轨道（源素材保留做对照）
-    const srcTrackId = st.project.tracks
+    const srcTrackId = tracksNow()
       .find((t) => t.clips.some((c) => c.assetId === selectedAsset.id))?.id;
     if (srcTrackId && track.id === srcTrackId) {
-      const tid = st.addTrack(selectedAsset.type === 'video' ? 'video' : 'audio');
-      trackId = tid;
-      track = useProjectStore.getState().project.tracks.find((t) => t.id === tid);
+      const tid = st.addTrack('audio');
+      track = tracksNow().find((t) => t.id === tid);
       if (!track) return;
     }
     // 与源素材片段对齐：播放头一致性对照
-    const srcClip = st.project.tracks
+    const srcClip = tracksNow()
       .flatMap((t) => t.clips)
       .find((c) => c.assetId === selectedAsset.id);
     const tin = srcClip ? srcClip.timelineIn : 0;
@@ -453,9 +463,6 @@ export default function SpeechPanel() {
       st.addClip(track.id, clip);
       previewClipRef.current = { clipId: clip.id, trackId: track.id };
     }
-    setMsg(isFinal
-      ? '已生成最终清洗片段并替换时间轴上的试听片段（原素材保留，可对比）。'
-      : '试听片段已放到时间轴新音频轨（与源素材对齐）。此后每次手动调整会自动更新这条试听轨。');
   };
 
   const handlePreview = async () => {
@@ -492,7 +499,7 @@ export default function SpeechPanel() {
         setPreviewNonce((n) => n + 1);
         // 用户要求①：试听片段同步落到时间轴新音频轨（与源素材对齐）
         previewAutoRef.current = true; // 此后手动调整自动重渲试听
-        upsertPreviewOnTrack(String(res.data.outputPath), Number(res.data.duration) || 0);
+        await upsertPreviewOnTrack(String(res.data.outputPath), Number(res.data.duration) || 0);
       } else setMsg(res.error || '试听生成失败');
     } finally {
       setPreviewBusy(false);
@@ -568,7 +575,7 @@ export default function SpeechPanel() {
         // 统一落位：无论是否生成过试听，最终清洗片段都在「独立新轨」上——
         // 已有试听片段则【替换】它（同 clipId、位置不变）；没有则在该轨新建。
         // 原始素材所在轨道永远不动，源片段保留供对比（用户硬性要求）。
-        upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
+        await upsertPreviewOnTrack(String(res2.data.outputPath), finalDur, true);
         setMsg('已生成最终清洗片段（独立轨，覆盖试听片段；原始素材保留，可对比）。建议标记仍保留，可继续微调后再次生成。');
       } else {
         setError(res2.error || '生成失败');
