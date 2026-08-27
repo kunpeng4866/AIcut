@@ -1935,7 +1935,14 @@ def analyze(input_path: str, opts: dict) -> dict:
                 if not rm:
                     keep.append((vs, ve))
                     continue
-                seg = _complement(rm, ve - vs, min_keep=0.0)
+                # ⚠️ 坐标修正：rm 为绝对时间，_complement 需相对本区间的时长坐标；
+                # 直接混用会算出 vs+绝对值 的鬼影跨度，把区域内本应删除的洞全部封死。
+                rm_rel = []
+                for es, ee in rm:
+                    rs_, re_ = max(es, vs) - vs, min(ee, ve) - vs
+                    if re_ - rs_ > 1e-4:
+                        rm_rel.append((rs_, re_))
+                seg = _complement(_union(rm_rel), ve - vs, min_keep=0.0)
                 keep.extend((vs + ss, vs + ee) for (ss, ee) in seg)
             keep = _union(keep)
 
