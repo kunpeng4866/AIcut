@@ -18,6 +18,7 @@ export interface PreviewTrackDeps {
         id: string;
         type: string;
         isMain?: boolean;
+        muted?: boolean;
         clips: { id: string; assetId: string; timelineIn: number; timelineOut: number }[];
       }[];
       assets: { id: string; path: string; type: string }[];
@@ -26,6 +27,7 @@ export interface PreviewTrackDeps {
     addTrack(t: 'video' | 'audio'): string;
     addClip(trackId: string, clip: ClipConfig): void;
     updateClip(trackId: string, clipId: string, updates: Partial<ClipConfig>): void;
+    toggleTrackMute(trackId: string): void;
   };
   selectedAsset: { id: string; type: string; fps?: number } | null;
   // 视频源时把 mp4 抽成纯音频；测试里可注入 mock
@@ -86,6 +88,12 @@ export const upsertPreviewOnTrack = async (
     const tid = st.addTrack('audio');
     track = tracksNow().find((t) => t.id === tid);
     if (!track) return { ok: false, error: '试听轨创建失败' };
+  }
+  // 对照模式：自动静音源素材所在轨道，避免两条轨同时发声互相干扰
+  // （对比完成后可在轨道头手动取消静音）
+  const srcTrack = tracksNow().find((t) => t.id === srcTrackId);
+  if (srcTrack && srcTrackId && srcTrack.muted !== true) {
+    try { st.toggleTrackMute(srcTrackId); } catch { /* 静音失败不影响落轨 */ }
   }
   // 硬约束②：与源素材片段的 timelineIn 对齐（播放头同步对照）
   const srcClip = tracksNow()
