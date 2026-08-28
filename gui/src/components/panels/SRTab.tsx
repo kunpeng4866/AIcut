@@ -197,8 +197,6 @@ export default function SRTab({ clip, trackId }: { clip: ClipConfig; trackId: st
       alert('找不到源素材路径，无法生成超清视频');
       return;
     }
-    // 一键补全：缺失 Python 运行时 / 模型时引导下载，用户取消则中止
-    if (!(await useAssetStore.getState().ensureAssets(['python', 'sr']))) return;
     const assetPath = asset.path;              // 真实文件系统路径（非 aicut-asset://）
     const scale = sr.scale ?? 2;
     const strength = sr.strength ?? 1.0;
