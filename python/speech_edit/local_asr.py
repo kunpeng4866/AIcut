@@ -24,7 +24,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT = os.path.dirname(_HERE)                       # python/
 _ASR_DIR = os.path.join(_PROJECT, "models", "asr")
 _FUNASR_CACHE = os.path.join(_ASR_DIR, "modelscope_cache")
-_QWEN_FA_DIR = os.path.join(_ASR_DIR, "qwen3_fa")
+# 解析优先级：环境变量 AICUT_QWEN3FA_DIR（Electron 按「resources 优先 → userData 下载目录」注入）
+# → 兜底到本模块相对路径（开发/打包内置场景）。qwen3_fa 为 1.8G，>500M 不随包，走一键补全。
+_QWEN_FA_DIR = os.environ.get("AICUT_QWEN3FA_DIR") or os.path.join(_ASR_DIR, "qwen3_fa")
 
 # ── 延迟缓存（首次调用时加载，避免 import 期硬依赖）──
 _funasr_model = None

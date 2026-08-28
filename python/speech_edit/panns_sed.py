@@ -31,7 +31,9 @@ except Exception:  # pragma: no cover - 依赖未装时优雅降级
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT = os.path.dirname(_HERE)
-PANNS_MODEL_DIR = os.path.join(_PROJECT, "models", "panns")
+# 解析优先级：环境变量 AICUT_PANNS_DIR（Electron 注入，指向 resources/models/panns 或
+# userData/aicut-assets/models/panns 下载目录）→ 兜底本模块相对路径。
+PANNS_MODEL_DIR = os.environ.get("AICUT_PANNS_DIR") or os.path.join(_PROJECT, "models", "panns")
 CHECKPOINT_PATH = os.path.join(PANNS_MODEL_DIR, "Cnn14_DecisionLevelMax_mAP=0.385.pth")
 LABEL_CSV = os.path.join(PANNS_MODEL_DIR, "class_labels_indices.csv")
 

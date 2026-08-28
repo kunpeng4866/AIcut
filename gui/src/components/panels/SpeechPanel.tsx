@@ -11,7 +11,15 @@ import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
 import type { ClipConfig, SpeechEditOptions, SpeechEditResult, SpeechAssembleOptions } from '../../types';
 import { useConfigStore } from '../../store/configStore';
+import { useAssetStore } from '../../store/assetStore';
 import { upsertPreviewOnTrack as upsertPreviewTrack } from '../../utils/speechPreviewTrack';
+
+// 口播高精度强制对齐权重 Qwen3-ForcedAligner（1.8G，>500M），随用随下（一键补全）。
+// 缺省不随包；分析/批量前若未下载则引导用户补全。其余口播权重（DFN3/PANNs）<500M 已随包内置。
+const QWEN3FA_IDS = [
+  'qwen3fa-model', 'qwen3fa-config', 'qwen3fa-genconfig', 'qwen3fa-tokenizer',
+  'qwen3fa-vocab', 'qwen3fa-merges', 'qwen3fa-chattmpl', 'qwen3fa-preproc', 'qwen3fa-readme',
+];
 
 // 生成唯一ID（与 MediaPanel.tsx 同款实现）
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -481,6 +489,11 @@ export default function SpeechPanel() {
     setError(null);
     setMsg(null);
     try {
+      // 一键补全：高精度强制对齐权重 Qwen3-ForcedAligner（1.8G, >500M）随用随下；其余口播权重已随包。
+      if (!(await useAssetStore.getState().ensureAssets(QWEN3FA_IDS))) {
+        setLoading(false);
+        return;
+      }
       const opts = buildOpts();
       const res = await window.aicut.speech.analyze(selectedAsset.path, JSON.stringify(opts));
       if (res.success && res.data) {
@@ -569,6 +582,11 @@ export default function SpeechPanel() {
       return;
     }
     setBatchRunning(true);
+    if (!(await useAssetStore.getState().ensureAssets(QWEN3FA_IDS))) {
+      setBatchRunning(false);
+      setMsg('已取消：缺少口播高精度对齐权重（Qwen3-ForcedAligner），请在「AI组件」中补全后重试');
+      return;
+    }
     setBatchTotal(targets.length);
     setBatchItems(
       targets.map((a) => ({ name: (a.path.split(/[\\/]/).pop() || a.path), status: 'pending' as const, msg: '' })),

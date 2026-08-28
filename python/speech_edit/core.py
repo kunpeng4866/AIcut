@@ -336,8 +336,11 @@ def neural_separate(wav16_path: str, out_dir: str, cache_dir: str):
 # 权重目录（P0-E 负责下载放置）。DeepFilterNet3 官方权重为 **48k** 模型
 # (enc/erb_dec/df_dec 三段 ONNX)，16k 输入在 dfn3.py 内部 16k→48k 升采样再降回。
 # 三段图流水线已实现于 speech_edit/dfn3.py（ERB/DF 特征 + Deep Filtering + 零平移对齐）。
-# 期望放置路径：E:/AIcut/python/models/denoise/{enc,erb_dec,df_dec}.onnx (+ config.ini)
-DENOISE_MODEL_DIR = os.path.join(
+# 期望放置路径：<models根>/denoise/{enc,erb_dec,df_dec}.onnx (+ config.ini)
+# 解析优先级：环境变量 AICUT_DENOISE_DIR（Electron 按「resources 优先 → userData 下载目录」解析并注入）
+# → 兜底到本模块相对路径（开发/打包内置场景）。一键补全下载落到 userData 时，AICUT_DENOISE_DIR
+# 即指向该处，无需把权重打进安装包。
+DENOISE_MODEL_DIR = os.environ.get("AICUT_DENOISE_DIR") or os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "denoise")
 
 

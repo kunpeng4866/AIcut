@@ -76,6 +76,13 @@ function setupAssetEnv() {
   process.env.AICUT_RMBG2_MODEL = resolveAsset('models', 'rmbg2.onnx');
   process.env.AICUT_MODNET_MODEL = resolveAsset('models', 'modnet.onnx');
   process.env.AICUT_SR_MODEL = resolveAsset('models', 'sr_v0_test.onnx');
+  // 口播降噪（DFN3 三件套+config, ~9M）与副语言检测（PANNs, ~313M）均 <500M，直接随包内置；
+  // 但其落点在 resources/models/{denoise,panns}，Python 端默认找 python/models/*，故用 env 指过去。
+  process.env.AICUT_DENOISE_DIR = resolveAsset('models', 'denoise');
+  process.env.AICUT_PANNS_DIR = resolveAsset('models', 'panns');
+  // Qwen3-ForcedAligner（qwen3_fa, 1.8G, >500M）走一键补全：缺省指向 resources/models/asr/qwen3_fa，
+  // 下载后落到 userData/aicut-assets/models/asr/qwen3_fa，由 local_asr.py 经 AICUT_QWEN3FA_DIR 读取。
+  process.env.AICUT_QWEN3FA_DIR = resolveAsset('models', 'asr/qwen3_fa');
 }
 
 // 内置字体目录：

@@ -61,7 +61,10 @@
       {
         "from": "../cdn-upload/models",
         "to": "models",
-        "filter": ["!rmbg2.onnx", "!sr_v0_test.onnx"]
+        "filter": [
+          "!rmbg2.onnx",
+          "!sr_v0_test.onnx"
+        ]
       }
     ],
     "directories": {
