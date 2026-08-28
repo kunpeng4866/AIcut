@@ -1,0 +1,3 @@
+from .configuration_qwen3_asr import Qwen3ASRConfig
+from .modeling_qwen3_asr import Qwen3ASRForConditionalGeneration
+from .processing_qwen3_asr import Qwen3ASRProcessor
