@@ -40,6 +40,11 @@ export const DEFAULT_CDN_BASE = 'https://REPLACE_WITH_YOUR_CDN_BASE/';
 const QWEN3FA_MS_BASE = 'https://modelscope.cn/api/v1/models/Qwen/Qwen3-ForcedAligner-0.6B/repo?Revision=master&FilePath=';
 const QWEN3FA_HF_BASE = 'https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/resolve/main/';
 
+// 自有资产仓库（kunpeng4866/aicut-assets，ModelScope 公开免费镜像，实测可 fetch）。
+// 存放 AIcut 自行加工/打包、公共仓库没有的权重：python 运行时、modnet fp16、
+// DFN3 三件套+config、PANNs 帧级 SED。FilePath= 后拼仓库内相对路径。
+const AICUT_MS_BASE = 'https://modelscope.cn/api/v1/models/kunpeng4866/aicut-assets/repo?Revision=master&FilePath=';
+
 // python.zip 的 sha256 / 体积。源：Compress-Archive 打包 pack-staging/python（3.1G → 1.68G）。
 // ⚠️ zip 内部自带顶层 `python/` 目录，主进程解压时必须解到 aicut-assets 根（不可再套一层 python/）。
 // 换过 python 环境后必须重算：sha256sum pack-staging/download-assets/python.zip
@@ -61,9 +66,8 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: PYTHON_ZIP_SIZE,
         sha256: PYTHON_ZIP_SHA256,
         requiredBy: ['keying', 'sr'],
-        // ⚠️ 免费分发缺口：python.zip 为自有打包产物（1.68G），无公共镜像可挂。
-        // 现状：离线全量包已内置 python；精简版用户暂需自建 CDN 基址。
-        // 待办：发布到自有 ModelScope 仓库（免费）后回填 domesticUrl。
+        // 自有打包产物（1.68G），已发布到 kunpeng4866/aicut-assets 公开仓库，国内直连可拉。
+        domesticUrl: AICUT_MS_BASE + 'python/python.zip',
       },
       {
         id: 'modnet',
@@ -75,9 +79,9 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 25888640,
         sha256: '07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9',
         requiredBy: ['keying'],
-        // ⚠️ 本地 26MB fp16 为自有导出（ModelScope 上的 Xenova/modnet 为 fp32 全量版，
-        // 字节与哈希不同，不可混用）。国内默认源待发布自有 ModelScope 仓库后回填 domesticUrl；
-        // 届时 externalUrl 指向 GitHub Releases 作外网备选（用户可走国内或外网）。
+        // 本地 26MB fp16 为自有导出（ModelScope 上的 Xenova/modnet 为 fp32 全量版，字节与哈希不同，不可混用）。
+        // 已发布到 kunpeng4866/aicut-assets 公开仓库（models/keying/modnet.onnx）。
+        domesticUrl: AICUT_MS_BASE + 'models/keying/modnet.onnx',
       },
       {
         id: 'rmbg2',
@@ -111,6 +115,7 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 2067,
         sha256: '415eb925d44990d938fb739f514aa3662c1ec0ea836cff044fa1291b82cb4290',
         requiredBy: ['speech'],
+        domesticUrl: AICUT_MS_BASE + 'models/denoise/config.ini',
       },
       {
         id: 'denoise-enc',
@@ -122,6 +127,7 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 1954042,
         sha256: '7c5399d3da8a50ebef1c1a0ae421b33376aa5e45d0e92df16da7e83c9c131916',
         requiredBy: ['speech'],
+        domesticUrl: AICUT_MS_BASE + 'models/denoise/enc.onnx',
       },
       {
         id: 'denoise-df-dec',
@@ -133,6 +139,7 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 3340803,
         sha256: '23114ce3b0f6464b763ee62f7bb8aab6b2a129a21eabd5bcfe59413db05f278a',
         requiredBy: ['speech'],
+        domesticUrl: AICUT_MS_BASE + 'models/denoise/df_dec.onnx',
       },
       {
         id: 'denoise-erb-dec',
@@ -144,6 +151,7 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 3292397,
         sha256: 'ab669a1d10afe20911728b33053a452071042317a90581092b325da7b2f9d895',
         requiredBy: ['speech'],
+        domesticUrl: AICUT_MS_BASE + 'models/denoise/erb_dec.onnx',
       },
       {
         id: 'denoise-frcrn',
@@ -176,6 +184,7 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 327428481,
         sha256: 'dd3b4043a87d4ec13df8082c0fcfee3fb5084151808e47e060987a95eabdd142',
         requiredBy: ['speech'],
+        domesticUrl: AICUT_MS_BASE + 'models/panns/Cnn14_DecisionLevelMax_mAP=0.385.pth',
       },
       {
         id: 'panns-labels',
@@ -187,6 +196,7 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         size: 14675,
         sha256: 'cdd1049833c4b86127c2773ac0d14a2754b6a6d0d1798002ed5c66e699708429',
         requiredBy: ['speech'],
+        domesticUrl: AICUT_MS_BASE + 'models/panns/class_labels_indices.csv',
       },
       // ---- #1 强制对齐核心：Qwen3-ForcedAligner 本地权重（safetensors，非 ONNX）----
       // 以下 9 文件共同组成 qwen3_fa 模型目录；权重缺失时 #1 强制对齐走 whisper.cpp /
