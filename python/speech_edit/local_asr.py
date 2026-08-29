@@ -84,6 +84,27 @@ def _load_16k_mono(wav_path: str):
 # ══════════════════════════════════════════════════════
 # [1] FunASR Paraformer 本地字级识别
 # ══════════════════════════════════════════════════════
+def _modelscope_snapshot(repo_id: str) -> str:
+    """解析 ModelScope 缓存在本地的权重快照目录（离线优先）：
+    <FUNASR_CACHE>/models/<namespace--name>/snapshots/<rev>/ 。
+
+    funasr 1.4.x 已不再注册 "paraformer-zh"/"fsmn-vad" 之类的旧版快捷名，
+    直接用 repo id 会在无网/弱网/沙箱环境抛 "not registered"（进而整条本地 ASR 链路
+    静默回退 whisper、Qwen3-FA 根本不跑 → "装了 Qwen3-FA 精度反而下降"的诱因）。
+    故优先用本地缓存快照目录加载，缺快照时才退回 repo id 走在线下载。
+    返回空串表示本地无缓存。"""
+    ns_name = repo_id.replace("/", "--")
+    base = os.path.join(_FUNASR_CACHE, "models", ns_name, "snapshots")
+    if not os.path.isdir(base):
+        return ""
+    revs = [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))]
+    if not revs:
+        return ""
+    # 取最新修改的快照（兼容 revision 变化）
+    revs.sort(key=lambda d: os.path.getmtime(os.path.join(base, d)), reverse=True)
+    return os.path.join(base, revs[0])
+
+
 def _get_funasr():
     global _funasr_model
     if _funasr_model is not None:
@@ -91,9 +112,17 @@ def _get_funasr():
     try:
         os.environ.setdefault("MODELSCOPE_CACHE", _FUNASR_CACHE)
         from funasr import AutoModel
+        # funasr 1.4.x 已移除 "paraformer-zh"/"fsmn-vad" 旧快捷名；改为指向本地
+        # ModelScope 缓存快照（离线可用），缺失时退回 repo id 在线拉取。
+        _MODEL_REPO = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+        _VAD_REPO = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+        _md = _modelscope_snapshot(_MODEL_REPO)
+        _vd = _modelscope_snapshot(_VAD_REPO)
+        _model_arg = _md if _md else _MODEL_REPO
+        _vad_arg = _vd if _vd else _VAD_REPO
         _funasr_model = AutoModel(
-            model="paraformer-zh",
-            vad_model="fsmn-vad",
+            model=_model_arg,
+            vad_model=_vad_arg,
             disable_update=True,
             device="cuda" if _cuda_ok() else "cpu",
         )
@@ -173,6 +202,22 @@ def _get_qwen_fa():
         if not os.path.isdir(_QWEN_FA_DIR) or not os.listdir(_QWEN_FA_DIR):
             sys.stderr.write("[local_asr] Qwen3-FA 权重缺失，跳过强制对齐\n")
             return None
+        # 鲁棒导入 qwen_asr：按"本文件所在目录下的 qwen_asr 子包"用 importlib 显式加载，
+        # 不依赖 sys.path 含 speech_edit（bridge.py 会塞，但其它调用上下文不一定）。
+        # 否则一旦 qwen_asr 顶层导入失败，会静默回退到 FunASR 原生粗时间戳
+        # → "装了 Qwen3-FA 但精度反而下降"的诱因之一。
+        import importlib.util as _iu
+        _qa_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen_asr")
+        _qa_init = os.path.join(_qa_dir, "__init__.py")
+        if not os.path.isfile(_qa_init):
+            sys.stderr.write("[local_asr] 未找到 qwen_asr 子包，跳过强制对齐\n")
+            return None
+        if "qwen_asr" not in sys.modules:
+            _spec = _iu.spec_from_file_location(
+                "qwen_asr", _qa_init, submodule_search_locations=[_qa_dir])
+            _qam = _iu.module_from_spec(_spec)
+            sys.modules["qwen_asr"] = _qam
+            _spec.loader.exec_module(_qam)
         from qwen_asr import Qwen3ForcedAligner
         import torch
         dtype = torch.bfloat16 if _cuda_ok() else torch.float32

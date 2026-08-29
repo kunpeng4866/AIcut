@@ -937,17 +937,35 @@ def _spectral_flatness(audio: np.ndarray, s: float, e: float, sr: int) -> float:
 # ══════════════════════════════════════════════════════
 
 def detect_fillers(words: list, pad: float = 0.04) -> list:
-    """Whisper 转写文本中匹配到的填充词 → 删除区间。"""
+    """转写文本中匹配到的填充词 → 删除区间。
+
+    兼容两种 words 粒度：
+      - 旧链路(whisper/cloud)常为词级：直接单字/单词匹配；
+      - 本地 ASR + Qwen3-FA 产出逐字 words（每 word 一个汉字），此时多字语气词
+        （"那个那个"/"就是说"/"你知道吧"）无法被单字匹配命中 → 在连续字上做滑动窗口，
+        拼接前缀匹配最长语气词，恢复多字填充词切除精度（修复"装了 Qwen3-FA 精度反降"）。
+    """
+    MAX_FILLER_LEN = max((len(f) for f in FILLERS), default=1)
+    # 仅保留有非空文本的字/词
+    items = [w for w in words if w.get("word", "").strip(_PUNCT)]
+    n = len(items)
     out = []
-    for w in words:
-        t = w["word"].strip(_PUNCT).lower()
-        if not t:
-            continue
-        hit = t in FILLERS or t in _SINGLE_FILLER
-        if not hit and len(t) <= 2:
-            hit = t in FILLERS
-        if hit:
-            out.append((max(0.0, w["start"] - pad), w["end"] + pad))
+    if n == 0:
+        return out
+    i = 0
+    while i < n:
+        best_j = -1
+        # 从 i 起取最多 MAX_FILLER_LEN 个字，优先匹配最长语气词（避免"那个"截断"那个那个"）
+        for k in range(min(MAX_FILLER_LEN, n - i), 0, -1):
+            s = "".join(items[i + m]["word"].strip(_PUNCT).lower() for m in range(k))
+            if s in FILLERS or s in _SINGLE_FILLER:
+                best_j = i + k - 1
+                break
+        if best_j >= 0:
+            out.append((max(0.0, items[i]["start"] - pad), items[best_j]["end"] + pad))
+            i = best_j + 1
+        else:
+            i += 1
     return out
 
 
@@ -2111,9 +2129,13 @@ def analyze(input_path: str, opts: dict) -> dict:
         else:
             print("[1/6] 跳过 Demucs", flush=True)
 
-        # ── [1b] 降噪（P0-B）：opts.denoise=True 时在检测前对 16k 音频降噪 ──
-        # 降噪后的音频既进 ASR 也进各声学检测器（噪声底更低 → 事件 onset 更干净）；
-        # 失败一律 no-op 降级 + warning，绝不阻断分析。
+        # ── [1b] 降噪（P0-B）：opts.denoise=True 时生成「干净人声」成片音频 ──
+        # 【关键】降噪结果只用于成片（enhancedAudioPath），【绝不】替换 work_wav 进检测链路。
+        # 实测 DFN3 降噪会改变语气词等低能量词的声学特征，导致 FunASR/Qwen3-FA
+        # 字级时间戳漂移（「呃」从 1.44s 漂到 4.16s）+ 事件检测区间错位，
+        # 间隙判据（isolateGapSec）随之失效 → 咳嗽/语气词被误判「紧贴语流」而保留。
+        # 故转写与各声学检测器一律用降噪前的 work_wav（demucs 后 / denoise 前），
+        # 保持时间轴零漂移；失败一律 no-op 降级 + warning，绝不阻断分析。
         denoise_method = "none"
         enhanced_audio_path = ""
         if do_denoise:
@@ -2123,7 +2145,6 @@ def analyze(input_path: str, opts: dict) -> dict:
                 work_wav, dn_path, quality=denoise_quality,
                 mask_soften=mask_soften, mask_soften_floor=mask_soften_floor)
             if ok_dn:
-                work_wav = dn_path
                 # 「干净人声直接入片」：把降噪波形持久化到源文件旁并随结果返回；
                 # Rust 组装端检测到 enhancedAudioPath 时用它重建成片音轨（波形与源
                 # 时间轴零平移对齐）。标准档(DFN3)走全带宽 48k 通道（保留齿音/气声/
@@ -2472,11 +2493,19 @@ def analyze(input_path: str, opts: dict) -> dict:
                            + respiro_events + stutter_events)
         gap_breath_kept = list(gap_breath)   # 结构性呼吸间隙不算语义剪切
 
-        # ── [EDL-g] 接缝安全阀（宁缺毋滥硬原则的最终执行者）──
-        # 任何「两侧均为发声」的洞一律回填＝连续语流内部不做任何自动剪切。
-        # 理由：剪断连续浊音必然在接缝处破坏韵律（pitch/共振峰/节奏跳变），
-        # 这已被多轮用户验收证伪。被回填区间以 seam_suggest 建议事件呈现，
-        # 用户在时间轴上试听后可人工决定删除；句间停顿与贴静音的事件不受影响。
+        # ── [EDL-g] 接缝安全阀（自然流畅最终判据：语音间隙长短）──
+        # 判据不是「是否检测到事件」，而是【被删区间与两侧语音的距离】：
+        #   min(左间隙, 右间隙) ≥ isolateGapSec → 该段是「语音孤岛」，
+        #       切除后接缝落在静音里，不破坏韵律，删掉反而更自然流畅 → 放行；
+        #   min(左间隙, 右间隙) <  isolateGapSec → 该段紧贴连续语流，
+        #       剪断连续浊音必然在接缝处破坏韵律（pitch/共振峰/节奏跳变）→ 回填转建议。
+        # 阈值由 0.20~0.55 逐档实测扫描标定（test-assets/_audit/robustness.json）：
+        #   紧凑样本 06_fillers_denoised.wav（要求不删）→ 全档恒为 0 洞、删除量恒 1.04s；
+        #   孤立样本 音频测试.m4a（要求删）→ T≤0.35 命中全部 5 个目标，
+        #     T≥0.40 掉到 4/5（丢掉孤立的「嗯」，其洞侧最小间隙 0.37s）；
+        #     T=0.20 会多切一个过紧的洞 6.79-7.42（原始最小间隙仅 0.225s，有机关枪感）。
+        #   ⇒ 稳健区间 [0.25, 0.35]，取 0.30s，两侧各留 ~0.05s 余量。
+        _iso_thr = float(opts.get("isolateGapSec", 0.30))
         if not bool(opts.get("allowInteriorCuts", False)) \
                 and not os.environ.get("AICUT_EDL_OFF"):
             try:
@@ -2487,11 +2516,34 @@ def analyze(input_path: str, opts: dict) -> dict:
                 _w = max(1, int(0.12 / _fs_g))
                 _nf = len(_env_g) if _env_g is not None else 0
 
+                _gap_words = locals().get("words") or []
+                _gap_dur = float(dur)
+
+                def _gap_to_speech(ha, hb, _w=_gap_words, _d=_gap_dur):
+                    """洞 [ha,hb] 两侧到最近『字』的距离（Qwen3-FA 逐字时间戳）。
+                    任一侧无字（段首/段尾）→ 视为足够远，用整段时长兜底。"""
+                    _l = [float(x["end"]) for x in _w
+                          if x.get("end") is not None and float(x["end"]) <= ha + 1e-3]
+                    _r = [float(x["start"]) for x in _w
+                          if x.get("start") is not None and float(x["start"]) >= hb - 1e-3]
+                    return ((ha - max(_l)) if _l else _d,
+                            (min(_r) - hb) if _r else _d)
+
                 def _unsafe(ha, hb):
-                    """洞与任何「语义/声学检测事件」重叠 → 视为动过语流，
-                    回填并转建议。纯停顿/静音结构洞（无事件覆盖）安全放行。"""
-                    return any(min(hb, ce) - max(ha, cs) > 0.02
-                               for cs, ce in _cand_ivs)
+                    """按【语音间隙长短】判定洞是否动过语流（自然流畅为最终目标）：
+                    ① 未与任何检测事件重叠 → 纯停顿/静音结构洞，安全放行（原行为）；
+                    ② 与事件重叠，但两侧距最近语音均 ≥ _iso_thr → 语音孤岛，
+                       接缝落在静音内，切除更自然流畅 → 安全放行；
+                    ③ 与事件重叠且任一侧紧贴语音(< _iso_thr) → 切断连续语流必损韵律
+                       → 回填并转建议事件（不自动删）。
+                    无转写（ASR 失败）时词不可信 → 保守退回①之外的全回填。"""
+                    if not any(min(hb, ce) - max(ha, cs) > 0.02
+                               for cs, ce in _cand_ivs):
+                        return False
+                    if not _gap_words:
+                        return True
+                    gl, gr = _gap_to_speech(ha, hb)
+                    return min(gl, gr) < _iso_thr
 
 
                 _interior = [(a, b) for a, b in
@@ -2527,13 +2579,43 @@ def analyze(input_path: str, opts: dict) -> dict:
         if _sw and not os.environ.get("AICUT_EDL_OFF"):
             try:
                 _kkh = [(float(a), float(b)) for a, b in _union(keep)]
-                _fw = min(float(w.get("start") or 0) for w in _sw)
-                _lw = max(float(w.get("end") or 0) for w in _sw)
+                # 首尾词保护只保护「真实内容词」。语气词(text_fillers)本身就是待删目标，
+                # 若首个/末个转写字恰好是语气词（如样本开头的「呃」），原逻辑会把它
+                # 当成「被头删吃掉的问候语」强行复活，导致首尾语气词永不可删。
+                # 但 text_fillers 存在误报（如 A 样本开头的「这个」本是内容词却被判为
+                # 语气词），若不加区分地排除，头裁剪会把「这个问题」一起吃掉。
+                # ⇒ 复用同一套间隙判据：只有【孤立】的语气词区间才不参与首尾保护。
+                #   A「这个」1.16-1.48：右间隙仅 0.20s < 0.30 → 非孤立 → 照常保护 ✓
+                #   B 开头「呃」1.40-1.80：右间隙 3.72s ≥ 0.30 → 孤立 → 不予保护 ✓
+                _fill_ivs = _union(locals().get("text_fillers") or [])
+                _thr_i = float(locals().get("_iso_thr", 0.30))
+                _w_starts = sorted(float(w["start"]) for w in _sw
+                                   if w.get("start") is not None)
+                _w_ends = sorted(float(w["end"]) for w in _sw
+                                 if w.get("end") is not None)
+
+                def _iv_isolated(a, b, _th=_thr_i, _d=float(dur)):
+                    _l = [x for x in _w_ends if x <= a + 1e-3]
+                    _r = [x for x in _w_starts if x >= b - 1e-3]
+                    return min((a - max(_l)) if _l else _d,
+                               (min(_r) - b) if _r else _d) >= _th
+
+                _drop = [(a, b) for a, b in _fill_ivs if _iv_isolated(a, b)]
+
+                def _is_dropped_word(w, _dv=_drop):
+                    _s = float(w.get("start") or 0)
+                    _e = float(w.get("end") or 0)
+                    _m = (_s + _e) / 2.0
+                    return any(_a <= _m <= _b for _a, _b in _dv)
+
+                _prot = [w for w in _sw if not _is_dropped_word(w)]
+                _fw = min((float(w.get("start") or 0) for w in _prot), default=None)
+                _lw = max((float(w.get("end") or 0) for w in _prot), default=None)
                 changed = False
-                if _kkh[0][0] > _fw + 0.03:      # 头部裁剪吃掉了首个词
+                if _fw is not None and _kkh[0][0] > _fw + 0.03:   # 头部裁剪吃掉了首个词
                     _kkh[0] = (max(0.0, _fw - 0.04), _kkh[0][1])
                     changed = True
-                if _kkh[-1][1] < _lw - 0.03:     # 尾部裁剪吃掉了末个词
+                if _lw is not None and _kkh[-1][1] < _lw - 0.03:  # 尾部裁剪吃掉了末个词
                     _kkh[-1] = (_kkh[-1][0], min(dur, _lw + 0.06))
                     changed = True
                 if changed:
@@ -2558,6 +2640,58 @@ def analyze(input_path: str, opts: dict) -> dict:
                     warnings_out.append(_gn)
             except Exception as _e:
                 warnings_out.append(f"edl_guard_failed:{_e}")
+
+        # ── [EDL-i] 接缝余量守卫（「自然流畅」最终目标的收口，只收不放）──
+        # 上面多道 EDL（整词化 / 词界避让 / 首尾词保护）会推移洞的边界，
+        # 实测出现剪点紧贴某个字仅残 0.012s 的情况。Qwen3-FA 时间戳本身有
+        # ±0.02s 误差，贴字剪切随时可能吃掉起音/收尾辅音 → 可闻缺陷。
+        # 这里把过近的那一侧洞边界【向内收】，保证剪点距最近的字 ≥ seamMarginSec；
+        # 洞被收到不足 0.04s 则直接回填合并（宁缺毋滥）。
+        # 关键：本守卫只会【还原音频】、绝不会多切，因此不可能引入新的误删。
+        _sm_words = locals().get("_src_words") or []
+        if _sm_words and not os.environ.get("AICUT_EDL_OFF"):
+            try:
+                _marg = float(opts.get("seamMarginSec", 0.08))
+                _kkm = [(float(a), float(b)) for a, b in _union(keep)]
+                if len(_kkm) > 1:
+                    _wstarts = sorted(float(w["start"]) for w in _sm_words
+                                      if w.get("start") is not None)
+                    _wends = sorted(float(w["end"]) for w in _sm_words
+                                    if w.get("end") is not None)
+
+                    def _near_end_before(t):
+                        c = [x for x in _wends if x <= t + 1e-3]
+                        return max(c) if c else None
+
+                    def _near_start_after(t):
+                        c = [x for x in _wstarts if x >= t - 1e-3]
+                        return min(c) if c else None
+
+                    _out = [list(_kkm[0])]
+                    _fixed = 0
+                    for i in range(len(_kkm) - 1):
+                        a, b = _kkm[i][1], _kkm[i + 1][0]
+                        na, nb = a, b
+                        _pe = _near_end_before(a)
+                        _ns = _near_start_after(b)
+                        if _pe is not None and (a - _pe) < _marg:
+                            na = _pe + _marg          # 左侧收：留住字尾/收音
+                        if _ns is not None and (_ns - b) < _marg:
+                            nb = _ns - _marg          # 右侧收：留住起音辅音
+                        if nb - na < 0.04:            # 洞被收没了 → 回填（合并保留段）
+                            _out[-1][1] = _kkm[i + 1][1]
+                            _fixed += 1
+                            continue
+                        if na > a + 1e-4 or nb < b - 1e-4:
+                            _fixed += 1
+                        _out[-1][1] = min(max(na, _out[-1][0]), dur)
+                        _out.append([min(max(nb, 0.0), dur), _kkm[i + 1][1]])
+                    keep = _edl_union([(x, y) for x, y in _out if y - x > 1e-3])
+                    if _fixed:
+                        print(f"  [EDL] 接缝余量守卫：收窄 {_fixed} 个贴字剪点"
+                              f"（余量 {_marg:.2f}s，只还原不多切）", flush=True)
+            except Exception as _e:
+                warnings_out.append(f"edl_seammargin_failed:{_e}")
 
         # ── [P1] 暂停压缩优先 + 语速统计（纯逻辑，增量输出）──
         # 用于「是否插暂停」判定的硬删集合：仅含真正打断语句 interior 删除的声音事件
