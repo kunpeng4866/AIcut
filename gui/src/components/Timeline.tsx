@@ -24,6 +24,12 @@ const pathToUrl = (path: string): string => {
   return `aicut-asset:///${normalized}`;
 };
 
+// 从文件路径提取文件名（与 MediaPanel.getFilename 一致），用于时间轴片段标签与左侧栏素材名对齐。
+const basenameOf = (path: string): string => {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return idx >= 0 ? path.substring(idx + 1) : path;
+};
+
 // Unique id generator for new assets/clips created by separation.
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -676,7 +682,7 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
       <span style={{ position: 'absolute', top: 2, left: 8, fontSize: 11, color: '#eee', pointerEvents: 'none' }}>
         {clip.subtitle
           ? (clip.subtitle.items[0]?.text || '字幕')
-          : clip.assetId}
+          : (asset ? basenameOf(asset.path) : clip.assetId)}
       </span>
       {/* 蒙版标记：带启用蒙版的片段右上角显示图标 */}
       {clip.masks && clip.masks.some((m) => m.enabled) && (

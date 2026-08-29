@@ -27,6 +27,10 @@ export const sortTracks = (tracks: TrackConfig[]): TrackConfig[] => {
   });
 };
 
+// 清理空非主轨：主视频轨永远保留，其余轨道若无素材则自动移除（需求：空轨自动消失、不再保留）。
+const pruneEmptyTracks = (tracks: TrackConfig[]): TrackConfig[] =>
+  tracks.filter((t) => t.isMain || t.clips.length > 0);
+
 const calcInsertIndex = (tracks: TrackConfig[], type: string): number => {
   const priority = TYPE_PRIORITY[type] ?? 1;
   for (let i = tracks.length - 1; i >= 0; i--) {
@@ -167,8 +171,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     filePath: null,
     clipboard: [],
     setProject: (p) => {
-      // 确保加载的工程有主视频轨
-      const tracks = sortTracks(p.tracks);
+      // 确保加载的工程有主视频轨，并清理空非主轨（不再保留）
+      const tracks = pruneEmptyTracks(sortTracks(p.tracks));
       if (!tracks.some(t => t.type === 'video' && t.isMain)) {
         const mainIdx = tracks.findIndex(t => t.type === 'video');
         if (mainIdx >= 0) tracks[mainIdx] = { ...tracks[mainIdx], isMain: true };
@@ -194,8 +198,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       const raw = await window.aicut.loadProject(path);
       useHistoryStore.getState().clear();
       const parsed = JSON.parse(raw);
-      // 确保加载的工程有主视频轨
-      const tracks = sortTracks(parsed.tracks || []);
+      // 确保加载的工程有主视频轨，并清理空非主轨（不再保留）
+      const tracks = pruneEmptyTracks(sortTracks(parsed.tracks || []));
       if (!tracks.some(t => t.type === 'video' && t.isMain)) {
         const mainIdx = tracks.findIndex(t => t.type === 'video');
         if (mainIdx >= 0) tracks[mainIdx] = { ...tracks[mainIdx], isMain: true };
@@ -229,12 +233,16 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       ...p,
       assets: p.assets.map((a) => (a.id === id ? { ...a, proxyPath } : a)),
     })),
-    removeAsset: (id) => mutate((p) => ({
-      ...p,
-      assets: p.assets.filter((a) => a.id !== id),
-      // 一并清理引用该素材的时间轴片段，避免孤儿引用导致预览/导出异常
-      tracks: p.tracks.map((t) => ({ ...t, clips: t.clips.filter((c) => c.assetId !== id) })),
-    })),
+    removeAsset: (id) => mutate((p) => {
+      const updated = {
+        ...p,
+        assets: p.assets.filter((a) => a.id !== id),
+        // 一并清理引用该素材的时间轴片段，避免孤儿引用导致预览/导出异常
+        tracks: p.tracks.map((t) => ({ ...t, clips: t.clips.filter((c) => c.assetId !== id) })),
+      };
+      // 清理引用片段后变空的非主轨（空轨自动消失、不再保留）
+      return { ...updated, tracks: pruneEmptyTracks(updated.tracks) };
+    }),
     // 轨道数量不限制（设计上曾写“先不要少于10个”作最低建议，现已放开）：
     // 加轨/插轨均直接写入，无 MAX_TRACKS 上限判断。
     addTrack: (type) => {
@@ -321,7 +329,9 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     }),
     removeClip: (trackId, clipId) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
-      return withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.filter((c) => c.id !== clipId)));
+      const updated = withMainTrackRealign(mapTrackClips(p, trackId, (clips) => clips.filter((c) => c.id !== clipId)));
+      // 删除片段后，若所在轨道变空且非主轨，则自动移除该轨道（空轨消失、不再保留）。
+      return { ...updated, tracks: pruneEmptyTracks(updated.tracks) };
     }),
     // 复制单片段（向后兼容）：内部走 copyClips
     copyClip: (trackId, clipId) => { get().copyClips([{ trackId, clipId }]); },
@@ -524,7 +534,8 @@ export const useProjectStore = create<ProjectState>((set, get) => {
           return t;
         }),
       };
-      return withMainTrackRealign(updated);
+      // 移走片段后源轨可能变空：自动移除变空的非主轨（空轨消失、不再保留）
+      return withMainTrackRealign({ ...updated, tracks: pruneEmptyTracks(updated.tracks) });
     }),
     updateTransform: (trackId, clipId, key, value) => mutate((p) => {
       if (p.tracks.find(t => t.id === trackId)?.locked) return p;
