@@ -114,16 +114,23 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     const st = get().status;
     const missing = ids.filter((id) => !st?.[id]);
     if (missing.length === 0) return true;
-    if (!get().isPlaceholder) {
-      const ok = window.confirm(
-        '该功能需要 AI 组件（Python 运行时 / 模型权重），当前未安装。是否立即从 CDN 下载补全？（约数 GB，支持断点续传）',
-      );
-      if (!ok) return false;
-      const r = await get().download(missing);
-      return r.success;
+    // 仅当缺失条目中存在「无任何免费镜像直链（domesticUrl/externalUrl/absoluteUrl）」的条目时，
+    // 才要求用户先配置自建 CDN；有直链的条目（python/modnet/rmbg2 等）可直接下载、不依赖 CDN。
+    // 与主进程 assets:download 的「无直链才要求 CDN」判断保持一致。
+    const hasNoDirectMissing = missing.some((id) => {
+      const e = get().entries.find((x) => x.id === id);
+      return !e || !e.hasDirect;
+    });
+    if (hasNoDirectMissing) {
+      window.alert('该功能需要 AI 组件，但部分组件缺少免费镜像直链，需先配置 CDN 地址。请点击右上角「AI组件」填写地址后补全。');
+      get().setShowManager(true);
+      return false;
     }
-    window.alert('该功能需要 AI 组件，但 CDN 地址尚未配置。请点击右上角「AI组件」填写地址后补全。');
-    get().setShowManager(true);
-    return false;
+    const ok = window.confirm(
+      '该功能需要 AI 组件（Python 运行时 / 模型权重），当前未安装。是否立即下载补全？（约数 GB，支持断点续传）',
+    );
+    if (!ok) return false;
+    const r = await get().download(missing);
+    return r.success;
   },
 }));

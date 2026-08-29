@@ -439,7 +439,7 @@ export interface AicutAPI {
   getFontsDir(): Promise<string>;
   // 补全资产（一键补全）：探测缺失 / 下载 / 进度
   assets: {
-    status(): Promise<{ baseUrl: string; isPlaceholder: boolean; status: Record<string, boolean>; entries: { id: string; name: string; size: number; requiredBy: string[] }[] }>;
+    status(): Promise<{ baseUrl: string; isPlaceholder: boolean; status: Record<string, boolean>; entries: { id: string; name: string; size: number; requiredBy: string[]; hasDirect?: boolean }[] }>;
     download(opts?: { ids?: string[] }): Promise<{ success: boolean; error?: string; doneCount?: number }>;
     onProgress(callback: (p: any) => void): void;
   };
