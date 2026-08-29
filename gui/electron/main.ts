@@ -9,7 +9,7 @@ import { join, dirname, basename, delimiter } from 'path';
 import { pathToFileURL } from 'url';
 import { createHash } from 'crypto';
 import { applyExportOptions, applyAudioExport, buildSubtitleExport, parseShellArgs, type ExportOptionsParam } from './exportOptions';
-import { getManifest, DEFAULT_CDN_BASE } from './assets-manifest';
+import { getManifest, DEFAULT_CDN_BASE, type AssetEntry } from './assets-manifest';
 
 let mainWindow: BrowserWindow | null = null;
 const ENGINE_BIN = app.isPackaged
@@ -65,6 +65,20 @@ function resolveAsset(sub: string, name: string): string {
   const res = join(process.resourcesPath, sub, name);
   try { if (existsSync(res)) return res; } catch { /* 忽略 */ }
   return join(assetsDir(), sub, name);
+}
+
+// dev 模式下，AI 运行时/模型在源码树内（pack-staging/python、cdn-upload/models、python/models），
+// 而非 resources / userData。assets:status 额外探测这些 dev 落点，避免 dev 下误报「缺失」。
+function devAssetExists(e: AssetEntry): boolean {
+  if (app.isPackaged) return false;
+  const root = join(__dirname, '../..'); // E:\AIcut
+  if (e.kind === 'zip') {
+    return existsSync(join(root, 'pack-staging', 'python', 'python.exe'));
+  }
+  // file 类：cdn-upload/<targetSub>/<targetName>；qwen3_fa 等在 python/models/<rel>/<targetName>
+  const rel = e.targetSub.replace(/^models[\\/]?/, '');
+  return existsSync(join(root, 'cdn-upload', e.targetSub, e.targetName))
+    || existsSync(join(root, 'python', 'models', rel, e.targetName));
 }
 // 在 app ready 后调用：按「resources 优先、否则回退 userData」解析 python / models 环境变量（仅打包模式）。
 function setupAssetEnv() {
@@ -492,10 +506,10 @@ ipcMain.handle('assets:status', async () => {
   const status: Record<string, boolean> = {};
   for (const e of manifest.entries) {
     if (e.kind === 'file') {
-      status[e.id] = existsSync(resolveAsset(e.targetSub, e.targetName));
+      status[e.id] = existsSync(resolveAsset(e.targetSub, e.targetName)) || devAssetExists(e);
     } else {
       // zip：resources 或 userData 中的 python 目录含 python.exe 即视为就绪
-      status[e.id] = existsSync(join(resolveAsset(e.targetSub, ''), 'python.exe'));
+      status[e.id] = existsSync(join(resolveAsset(e.targetSub, ''), 'python.exe')) || devAssetExists(e);
     }
   }
   return {
