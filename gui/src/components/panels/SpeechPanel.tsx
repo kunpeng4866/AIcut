@@ -60,25 +60,26 @@ type PresetValues = {
   declick: boolean;
   maskSoften: boolean;
   maskSoftenFloor: number;
+  isolateGapSec: number;
 };
 const PRESETS: Record<PresetKey, PresetValues> = {
   light: {
     modelSize: 'base', useDemucs: false, vadThreshold: 0.3, minGap: 0.1, wordPad: 0.02,
     denoise: true, denoiseQuality: 'standard', deess: false, normalize: false, fillers: true,
     keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.4,
-    respiroBreath: false, stutterDetect: true, stutterThreshold: 0.4, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5,
+    respiroBreath: false, stutterDetect: true, stutterThreshold: 0.4, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5, isolateGapSec: 0.35,
   },
   standard: {
     modelSize: 'base', useDemucs: false, vadThreshold: 0.25, minGap: 0.18, wordPad: 0.04,
     denoise: true, denoiseQuality: 'standard', deess: false, normalize: false, fillers: true,
     keepNonspeech: true, trimSilence: true, sedEvents: true, sedThreshold: 0.5,
-    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.5, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5,
+    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.5, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5, isolateGapSec: 0.3,
   },
   aggressive: {
     modelSize: 'small', useDemucs: false, vadThreshold: 0.2, minGap: 0.05, wordPad: 0.06,
     denoise: true, denoiseQuality: 'high', deess: true, normalize: true, fillers: true,
     keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.6,
-    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.6, crossfadeMs: 30, declick: true, maskSoften: true, maskSoftenFloor: 0.5,
+    respiroBreath: true, stutterDetect: true, stutterThreshold: 0.6, crossfadeMs: 30, declick: true, maskSoften: true, maskSoftenFloor: 0.5, isolateGapSec: 0.25,
   },
 };
 
@@ -234,6 +235,7 @@ export default function SpeechPanel() {
   const [sedThreshold, setSedThreshold] = useState(speechPrefs?.sedThreshold ?? PRESETS.standard.sedThreshold);     // 副语言事件阈值 0~1
   const [maskSoften, setMaskSoften] = useState(speechPrefs?.maskSoften ?? PRESETS.standard.maskSoften);             // DFN3 mask 软化开关
   const [maskSoftenFloor, setMaskSoftenFloor] = useState(speechPrefs?.maskSoftenFloor ?? PRESETS.standard.maskSoftenFloor); // 软化增益阈值（听感微调）
+  const [isolateGapSec, setIsolateGapSec] = useState(speechPrefs?.isolateGapSec ?? PRESETS.standard.isolateGapSec);     // 孤立间隙阈值(秒)：洞两侧距最近语音均≥此值才判「语音孤岛」可删
 
   // ── assemble 选项 ──
   const [declick, setDeclick] = useState(speechPrefs?.declick ?? PRESETS.standard.declick);          // 去咔哒声(爆音)
@@ -260,6 +262,7 @@ export default function SpeechPanel() {
     stutterThreshold,
     maskSoften,
     maskSoftenFloor,
+    isolateGapSec,
   });
 
   // 应用预设：一次性 set 所有状态并持久化
@@ -284,6 +287,7 @@ export default function SpeechPanel() {
     setRespiroBreath(p.respiroBreath);
     setMaskSoften(p.maskSoften);
     setMaskSoftenFloor(p.maskSoftenFloor);
+    setIsolateGapSec(p.isolateGapSec);
     setCrossfadeMs(p.crossfadeMs);
     setDeclick(p.declick);
     persistSpeech({ ...p, preset: key });
@@ -754,6 +758,9 @@ export default function SpeechPanel() {
             {/* 滑块：结巴阈值 */}
             <SliderRow label="结巴阈值" value={stutterThreshold} min={0.1} max={0.9} step={0.05}
               onChange={(v) => setOpt(setStutterThreshold, 'stutterThreshold', v)} display={stutterThreshold.toFixed(2)} />
+            {/* 滑块：孤立间隙阈值（删/不删判据：洞两侧距最近语音均 ≥ 此值才判「语音孤岛」可删；越大越保守） */}
+            <SliderRow label="孤立间隙(s)·越大越保守" value={isolateGapSec} min={0.1} max={0.6} step={0.05}
+              onChange={(v) => setOpt(setIsolateGapSec, 'isolateGapSec', v)} display={isolateGapSec.toFixed(2)} />
 
             {/* 滑块：接缝平滑（assemble 用 crossfadeMs） */}
             <SliderRow label="接缝平滑(ms)" value={crossfadeMs} min={0} max={100} step={5}

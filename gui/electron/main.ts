@@ -23,10 +23,15 @@ try { process.env.AICUT_PLUGIN_DIR = join(__dirname, '../../plugins'); } catch {
 // 内置字体目录：传给 Rust 引擎，导出时 drawtext 用 fontfile= 指向随包字体，保证预览/导出一致。
 try { process.env.AICUT_FONTS_DIR = getFontsDir(); } catch { /* dev 兜底 */ }
 
-// 口播剪辑：托管 Python 解释器（已装齐 faster-whisper/silero-vad/demucs）+ bridge.py 路径
+// 口播剪辑：开发模式 Python 解释器。
+// ⚠️ 默认指向 pack-staging/python（含 funasr/librosa/transformers，本地 ASR 链路 FunASR+Qwen3-FA 才生效）；
+// 若该 staging 目录不存在则回退 WorkBuddy 托管 Python（仅含 faster-whisper，会静默降级到 whisper 粗时间戳）。
+// bridge 路径仍指向源码 python/speech_edit/bridge.py，故源码 core.py/local_asr.py 的修复照常生效。
 try {
+  const _devPyManaged = 'C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe';
+  const _devPyStaging = join(__dirname, '../../pack-staging/python/python.exe');
   process.env.AICUT_PYTHON_BIN = process.env.AICUT_PYTHON_BIN
-    || 'C:\\Users\\Administrator\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe';
+    || (existsSync(_devPyStaging) ? _devPyStaging : _devPyManaged);
   process.env.AICUT_SPEECH_BRIDGE = join(__dirname, '../../python/speech_edit/bridge.py');
   process.env.AICUT_KEYING_BRIDGE = join(__dirname, '../../python/keying/bridge.py');
   process.env.AICUT_SR_BRIDGE = join(__dirname, '../../python/sr/bridge.py');

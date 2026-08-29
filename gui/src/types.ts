@@ -313,6 +313,7 @@ export interface SpeechEditOptions {
   denoiseQuality?: 'standard' | 'high'; // 降噪档位：standard=DFN3；high=FRCRN 高质量(CPU)
   maskSoften?: boolean;          // DFN3 mask 软化（高 SNR 保留干净语音），默认 true
   maskSoftenFloor?: number;      // 软化增益阈值 0~1，默认 0.5（仅对增益≥此值的频带回混）；UI 可调 0.3~0.9
+  isolateGapSec?: number;        // 孤立间隙阈值(秒)，默认 0.30：洞两侧距最近语音均 ≥ 此值才判定为「语音孤岛」可删，否则保留转建议。值越大越保守（只删离语音远的），越小越激进
 }
 
 // 输出：与 W1 决策层 keep_segments + detail 对齐

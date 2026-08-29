@@ -77,6 +77,7 @@ export interface SpeechEditPrefs {
   declick?: boolean;
   maskSoften?: boolean;        // DFN3 mask 软化开关（高 SNR 保留干净语音），默认 true
   maskSoftenFloor?: number;    // 软化增益阈值 0.3~0.9，默认 0.5（UI 可调，微调听感）
+  isolateGapSec?: number;      // 孤立间隙阈值(秒)，默认 0.30，UI 可调：洞两侧距最近语音均≥此值才判定「语音孤岛」可删，否则保留
 }
 
 // 与 electron/assets-manifest.ts 的 DEFAULT_CDN_BASE 保持一致。
@@ -158,6 +159,7 @@ export function getDefaultConfig(): AIcutConfig {
       declick: true,
       maskSoften: true,
       maskSoftenFloor: 0.5,
+      isolateGapSec: 0.3,
     },
   };
 }
