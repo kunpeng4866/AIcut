@@ -2364,48 +2364,20 @@ def analyze(input_path: str, opts: dict) -> dict:
                 print(f"  [EDL] 碎片预算触发，回退类别: {_dropped} → 洞数={_edl_hole_count()}", flush=True)
 
         # ── 合并所有删除区 → 最终保留段 ──
-        # keepNonspeech=True（默认）：删除集的补集 = 保留背景音乐/环境音，仅删语音内噪声
-        # keepNonspeech=False（紧凑）：仅保留 VAD 语音段，段内再挖除各类填充/噪声，
-        #   非语音间隙（静音+音乐）整体丢弃。
+        # 两模式统一：keep = 事件删除集的补集。事件洞紧致、间隙判据(EDL-g)已按此标定，
+        # 能正确删除孤立的咳嗽/语气词（core.py L2496 注释 + audit 报告）。
+        #   keepNonspeech=True（默认）：保留背景音乐/环境音，仅删语音内噪声（= 上述 keep）。
+        #   keepNonspeech=False（紧凑）：上述 keep 再 ∩ VAD 语音段，丢弃语音段之间的非语音
+        #     间隙（静音+音乐）→ 实现「只留语音、删光非语音」。紧凑模式不再走「speech_regs
+        #     减事件」构造——那样会因 VAD 语音段粗粒度导致事件两侧小语音碎片被 EDL 误合并，
+        #     使事件删除失效、退化成只删头尾（修复 2026-08-29）。
         # vad_sil 仅在 ASR 失败兜底路径非空（VAD-only 静音间隙）。
-        if keep_nonspeech:
-            all_remove = _union(text_fillers + isolated + gap_breath +
-                                transients + intra_fillers + sound_events +
-                                sed_events + respiro_events +
-                                stutter_events +
-                                vad_sil + manual)
-            if os.environ.get("AICUT_KEEP_DEBUG"):
-                import sys as _s
-                _hit = [(round(s,2), round(e,2)) for s,e in _union(all_remove) if e > 12.4 and s < 14.6]
-                print(f"[keep-debug] all_remove@12.4-14.6: {_hit}", file=_s.stderr)
-            keep = _complement(all_remove, dur, min_keep=0.0)
-        else:
-            keep = []
-            for (vs, ve) in speech_regs:
-                rm = [(s, e) for (s, e) in
-                       (text_fillers + isolated + gap_breath + transients +
-                       intra_fillers + sound_events + sed_events + respiro_events +
-                       stutter_events +
-                       manual)
-                      if e > vs and s < ve]
-                if os.environ.get("AICUT_KEEP_DEBUG"):
-                    _near = [(round(s2,2), round(e2,2)) for s2,e2 in rm if e2>12.4 and s2<14.6]
-                    _hit = [x for x,_n in zip([1],_near)] and any(e2>13.21 and s2<13.43 for s2,e2 in _near)
-                    import sys as _s
-                    print(f"[keep-debug] reg {round(vs,2)}-{round(ve,2)} rm@12.4-14.6={_near} 目标在rm={bool(_near) and any(1 for _a,_b in _near if _b>13.21 and _a<13.43)}", file=_s.stderr)
-                if not rm:
-                    keep.append((vs, ve))
-                    continue
-                # ⚠️ 坐标修正：rm 为绝对时间，_complement 需相对本区间的时长坐标；
-                # 直接混用会算出 vs+绝对值 的鬼影跨度，把区域内本应删除的洞全部封死。
-                rm_rel = []
-                for es, ee in rm:
-                    rs_, re_ = max(es, vs) - vs, min(ee, ve) - vs
-                    if re_ - rs_ > 1e-4:
-                        rm_rel.append((rs_, re_))
-                seg = _complement(_union(rm_rel), ve - vs, min_keep=0.0)
-                keep.extend((vs + ss, vs + ee) for (ss, ee) in seg)
-            keep = _union(keep)
+        all_remove = _union(text_fillers + isolated + gap_breath +
+                            transients + intra_fillers + sound_events +
+                            sed_events + respiro_events +
+                            stutter_events +
+                            vad_sil + manual)
+        keep = _complement(all_remove, dur, min_keep=0.0)
 
         # 兜底：若全部被删，则保留整段（避免空输出）
         if not keep:
@@ -2536,14 +2508,23 @@ def analyze(input_path: str, opts: dict) -> dict:
                        接缝落在静音内，切除更自然流畅 → 安全放行；
                     ③ 与事件重叠且任一侧紧贴语音(< _iso_thr) → 切断连续语流必损韵律
                        → 回填并转建议事件（不自动删）。
-                    无转写（ASR 失败）时词不可信 → 保守退回①之外的全回填。"""
+                    无转写（ASR 失败）时词不可信 → 保守退回①之外的全回填。
+
+                    注：keepNonspeech=True/False 两条路径共用此判据——因 2026-08-29 修复后，
+                    keep 统一由「事件补集」构造（事件洞紧致可靠），紧凑模式仅在本阀之后用
+                    VAD 语音段对 keep 取交以丢弃语音段间静音，事件删除逻辑与标准模式一致。"""
                     if not any(min(hb, ce) - max(ha, cs) > 0.02
                                for cs, ce in _cand_ivs):
                         return False
                     if not _gap_words:
                         return True
                     gl, gr = _gap_to_speech(ha, hb)
-                    return min(gl, gr) < _iso_thr
+                    _dec = min(gl, gr) < _iso_thr
+                    if os.environ.get("AICUT_SEAM_DEBUG"):
+                        import sys as _s
+                        print(f"[SEAM-DBG] hole=({ha:.3f},{hb:.3f}) gl={gl:.3f} gr={gr:.3f} "
+                              f"iso={_iso_thr} unsafe={_dec}", file=_s.stderr)
+                    return _dec
 
 
                 _interior = [(a, b) for a, b in
@@ -2564,6 +2545,22 @@ def analyze(input_path: str, opts: dict) -> dict:
                           f"（连续语流内不自动剪切，转建议）", flush=True)
             except Exception as _e:
                 warnings_out.append(f"edl_seam_failed:{_e}")
+
+        # ── 紧凑模式：丢弃语音段之间的非语音间隙（静音/音乐）──
+        # keep 此时已是「事件补集」经 EDL(吸收碎片/微洞/谷吸附/整词化/接缝阀) 处理后的结果，
+        # 事件洞可靠。紧凑意图＝只留语音，故用 VAD 语音段对 keep 取交，切掉语音段之间的
+        # 静音/音乐间隙；事件已在上面被删，取交不会把事件加回来。修复 2026-08-29：此前紧凑
+        # 走 speech_regs 减事件构造，VAD 粗粒度导致事件两侧小语音碎片被 EDL 误合并 → 事件
+        # 删除失效、退化成只删头尾。
+        if (not keep_nonspeech) and speech_regs:
+            _kr = []
+            for (ks, ke) in _union(keep):
+                for (vs, ve) in speech_regs:
+                    _os, _oe = max(ks, vs), min(ke, ve)
+                    if _oe - _os > 1e-4:
+                        _kr.append((_os, _oe))
+            if _kr:
+                keep = _union(_kr)
 
         # 词界避让：防止结构性剪点切入词起音
         _sw = locals().get("_src_words0") or []

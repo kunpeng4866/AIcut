@@ -76,9 +76,9 @@ const PRESETS: Record<PresetKey, PresetValues> = {
     respiroBreath: true, stutterDetect: true, stutterThreshold: 0.5, crossfadeMs: 20, declick: true, maskSoften: true, maskSoftenFloor: 0.5, isolateGapSec: 0.3,
   },
   aggressive: {
-    modelSize: 'small', useDemucs: false, vadThreshold: 0.2, minGap: 0.05, wordPad: 0.06,
+    modelSize: 'small', useDemucs: false, vadThreshold: 0.25, minGap: 0.18, wordPad: 0.06,
     denoise: true, denoiseQuality: 'high', deess: true, normalize: true, fillers: true,
-    keepNonspeech: false, trimSilence: true, sedEvents: true, sedThreshold: 0.6,
+    keepNonspeech: true, trimSilence: true, sedEvents: true, sedThreshold: 0.6,
     respiroBreath: true, stutterDetect: true, stutterThreshold: 0.6, crossfadeMs: 30, declick: true, maskSoften: true, maskSoftenFloor: 0.5, isolateGapSec: 0.25,
   },
 };

@@ -186,7 +186,7 @@ fn replace_audio_with_enhanced(
             let gap = (out_segs[i + 1].0 - out_segs[i].1).max(0.0);
             if gap > 1e-3 {
                 fc.push_str(&format!(
-                    "anullsrc=r=16000:cl=mono,atrim=start=0:end={:.6},asetpts=PTS-STARTPTS[g{}];",
+                    "anullsrc=r=48000:cl=stereo,atrim=start=0:end={:.6},asetpts=PTS-STARTPTS[g{}];",
                     gap, i
                 ));
                 labels.push(format!("g{}", i));
@@ -791,6 +791,12 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         args.push("yuv420p".into());
         args.push("-c:a".into());
         args.push("aac".into());
+        // 固定音频规格（48k/立体声）：loudnorm(normalize=true) 输出 192kHz，AAC 编码器会
+        // 自动降到 96kHz（AAC 上限）→ 播放器按 2 倍速读、时间轴与播放器时长不一致。必须显式收口。
+        args.push("-ar".into());
+        args.push("48000".into());
+        args.push("-ac".into());
+        args.push("2".into());
         args.push(opts.output_path.clone());
 
         let out = Command::new(&ff)
@@ -888,9 +894,16 @@ pub fn speech_assemble(input: &str, opts_json: &str) -> Result<Value, AppError> 
         }
     }
 
+    // 与暂停压缩路径一致：replace_audio_with_enhanced 用 -shortest 重封装后实测真实输出时长，
+    // 保证落轨片段长度与实际文件一致。否则增强音轨重建改变文件长度（尤其编辑后路径段长量化错位）
+    // 会导致「试听完整、时间轴片段被截短」——即试听文件可完整播放、但落轨 clip 时长偏短。
+    let real_dur = probe(&output_path)
+        .map(|m| m.duration)
+        .unwrap_or(out_duration);
+
     Ok(json!({
         "outputPath": output_path,
-        "duration": out_duration,
+        "duration": real_dur,
         "ok": true
     }))
 }
@@ -1416,6 +1429,11 @@ fn speech_assemble_separated_pause(
     args.push("yuv420p".into());
     args.push("-c:a".into());
     args.push("aac".into());
+    // 固定音频规格（48k/立体声）：同 crossfade 路径，loudnorm(normalize=true) 会把采样率顶到 96kHz。
+    args.push("-ar".into());
+    args.push("48000".into());
+    args.push("-ac".into());
+    args.push("2".into());
     args.push("-shortest".into());
     args.push(opts.output_path.clone());
 

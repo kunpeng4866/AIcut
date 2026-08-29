@@ -109,7 +109,12 @@ impl RenderCommand {
             // 检测是否包含音频流（[a0] [aout] 等滤镜标签，或 0:a 文件索引）
             let has_audio = self.map_labels.iter().any(|l| l.contains("[a") || l.starts_with("0:a") || l.contains(":a"));
             if has_audio {
-                args.extend(["-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string()]);
+                // 固定音频规格（48k/立体声）：与 speech.rs 各路径、ExportPipeline 保持一致，
+                // 避免滤镜链（如未来引入 loudnorm）把输出采样率顶到非标值（AAC 上限 96kHz）。
+                args.extend([
+                    "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string(),
+                    "-ar".to_string(), "48000".to_string(), "-ac".to_string(), "2".to_string(),
+                ]);
             }
         }
         args.extend([
