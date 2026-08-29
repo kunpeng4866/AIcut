@@ -733,10 +733,8 @@ export default function Timeline() {
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [subMenu, setSubMenu] = useState<{ x: number; y: number } | null>(null);
   const [separating, setSeparating] = useState(false);
-  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const subMenuRef = useRef<HTMLDivElement>(null);
   const [subMenuPos, setSubMenuPos] = useState<{ x: number; y: number } | null>(null);
-  const addMenuRef = useRef<HTMLDivElement>(null);
   // 轨道头部右键菜单（删除空轨）
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number; trackId: string } | null>(null);
   const trackMenuRef = useRef<HTMLDivElement>(null);
@@ -758,20 +756,23 @@ export default function Timeline() {
 
   // 点击菜单外任意位置（仅左键）关闭所有弹出菜单，修复“点别处菜单不消失”
   useEffect(() => {
-    if (!menu && !subMenu && !addMenu && !trackMenu) return;
+    if (!menu && !subMenu && !trackMenu) return;
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;  // 仅左键；右键由各 onContext 自行处理
       const t = e.target as Node;
       if (menuRef.current?.contains(t)) return;
       if (subMenuRef.current?.contains(t)) return;
-      if (addMenuRef.current?.contains(t)) return;
       if (trackMenuRef.current?.contains(t)) return;
-      setMenu(null); setSubMenu(null); setAddMenu(null); setTrackMenu(null);
+      setMenu(null); setSubMenu(null); setTrackMenu(null);
     };
     window.addEventListener('mousedown', onDown);
     return () => window.removeEventListener('mousedown', onDown);
-  }, [menu, subMenu, addMenu, trackMenu]);
+  }, [menu, subMenu, trackMenu]);
   const [dragOver, setDragOver] = useState<{ time: number; trackIndex: number; yInTrack: number } | null>(null);
+
+  // 渲染过滤：主视频轨永远保留，其余无素材轨道不渲染（空轨自动消失）。
+  // 拖拽建轨/落点判定均基于此可见列表，保证「素材拖到空白处自动建轨」的下标与渲染一致。
+  const visibleTracks = project.tracks.filter((t) => t.isMain || t.clips.length > 0);
 
   // Timeline duration is at least 30s.
   const duration = Math.max(30, ...project.tracks.flatMap(t => t.clips.map(c => c.timelineOut)), 0);
@@ -891,14 +892,14 @@ export default function Timeline() {
 
     // 与已有素材拖动(onMove2)共用同一套「两轨之间」判定：computeDropInsertIndex。
     // >=0 => 两轨之间(上/下边界)或区外末尾，需插入/追加一条新轨；-1 => 落在已有轨道内部。
-    const insertIdx = computeDropInsertIndex(trackIndex, yInTrack, project.tracks.length);
+    const insertIdx = computeDropInsertIndex(trackIndex, yInTrack, visibleTracks.length);
 
     let targetTrack: TrackConfig | undefined;
     let dropTime = time;
 
     if (insertIdx >= 0) {
       // 两轨之间（上/下边界）或区外末尾：插入/追加一条同类型新轨承载该素材。
-      const newId = insertIdx >= project.tracks.length
+      const newId = insertIdx >= visibleTracks.length
         ? addTrack(targetTrackType)
         : insertTrackAt(insertIdx, targetTrackType);
       targetTrack = useProjectStore.getState().project.tracks.find(t => t.id === newId);
@@ -912,7 +913,7 @@ export default function Timeline() {
         }
       }
       if (!targetTrack) {
-        const hoverTrack = project.tracks[trackIndex];
+        const hoverTrack = visibleTracks[trackIndex];
         if (hoverTrack && hoverTrack.type === targetTrackType && !hoverTrack.locked) {
           targetTrack = hoverTrack;
           const clipDur = asset.duration || 5;
@@ -1070,7 +1071,7 @@ export default function Timeline() {
 
   // Close any open menu on outside click.
   useEffect(() => {
-    const close = () => { setMenu(null); setSubMenu(null); setAddMenu(null); };
+    const close = () => { setMenu(null); setSubMenu(null); };
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, []);
@@ -1232,7 +1233,7 @@ export default function Timeline() {
         {/* Left column: track headers — 自身不滚动(overflow hidden)，由右侧滚动镜像同步 */}
         <div ref={leftRef} style={{ width: 130, flexShrink: 0, background: '#16213e', borderRight: '1px solid #0f3460', overflow: 'hidden' }}>
           <div style={{ height: RULER_HEIGHT, borderBottom: '1px solid #0f3460' }} />
-          {project.tracks.map(t => (
+          {visibleTracks.map(t => (
             <div key={t.id} data-track-header-id={t.id} style={{
               height: TRACK_HEIGHT, display: 'flex', flexDirection: 'column', justifyContent: 'center',
               padding: '0 6px', borderBottom: '1px solid rgba(255,255,255,0.05)',
@@ -1281,9 +1282,9 @@ export default function Timeline() {
             </div>
 
             {/* Tracks */}
-            {project.tracks.map((track, idx) => {
+            {visibleTracks.map((track, idx) => {
               // Same-type, unlocked tracks that this clip could be dropped onto.
-              const sameTypeTrackIds = project.tracks
+              const sameTypeTrackIds = visibleTracks
                 .filter(t => t.type === track.type && !t.locked && t.id !== track.id)
                 .map(t => t.id);
 
@@ -1366,11 +1367,6 @@ export default function Timeline() {
         </div>
       </div>
 
-      {/* Add-track button */}
-      <div style={{ padding: '4px 8px', background: '#16213e', borderTop: '1px solid #0f3460' }}>
-        <button onClick={(e) => { e.stopPropagation(); setAddMenu({ x: e.clientX, y: e.clientY - 120 }); }} style={btnStyle}>+ 添加轨道</button>
-      </div>
-
       {/* Clip context menu */}
       {menu && (() => {
         const menuTrack = useProjectStore.getState().project.tracks.find(t => t.id === menu.trackId);
@@ -1410,17 +1406,6 @@ export default function Timeline() {
           </div>
         );
       })()}
-
-      {/* Add-track menu */}
-      {addMenu && (
-        <div ref={addMenuRef} onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', left: addMenu.x, top: addMenu.y, zIndex: 1000, background: '#16213e', border: '1px solid #0f3460', borderRadius: 4, padding: 4, minWidth: 120 }}>
-          {(['video', 'audio', 'text', 'sticker'] as const).map(type => (
-            <div key={type} onClick={() => { addTrack(type); setAddMenu(null); }} style={menuItem}>
-              {Gu[type]} {type}
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Track context menu: 右键轨道头部删除空轨 */}
       {trackMenu && (() => {
