@@ -105,7 +105,7 @@ python/sr/_*.py
 
 # ===== 上传 GitHub 前补充：构建/暂存/测试巨目录，严禁入库 =====
 # 全版本打包产物（4.1GB+ 未压缩发布目录，仅本地分发，不入库）
-dist-full/
+dist-full*/
 build_dist_full.log
 # 验证/调试临时目录（公式单测、权重回归脚本等），非源码
 verify_tmp/

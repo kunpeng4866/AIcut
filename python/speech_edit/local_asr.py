@@ -28,6 +28,12 @@ _FUNASR_CACHE = os.path.join(_ASR_DIR, "modelscope_cache")
 # → 兜底到本模块相对路径（开发/打包内置场景）。qwen3_fa 为 1.8G，>500M 不随包，走一键补全。
 _QWEN_FA_DIR = os.environ.get("AICUT_QWEN3FA_DIR") or os.path.join(_ASR_DIR, "qwen3_fa")
 
+# Paraformer / FSMN-VAD（口播本地识别，Paraformer model.pt 989M, >500M）同样走一键补全：
+# Electron 注入 AICUT_PARA_DIR / AICUT_VAD_DIR 指向扁平目录（resources 优先 → userData 下载目录回退）。
+# 兜底到本模块相对路径 models/asr/{paraformer,fsmn_vad}（开发/扁平落点场景）。
+_PARA_DIR = os.environ.get("AICUT_PARA_DIR") or os.path.join(_ASR_DIR, "paraformer")
+_VAD_DIR = os.environ.get("AICUT_VAD_DIR") or os.path.join(_ASR_DIR, "fsmn_vad")
+
 # ── 延迟缓存（首次调用时加载，避免 import 期硬依赖）──
 _funasr_model = None
 _qwen_model = None
@@ -116,8 +122,14 @@ def _get_funasr():
         # ModelScope 缓存快照（离线可用），缺失时退回 repo id 在线拉取。
         _MODEL_REPO = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
         _VAD_REPO = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-        _md = _modelscope_snapshot(_MODEL_REPO)
-        _vd = _modelscope_snapshot(_VAD_REPO)
+        # 加载源优先级：扁平目录（一键补全落点 AICUT_PARA_DIR/AICUT_VAD_DIR）→
+        # modelscope_cache 快照（历史随包/在线缓存）→ 在线 repo id（无网/弱网会抛 not registered）。
+        _md = _PARA_DIR if os.path.isdir(_PARA_DIR) and os.path.isfile(os.path.join(_PARA_DIR, "model.pt")) else ""
+        _vd = _VAD_DIR if os.path.isdir(_VAD_DIR) and os.path.isfile(os.path.join(_VAD_DIR, "model.pt")) else ""
+        if not _md:
+            _md = _modelscope_snapshot(_MODEL_REPO)
+        if not _vd:
+            _vd = _modelscope_snapshot(_VAD_REPO)
         _model_arg = _md if _md else _MODEL_REPO
         _vad_arg = _vd if _vd else _VAD_REPO
         _funasr_model = AutoModel(

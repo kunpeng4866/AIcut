@@ -56,7 +56,10 @@
       },
       {
         "from": "../pack-staging/python",
-        "to": "python"
+        "to": "python",
+        "filter": [
+          "!models/asr/modelscope_cache/**"
+        ]
       },
       {
         "from": "../cdn-upload/models",

@@ -21,6 +21,15 @@ const QWEN3FA_IDS = [
   'qwen3fa-vocab', 'qwen3fa-merges', 'qwen3fa-chattmpl', 'qwen3fa-preproc', 'qwen3fa-readme',
 ];
 
+// 口播本地识别权重 FunASR Paraformer + FSMN-VAD（ModelScope 官方 iic/ 仓库，一键补全）。
+// Paraformer model.pt 989M（>500M）不随包；FSMN-VAD 体积小但共用口播开关，统一走补全。
+// 缺失时 FunASR 回退 whisper（精度下降），故在分析/批量前与 QWEN3FA_IDS 一并 ensureAssets 拦截。
+const PARAFORMER_IDS = [
+  'paraformer-model', 'paraformer-mvn', 'paraformer-config', 'paraformer-conf',
+  'paraformer-segdict', 'paraformer-tokens',
+  'fsmnvad-model', 'fsmnvad-mvn', 'fsmnvad-config', 'fsmnvad-conf',
+];
+
 // 生成唯一ID（与 MediaPanel.tsx 同款实现）
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -493,8 +502,8 @@ export default function SpeechPanel() {
     setError(null);
     setMsg(null);
     try {
-      // 一键补全：高精度强制对齐权重 Qwen3-ForcedAligner（1.8G, >500M）随用随下；其余口播权重已随包。
-      if (!(await useAssetStore.getState().ensureAssets(QWEN3FA_IDS))) {
+      // 一键补全：口播本地识别（Paraformer+FSMN-VAD）与高精度对齐（Qwen3-ForcedAligner）权重随用随下；其余口播权重已随包。
+      if (!(await useAssetStore.getState().ensureAssets([...QWEN3FA_IDS, ...PARAFORMER_IDS]))) {
         setLoading(false);
         return;
       }
@@ -586,9 +595,9 @@ export default function SpeechPanel() {
       return;
     }
     setBatchRunning(true);
-    if (!(await useAssetStore.getState().ensureAssets(QWEN3FA_IDS))) {
+    if (!(await useAssetStore.getState().ensureAssets([...QWEN3FA_IDS, ...PARAFORMER_IDS]))) {
       setBatchRunning(false);
-      setMsg('已取消：缺少口播高精度对齐权重（Qwen3-ForcedAligner），请在「AI组件」中补全后重试');
+      setMsg('已取消：缺少口播识别/高精度对齐权重（Paraformer / Qwen3-ForcedAligner），请在「AI组件」中补全后重试');
       return;
     }
     setBatchTotal(targets.length);

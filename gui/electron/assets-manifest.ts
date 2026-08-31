@@ -40,6 +40,13 @@ export const DEFAULT_CDN_BASE = 'https://REPLACE_WITH_YOUR_CDN_BASE/';
 const QWEN3FA_MS_BASE = 'https://modelscope.cn/api/v1/models/Qwen/Qwen3-ForcedAligner-0.6B/repo?Revision=master&FilePath=';
 const QWEN3FA_HF_BASE = 'https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/resolve/main/';
 
+// Paraformer / FSMN-VAD（ModelScope 官方 iic/ 仓库，公开免费）。
+// ⚠️ iic/ 命名空间下的大文件（LFS 指针）用 api/v1/repo?FilePath= 全 404（LFS batch API 配置差异，
+// 与 Qwen/、briaai/ 不同），必须走 /resolve/master/{file} 端点。实测 HTTP 200 + X-Linked-Etag=sha256，
+// 与本地 modelscope_cache 快照逐字节一致（10 个文件全部核对通过）。
+const PARAFORMER_MS_BASE = 'https://modelscope.cn/iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/resolve/master/';
+const FSMNVAD_MS_BASE = 'https://modelscope.cn/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/';
+
 // 自有资产仓库（kunpeng4866/aicut-assets，ModelScope 公开免费镜像，实测可 fetch）。
 // 存放 AIcut 自行加工/打包、公共仓库没有的权重：python 运行时、modnet fp16、
 // DFN3 三件套+config、PANNs 帧级 SED。FilePath= 后拼仓库内相对路径。
@@ -321,6 +328,134 @@ export function getManifest(cdnBaseUrl?: string): AssetsManifest {
         requiredBy: ['speech'],
         domesticUrl: QWEN3FA_MS_BASE + 'README.md',
         externalUrl: QWEN3FA_HF_BASE + 'README.md',
+      },
+      // ---- 口播本地识别核心：FunASR Paraformer + FSMN-VAD（ModelScope 官方 iic/ 仓库）----
+      // Paraformer（model.pt 989M, >500M）走一键补全；FSMN-VAD（1.7M）体积小，本可随包，
+      // 但两者共用同一套「口播识别」功能开关，统一走补全便于 manifest 状态联动（避免 VAD 随包、
+      // Paraformer 不随包的半吊子态）。缺任一文件 FunASR 回退 whisper（精度下降，不报错）。
+      // sha256/size 由本地 python/models/asr/modelscope_cache 快照实算，并与 /resolve/master/
+      // 的 X-Linked-Etag 逐字节核对一致。加载为扁平目录（funasr AutoModel(model="<dir>")），
+      // 落盘 models/asr/paraformer 与 models/asr/fsmn_vad，由 local_asr.py 经 AICUT_PARA_DIR /
+      // AICUT_VAD_DIR 读取（resources 优先 → userData/aicut-assets 回退）。
+      {
+        id: 'paraformer-model',
+        name: 'Paraformer 主模型 (model.pt)',
+        kind: 'file',
+        remoteRel: 'models/asr/paraformer/model.pt',
+        targetSub: 'models/asr/paraformer',
+        targetName: 'model.pt',
+        size: 989763045,
+        sha256: '3d491689244ec5dfbf9170ef3827c358aa10f1f20e42a7c59e15e688647946d1',
+        requiredBy: ['speech'],
+        domesticUrl: PARAFORMER_MS_BASE + 'model.pt',
+      },
+      {
+        id: 'paraformer-mvn',
+        name: 'Paraformer am.mvn',
+        kind: 'file',
+        remoteRel: 'models/asr/paraformer/am.mvn',
+        targetSub: 'models/asr/paraformer',
+        targetName: 'am.mvn',
+        size: 11203,
+        sha256: '29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5',
+        requiredBy: ['speech'],
+        domesticUrl: PARAFORMER_MS_BASE + 'am.mvn',
+      },
+      {
+        id: 'paraformer-config',
+        name: 'Paraformer config.yaml',
+        kind: 'file',
+        remoteRel: 'models/asr/paraformer/config.yaml',
+        targetSub: 'models/asr/paraformer',
+        targetName: 'config.yaml',
+        size: 3477,
+        sha256: '6602efa95e4c7248e1d1030f7ff454a3c9af0f57c335ed87f35260cd7faec35d',
+        requiredBy: ['speech'],
+        domesticUrl: PARAFORMER_MS_BASE + 'config.yaml',
+      },
+      {
+        id: 'paraformer-conf',
+        name: 'Paraformer configuration.json',
+        kind: 'file',
+        remoteRel: 'models/asr/paraformer/configuration.json',
+        targetSub: 'models/asr/paraformer',
+        targetName: 'configuration.json',
+        size: 478,
+        sha256: '1acac324430b5a4680ef5ee2947575443ab2039a92c8a0551665f6bc9a606b41',
+        requiredBy: ['speech'],
+        domesticUrl: PARAFORMER_MS_BASE + 'configuration.json',
+      },
+      {
+        id: 'paraformer-segdict',
+        name: 'Paraformer seg_dict',
+        kind: 'file',
+        remoteRel: 'models/asr/paraformer/seg_dict',
+        targetSub: 'models/asr/paraformer',
+        targetName: 'seg_dict',
+        size: 8287834,
+        sha256: '59a2ef803a3f1648ad03a2e1480db1c1ee0c0d7dc4ef4dbd16cea33944329022',
+        requiredBy: ['speech'],
+        domesticUrl: PARAFORMER_MS_BASE + 'seg_dict',
+      },
+      {
+        id: 'paraformer-tokens',
+        name: 'Paraformer tokens.json',
+        kind: 'file',
+        remoteRel: 'models/asr/paraformer/tokens.json',
+        targetSub: 'models/asr/paraformer',
+        targetName: 'tokens.json',
+        size: 93676,
+        sha256: '2b20c2b12572d682afff84ce1c8d560f67b8b32a4c1f21567411d141ed352127',
+        requiredBy: ['speech'],
+        domesticUrl: PARAFORMER_MS_BASE + 'tokens.json',
+      },
+      {
+        id: 'fsmnvad-model',
+        name: 'FSMN-VAD 主模型 (model.pt)',
+        kind: 'file',
+        remoteRel: 'models/asr/fsmn_vad/model.pt',
+        targetSub: 'models/asr/fsmn_vad',
+        targetName: 'model.pt',
+        size: 1721366,
+        sha256: 'b3be75be477f0780277f3bae0fe489f48718f585f3a6e45d7dd1fbb1a4255fc5',
+        requiredBy: ['speech'],
+        domesticUrl: FSMNVAD_MS_BASE + 'model.pt',
+      },
+      {
+        id: 'fsmnvad-mvn',
+        name: 'FSMN-VAD am.mvn',
+        kind: 'file',
+        remoteRel: 'models/asr/fsmn_vad/am.mvn',
+        targetSub: 'models/asr/fsmn_vad',
+        targetName: 'am.mvn',
+        size: 8040,
+        sha256: '6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754',
+        requiredBy: ['speech'],
+        domesticUrl: FSMNVAD_MS_BASE + 'am.mvn',
+      },
+      {
+        id: 'fsmnvad-config',
+        name: 'FSMN-VAD config.yaml',
+        kind: 'file',
+        remoteRel: 'models/asr/fsmn_vad/config.yaml',
+        targetSub: 'models/asr/fsmn_vad',
+        targetName: 'config.yaml',
+        size: 1215,
+        sha256: '486861ca26ddb79081663b6179cb204c6bfae71c52f04aafc48a9e9d8dde1e93',
+        requiredBy: ['speech'],
+        domesticUrl: FSMNVAD_MS_BASE + 'config.yaml',
+      },
+      {
+        id: 'fsmnvad-conf',
+        name: 'FSMN-VAD configuration.json',
+        kind: 'file',
+        remoteRel: 'models/asr/fsmn_vad/configuration.json',
+        targetSub: 'models/asr/fsmn_vad',
+        targetName: 'configuration.json',
+        size: 365,
+        sha256: '7bce8867e37d55c3dd8f672695ced18077a2be199ea529a5d432d5350fc0acba',
+        requiredBy: ['speech'],
+        domesticUrl: FSMNVAD_MS_BASE + 'configuration.json',
       },
     ],
   };

@@ -2,7 +2,7 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, session, shell, clipboard } from 'electron';
 import { spawn } from 'child_process';
 import { readFile, writeFile, mkdir, readdir, unlink, stat, rename } from 'fs/promises';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, readdirSync } from 'fs';
 import { createReadStream, createWriteStream } from 'fs';
 import { Readable } from 'stream';
 import { join, dirname, basename, delimiter } from 'path';
@@ -77,8 +77,26 @@ function devAssetExists(e: AssetEntry): boolean {
   }
   // file 类：cdn-upload/<targetSub>/<targetName>；qwen3_fa 等在 python/models/<rel>/<targetName>
   const rel = e.targetSub.replace(/^models[\\/]?/, '');
-  return existsSync(join(root, 'cdn-upload', e.targetSub, e.targetName))
-    || existsSync(join(root, 'python', 'models', rel, e.targetName));
+  if (existsSync(join(root, 'cdn-upload', e.targetSub, e.targetName))
+    || existsSync(join(root, 'python', 'models', rel, e.targetName))) {
+    return true;
+  }
+  // asr 官方模型（paraformer/fsmn_vad）在 dev 下以 modelscope_cache 快照形式存在
+  // （python/models/asr/modelscope_cache/models/iic--*/snapshots/*/<targetName>），
+  // 扁平目录尚未下载前 dev 即视为就绪，避免误报「缺失」触发 957M 重下。
+  if (e.targetSub.startsWith('models/asr/')) {
+    const cacheModels = join(root, 'python', 'models', 'asr', 'modelscope_cache', 'models');
+    try {
+      for (const ns of readdirSync(cacheModels)) {
+        const snap = join(cacheModels, ns, 'snapshots');
+        if (!existsSync(snap)) continue;
+        for (const rev of readdirSync(snap)) {
+          if (existsSync(join(snap, rev, e.targetName))) return true;
+        }
+      }
+    } catch { /* 目录不存在等，忽略 */ }
+  }
+  return false;
 }
 // 在 app ready 后调用：按「resources 优先、否则回退 userData」解析 python / models 环境变量（仅打包模式）。
 function setupAssetEnv() {
@@ -102,6 +120,10 @@ function setupAssetEnv() {
   // Qwen3-ForcedAligner（qwen3_fa, 1.8G, >500M）走一键补全：缺省指向 resources/models/asr/qwen3_fa，
   // 下载后落到 userData/aicut-assets/models/asr/qwen3_fa，由 local_asr.py 经 AICUT_QWEN3FA_DIR 读取。
   process.env.AICUT_QWEN3FA_DIR = resolveAsset('models', 'asr/qwen3_fa');
+  // 口播本地识别 FunASR Paraformer（989M, >500M）+ FSMN-VAD 同样走一键补全，扁平目录落点
+  // resources/models/asr/{paraformer,fsmn_vad} 优先，下载后回退 userData 同路径。
+  process.env.AICUT_PARA_DIR = resolveAsset('models', 'asr/paraformer');
+  process.env.AICUT_VAD_DIR = resolveAsset('models', 'asr/fsmn_vad');
 }
 
 // 内置字体目录：
