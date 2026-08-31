@@ -121,3 +121,17 @@ test_exports/
 # 根目录散落调试 txt
 _nettest.txt
 _rchelp.txt
+
+# ===== 2026-08-31 打包收尾：测试素材/临时审计/日志（非源码，不入库） =====
+# 口播剪辑测试素材目录（含 _audit 排查脚本，非源码）
+test-assets/
+# 暂停压缩中间产物（ensure_input 在 mp4 存在时不会用到，记忆 08-26 明确不提交）
+tests/assets/pause_compress_audio.wav
+# 运行时日志 / 仓库树临时产物
+python/speech_edit/prod_stderr.log
+gh_tree.json
+repo_tree.json
+# 一次性排查审计脚本（asar 审计 / 降噪审计，非长期功能代码）
+gui/_asar_audit.js
+gui/_asar_audit.ps1
+python/_audit_denoise.py

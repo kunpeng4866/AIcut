@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIcut 模型与 AI 功能使用说明（用户版）</title>
+<style>
+  :root{
+    --bg:#f6f8fb; --card:#ffffff; --ink:#1f2329; --sub:#5b6168; --line:#e5e7eb;
+    --brand:#1677ff; --brand-soft:#e8f1ff; --green:#18a058; --green-soft:#e8f7ee;
+    --amber:#d48806; --amber-soft:#fff7e6; --red:#d4380d; --red-soft:#fff1f0;
+    --purple:#722ed1; --purple-soft:#f9f0ff;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--ink);line-height:1.75;}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 20px 72px;}
+  header{margin-bottom:24px;}
+  h1{font-size:27px;margin:0 0 6px;}
+  h2{font-size:21px;margin:38px 0 14px;padding-left:11px;border-left:4px solid var(--brand);}
+  h3{font-size:16px;margin:20px 0 8px;}
+  p{margin:10px 0;}
+  .lead{color:var(--sub);font-size:15px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:18px 22px;margin:16px 0;}
+  .note{background:var(--brand-soft);border:1px solid #bcdcff;border-radius:10px;padding:14px 18px;margin:16px 0;}
+  .warn{background:var(--amber-soft);border:1px solid #ffd591;border-radius:10px;padding:14px 18px;margin:16px 0;}
+  .danger{background:var(--red-soft);border:1px solid #ffccc7;border-radius:10px;padding:14px 18px;margin:16px 0;}
+  .ok{background:var(--green-soft);border:1px solid #b7eb8f;border-radius:10px;padding:14px 18px;margin:16px 0;}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px;}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top;}
+  th{background:#fafbfc;font-weight:600;}
+  code,.kbd{background:#f2f3f5;border:1px solid var(--line);border-radius:5px;padding:1px 6px;
+            font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:13px;}
+  .tag{display:inline-block;border-radius:4px;padding:1px 9px;font-size:12px;margin-right:6px;font-weight:600;}
+  .t-cloud{background:var(--brand-soft);color:var(--brand);}
+  .t-local{background:var(--purple-soft);color:var(--purple);}
+  .t-free{background:var(--green-soft);color:var(--green);}
+  .t-key{background:var(--amber-soft);color:var(--amber);}
+  .pill{display:inline-block;background:#eef1f5;color:var(--sub);border-radius:20px;padding:2px 12px;font-size:12px;margin:2px 4px 2px 0;}
+  ul.tight{margin:8px 0;padding-left:22px;}
+  ul.tight li{margin:6px 0;}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media(max-width:680px){.grid{grid-template-columns:1fr;}}
+  .feat{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--card);}
+  .feat h3{margin:0 0 6px;font-size:15px;}
+  footer{margin-top:48px;color:var(--sub);font-size:13px;border-top:1px solid var(--line);padding-top:16px;}
+  a{color:var(--brand);text-decoration:none;}a:hover{text-decoration:underline;}
+  .muted{color:var(--sub);font-size:13px;}
+  .stepno{display:inline-flex;width:24px;height:24px;background:var(--brand);color:#fff;border-radius:50%;
+          align-items:center;justify-content:center;font-weight:700;font-size:13px;margin-right:8px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>AIcut 模型与 AI 功能使用说明（用户版）</h1>
+  <p class="lead">写给「只想把视频剪好、不想关心底层技术」的你。本文用大白话解释：AIcut 里的每一个 AI 功能背后用了什么模型、要不要下载、去哪下载、需要什么条件，以及如果某个功能不好用，还有什么靠谱的替代产品。</p>
+</header>
+
+<div class="note">
+  <strong>先给结论（一眼看懂）：</strong>AIcut 的 AI 功能分两大类——
+  <br>① <span class="tag t-cloud">云端服务</span> 需要联网 + 你自己的 API 密钥（如 DeepSeek、阿里云百炼、火山引擎），<strong>不用下载模型</strong>，软件帮你调用；
+  <br>② <span class="tag t-local">本地模型</span> 需要把模型权重下载到本机（Python 环境 + ONNX 模型），<strong>下载后可离线用</strong>，但吃电脑配置。
+  <br>下面逐项拆解。
+</div>
+
+<h2>一、总览表：每个功能对应什么模型、需要什么</h2>
+<div class="card">
+<table>
+  <thead><tr><th>功能（你在界面上看到的）</th><th>背后模型 / 服务</th><th>类型</th><th>你需要准备</th></tr></thead>
+  <tbody>
+    <tr><td>AI 剪辑建议 / 脚本生成</td><td>通用大模型（默认 DeepSeek，可换 OpenAI / 通义 / 本地）</td><td><span class="tag t-cloud">云端</span></td><td>API Key</td></tr>
+    <tr><td>语音转文字（自动字幕）</td><td>阿里云百炼 Paraformer / Qwen-Audio</td><td><span class="tag t-cloud">云端</span></td><td>百炼 API Key</td></tr>
+    <tr><td>语音合成（配音 / 朗读）</td><td>火山引擎 TTS 或 百炼 CosyVoice</td><td><span class="tag t-cloud">云端</span></td><td>对应平台密钥</td></tr>
+    <tr><td>字幕翻译</td><td>复用上面的「通用大模型」做翻译</td><td><span class="tag t-cloud">云端</span></td><td>API Key（同大模型）</td></tr>
+    <tr><td>智能抠像（去背景 / 抠人像）</td><td>MODNet（轻量）、RMBG-2.0 / BiRefNet（精细）</td><td><span class="tag t-local">本地</span></td><td>Python + ONNX 模型</td></tr>
+    <tr><td>视频超清增强（画质放大）</td><td>自研 RRDBNet 超分模型（sr_v0_test.onnx）</td><td><span class="tag t-local">本地</span></td><td>Python + ONNX 模型（建议独显）</td></tr>
+    <tr><td>口播自动剪辑（去口水话 / 人声分离）</td><td>Whisper（转写）+ Demucs（音轨分离）</td><td><span class="tag t-local">本地</span></td><td>Python 环境（含上述库）</td></tr>
+  </tbody>
+</table>
+<p class="muted">说明：带 <span class="tag t-cloud">云端</span> 的功能，软件本身是「调用方」，模型跑在厂商服务器上；带 <span class="tag t-local">本地</span> 的功能，模型跑在你自己的电脑上。</p>
+</div>
+
+<h2>二、逐个功能详解</h2>
+
+<!-- 1. 通用大模型 -->
+<div class="card">
+  <h3>① AI 剪辑建议 / 脚本生成 / 翻译底座</h3>
+  <p><strong>做什么用：</strong>这是 AIcut 的「大脑」。它帮你写口播稿、给剪辑建议、把字幕翻译成外语。翻译功能<strong>没有独立模型</strong>，就是借用这个大模型来翻。</p>
+  <p><strong>用的是什么：</strong>默认 <code>DeepSeek</code>（模型 <code>deepseek-chat</code>），你也可以在设置里换成 OpenAI、通义千问、或任何兼容 OpenAI 接口的本地模型。</p>
+  <p><span class="tag t-cloud">云端服务</span> <span class="tag t-key">需要 API Key</span></p>
+  <p><strong>去哪获取：</strong>去 <a href="https://platform.deepseek.com" target="_blank">platform.deepseek.com</a> 注册 → 充值（很便宜）→ 创建 API Key。把 Key 填进 AIcut 设置「AI 配置 → 大模型」。</p>
+  <p><strong>必备条件：</strong>联网 + 有效的 API Key。无需下载任何模型。</p>
+  <div class="warn" style="margin-top:10px;">DeepSeek 默认按量计费（每百万字约几毛到几元），写稿/翻译都会消耗额度。密钥只存在你本机，不会上传给软件作者。</div>
+</div>
+
+<!-- 2. ASR -->
+<div class="card">
+  <h3>② 语音转文字（自动字幕）</h3>
+  <p><strong>做什么用：</strong>把视频里人说的话自动变成字幕，省去手动敲字幕。</p>
+  <p><strong>用的是什么：</strong>阿里云百炼的语音识别服务。可选模型：</p>
+  <ul class="tight">
+    <li><code>qwen-audio-3.0-asr-flash-streaming</code>（默认，中文/英文自动判别，效果好）</li>
+    <li><code>paraformer-realtime-v2</code>（填 <code>paraformer</code> 也能用，百炼经典高精度模型，<strong>有免费额度</strong>）</li>
+    <li>也支持本地 Whisper 兜底（需自己准备 Whisper 模型文件）</li>
+  </ul>
+  <p><span class="tag t-cloud">云端服务</span> <span class="tag t-key">需要百炼 API Key</span> <span class="tag t-local">同时需要本机 Python 运行时</span></p>
+  <p><strong>去哪获取：</strong>阿里云百炼控制台开通「语音识别」权限，创建 API Key（以 <code>sk-</code> 开头），填进 AIcut 设置「ASR 配置」。</p>
+  <p><strong>费用：</strong>以 <code>paraformer-realtime-v2</code> 为例，约 <strong>0.00024 元/秒</strong>，每月送 36000 秒（约 10 小时）免费额度，新人另有 90 天额外免费额度。</p>
+  <p><strong>必备条件：</strong>① 百炼 API Key；② 本机必须装好 Python 运行时（见第五节）——因为字幕生成是靠本地 Python 桥接百炼接口完成的，<strong>光有 Key 没有 Python 跑不起来</strong>。</p>
+</div>
+
+<!-- 3. TTS -->
+<div class="card">
+  <h3>③ 语音合成（配音 / 朗读）</h3>
+  <p><strong>做什么用：</strong>把文字变成真人感的语音，用于给视频配音、做解说。</p>
+  <p><strong>用的是什么（二选一）：</strong></p>
+  <ul class="tight">
+    <li><strong>火山引擎 TTS</strong>：音色多、质量高。需要 <code>AppID</code> + <code>Access Token</code>。</li>
+    <li><strong>百炼 CosyVoice</strong>：阿里系，默认模型 <code>cosyvoice-v3.5-plus</code>。只需要百炼 <code>API Key</code> 即可（与 ASR 可共用一个 Key）。</li>
+  </ul>
+  <p><span class="tag t-cloud">云端服务</span> <span class="tag t-key">需要对应平台密钥</span></p>
+  <p><strong>去哪获取：</strong>火山引擎（volcano.cn）开通 TTS 拿到 AppID/Token；或百炼控制台开通 CosyVoice 模型权限并取 Key。</p>
+  <p><strong>必备条件：</strong>联网 + 密钥。<strong>不需要下载模型、不需要 Python</strong>，是纯云端调用。</p>
+</div>
+
+<!-- 4. 翻译 -->
+<div class="card">
+  <h3>④ 字幕翻译</h3>
+  <p><strong>做什么用：</strong>把一条字幕轨整体翻译成别的语言，生成一条新的外语字幕轨（比如中译英、中译日）。</p>
+  <p><strong>用的是什么：</strong>其实就是调用上面第①项的「通用大模型」来翻译，<strong>没有专门的翻译模型</strong>。支持 英 / 中 / 日 / 韩 / 法 / 德 / 西 等十余种语言。</p>
+  <p><span class="tag t-cloud">云端服务</span> <span class="tag t-key">需要大模型 API Key</span></p>
+  <p><strong>必备条件：</strong>与「AI 剪辑建议」同一个 Key 即可，无需额外配置。</p>
+</div>
+
+<!-- 5. 抠像 -->
+<div class="card">
+  <h3>⑤ 智能抠像（去背景 / 抠人像）</h3>
+  <p><strong>做什么用：</strong>把视频里的人或物体从背景里抠出来，方便换背景、做特效。</p>
+  <p><strong>用的是什么（本地模型）：</strong></p>
+  <ul class="tight">
+    <li><strong>MODNet</strong>（<code>modnet.onnx</code>，约 <strong>25.9 MB</strong>）：轻量快速，适合实时预览、发丝细节一般。</li>
+    <li><strong>RMBG-2.0 / BiRefNet</strong>（<code>rmbg2.onnx</code>，约 <strong>1.02 GB</strong>）：精细去背景，边缘和发丝更干净，但很吃内存（峰值约 12 GB）。</li>
+    <li>还有「手动抠像」模式：纯画笔涂抹，不用任何模型。</li>
+  </ul>
+  <p><span class="tag t-local">本地模型</span> <span class="tag t-free">下载后可离线用</span></p>
+  <p><strong>去哪下载：</strong>软件内「AI 组件」面板一键补全即可自动下载（MODNet 走 HuggingFace 镜像，RMBG-2.0 走 ModelScope 国内镜像）。也可手动从对应开源仓库获取。</p>
+  <p><strong>必备条件：</strong>① 本机 Python 运行时；② 上述 ONNX 模型；③ 有独显（N 卡 / A 卡 / Intel 核显均可）会快很多，没独显用 CPU 也能跑但慢。</p>
+  <div class="note" style="margin-top:10px;">这两个模型都是 <strong>Apache-2.0 开源协议</strong>，可免费用于个人与商业项目。</div>
+</div>
+
+<!-- 6. 超清 -->
+<div class="card">
+  <h3>⑥ 视频超清增强（画质放大）</h3>
+  <p><strong>做什么用：</strong>把模糊 / 低分辨率的视频智能放大并修复细节（如 720p → 1440p），常用于老素材、录屏、手机拍摄的素材提质。</p>
+  <p><strong>用的是什么（本地模型）：</strong>AIcut 自研的 <strong>RRDBNet 超分模型</strong>（<code>sr_v0_test.onnx</code>），放大倍率 2×。</p>
+  <p><span class="tag t-local">本地模型</span> <span class="tag t-free">下载后可离线用</span></p>
+  <p><strong>去哪下载 / 获取：</strong>该模型随<strong>完成版安装包</strong>内置；<strong>精简版当前暂不支持一键补全下载该模型</strong>（见下方「重要补充」），需用完成版或手动把 <code>sr_v0_test.onnx</code> 放到模型目录。</p>
+  <p><strong>必备条件：</strong>① 本机 Python 运行时；② 该 ONNX 模型；③ <strong>强烈建议独显（N 卡 CUDA 加速）</strong>——有独显几分钟出片，纯 CPU 会非常慢。</p>
+</div>
+
+<!-- 7. 口播剪辑（补充） -->
+<div class="card">
+  <h3>⑦ 口播自动剪辑（去口水话 / 人声分离）<span class="pill">补充项</span></h3>
+  <p><strong>做什么用：</strong>录口播时总免不了「嗯、啊、那个、然后」之类的口头禅和停顿。这个功能自动分析语音，标出该删的废话片段；还能把人声和背景音乐分离（方便单独处理）。</p>
+  <p><strong>用的是什么（本地）：</strong><code>Whisper</code>（把语音转成文字、定位废话位置）+ <code>Demucs</code>（音轨分离）。二者都打包在 Python 环境里，无需单独下载。</p>
+  <p><span class="tag t-local">本地模型</span> <span class="tag t-free">已内置在 Python 环境</span></p>
+  <p><strong>必备条件：</strong>① 本机 Python 运行时；② Whisper/Demucs 已随环境附带。<strong>不另外要密钥</strong>。</p>
+  <div class="ok" style="margin-top:10px;">这是很多用户「没想到但真有用」的功能：做知识口播、直播切片时，能省掉大量手动剪废话的时间。</div>
+</div>
+
+<h2>三、下载与路径：完成版 vs 精简版，到底差在哪</h2>
+<div class="card">
+  <p>AIcut 提供两种安装形态，核心区别就是「模型带不带」：</p>
+  <table>
+    <thead><tr><th>形态</th><th>Python 运行时</th><th>本地模型（抠像/超清）</th><th>适合谁</th></tr></thead>
+    <tbody>
+      <tr><td><strong>完成版</strong></td><td>✅ 内置（解压即用）</td><td>✅ 内置（resources/python、resources/models）</td><td>想省事、一次装好全功能</td></tr>
+      <tr><td><strong>精简版</strong></td><td>❌ 首次用 AI 时「一键补全」下载</td><td>抠像模型可补；超清模型<strong>暂不可补</strong></td><td>硬盘小、只要基础功能</td></tr>
+    </tbody>
+  </table>
+  <h3>下载后文件落哪儿了？</h3>
+  <p>无论哪种形态，软件按「<strong>内置目录优先，否则回退到下载目录</strong>」解析：</p>
+  <ul class="tight">
+    <li><strong>完成版</strong>：模型在软件安装目录的 <code>resources/python</code> 和 <code>resources/models</code> 下。</li>
+    <li><strong>精简版一键补全</strong>：下载到系统的「用户数据目录」下 <code>aicut-assets/</code>，再细分：
+      <ul class="tight">
+        <li>Python 运行时 → <code>aicut-assets/python/</code></li>
+        <li>抠像模型 → <code>aicut-assets/models/modnet.onnx</code>、<code>aicut-assets/models/rmbg2.onnx</code></li>
+      </ul>
+    </li>
+  </ul>
+  <p class="muted">（Windows 上「用户数据目录」一般是 <code>C:\Users\你的用户名\AppData\Roaming\应用名\aicut-assets\</code>，软件会自动管理，你通常不需要手动找。）</p>
+  <div class="note">想确认自己缺什么：打开 AIcut → 顶部「AI 组件」面板，会列出 Python / MODNet / RMBG-2.0 的就绪状态，缺哪个点一下就自动下载。</div>
+</div>
+
+<h2>四、必备环境清单（按你想用的功能对号入座）</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>你想用</th><th>必须有的</th><th>建议有的</th></tr></thead>
+    <tbody>
+      <tr><td>AI 剪辑建议 / 脚本 / 翻译</td><td>联网 + 大模型 API Key</td><td>—</td></tr>
+      <tr><td>自动字幕（ASR）</td><td>联网 + 百炼 Key + 本机 Python</td><td>—</td></tr>
+      <tr><td>配音（TTS）</td><td>联网 + 火山/百炼 Key</td><td>—</td></tr>
+      <tr><td>智能抠像</td><td>本机 Python + MODNet/RMBG-2.0 模型</td><td>独显（任意品牌）</td></tr>
+      <tr><td>视频超清</td><td>本机 Python + SR 模型</td><td><strong>N 卡独显（CUDA 加速）</strong></td></tr>
+      <tr><td>口播自动剪辑</td><td>本机 Python（含 Whisper/Demucs）</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <div class="warn" style="margin-top:12px;">
+    <strong>关于「本机 Python」：</strong>云端功能（字幕/配音/AI/翻译）里的「Python」只是本地调用桥梁（尤其字幕必须靠它）。如果你用的是<strong>完成版，Python 已自带</strong>；精简版第一次用时点「一键补全」即可，别自己另外装 Python。
+  </div>
+</div>
+
+<h2>五、推荐替代产品对照（某个功能你不满意时）</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>AIcut 功能</th><th>可平替的成熟产品</th><th>特点</th></tr></thead>
+    <tbody>
+      <tr><td>语音转文字</td><td>剪映（内置）、Whisper 本地、讯飞听见、腾讯云 ASR、Azure Speech</td><td>剪映最省事；Whisper 免费可离线；讯飞/腾讯中文强</td></tr>
+      <tr><td>语音合成</td><td>剪映图文成片配音、微软 Edge TTS（免费）、ElevenLabs、Azure TTS、讯飞配音</td><td>Edge TTS 免费够用；ElevenLabs 最像真人（付费）</td></tr>
+      <tr><td>字幕翻译</td><td>DeepL、百度翻译 API、腾讯翻译君、Google Translate、剪映字幕翻译</td><td>DeepL 质量高；剪映可一站式</td></tr>
+      <tr><td>智能抠像</td><td>剪映智能抠像、CapCut、Adobe Premiere Roto Brush、remove.bg（在线）、本地 BiRefNet</td><td>剪映/CapCut 最傻瓜；remove.bg 在线按张收费</td></tr>
+      <tr><td>视频超清</td><td>剪映画质提升、Topaz Video AI、waifu2x、Real-ESRGAN</td><td>Topaz 最强（贵）；Real-ESRGAN 免费本地</td></tr>
+      <tr><td>口播自动剪辑</td><td>剪映「智能去啰嗦」、Descript（去填充词）、Adobe Podcast</td><td>Descript 英文极强；剪映中文方便</td></tr>
+      <tr><td>通用 AI 大脑</td><td>DeepSeek、OpenAI GPT、通义千问、文心一言、本地 Ollama</td><td>DeepSeek 性价比高；Ollama 可完全离线</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">提示：AIcut 的价值在于「把这些能力集成进同一个剪辑工作流」，而不是单个能力比专业工具更强。如果你只想要某一两项，上面的独立产品可能更快上手。</p>
+</div>
+
+<h2>六、常见问题 FAQ</h2>
+<div class="card">
+  <ul class="tight">
+    <li><strong>Q：为什么我填了百炼 Key，自动字幕还是报错？</strong><br>A：九成是因为没装 Python 运行时（完成版自带；精简版去「AI 组件」点补全）。其次确认在百炼控制台「开通了 paraformer 模型权限」。</li>
+    <li><strong>Q：这些模型下载下来会很大吗？</strong><br>A：Python 运行时压缩包约 1.8 GB（解压约 3.1 GB），RMBG-2.0 约 1 GB，MODNet 仅 26 MB，超清模型约 35 MB。完成版一次带齐约 4~5 GB。</li>
+    <li><strong>Q：没有独显能用本地模型吗？</strong><br>A：能。抠像用 CPU 也能跑（只是慢，RMBG-2.0 单帧可能几秒）；超清强烈建议独显，否则一段视频可能要几十分钟。云端功能（字幕/配音/AI/翻译）与显卡无关。</li>
+    <li><strong>Q：我的密钥安全吗？</strong><br>A：所有云端 Key 只存在你本机配置文件里，软件不内置任何密钥、也不上传。完成版把模型都打进安装包，但<strong>绝对不含你的密钥</strong>。</li>
+    <li><strong>Q：能完全离线用吗？</strong><br>A：本地模型（抠像/超清/口播剪辑）下载后可离线。但字幕、配音、AI、翻译都依赖云端 API，必须联网。</li>
+  </ul>
+</div>
+
+<h2>七、重要补充提醒（容易踩坑）</h2>
+<div class="danger">
+  <p style="margin-top:0;"><strong>⚠️ 超清增强模型（sr_v0_test.onnx）当前仅完成版内置。</strong>精简版的「一键补全」清单里<strong>还没有收录超清模型</strong>，所以精简版用户暂时用不了超清，或需手动把模型文件放到 <code>aicut-assets/models/</code> 目录。若你很依赖超清，请直接装<strong>完成版</strong>。</p>
+</div>
+<div class="warn">
+  <p style="margin-top:0;"><strong>显存 / 内存提醒：</strong>RMBG-2.0 精细抠像推理峰值约 <strong>12 GB 内存</strong>；超清增强建议 <strong>6 GB 以上显存</strong>的独显才能流畅。低配电脑建议用 MODNet（轻量）而非 RMBG-2.0。</p>
+</div>
+<div class="note">
+  <p style="margin-top:0;"><strong>GPU 兼容性：</strong>本地模型用的是 ONNX Runtime，会自动在 <code>CUDA（N 卡）→ DirectML（Win 自带，兼容 A 卡 / Intel / N 卡）→ CPU</code> 之间择优。也就是说<strong>不限 N 卡</strong>，AMD 和 Intel 显卡也能加速，实在没有独显再退回 CPU。</p>
+</div>
+
+<footer>
+  本文内容依据 AIcut 源码（<code>gui/src/config/ai_config.ts</code>、<code>src/tts.rs</code>、<code>src/ai.rs</code>、<code>python/asr/bridge.py</code>、<code>python/keying/core.py</code>、<code>python/sr/inference.py</code>、<code>python/speech_edit/</code>、<code>gui/electron/assets-manifest.ts</code>）逐项核实整理。具体界面文案、费用与模型名以你手上的软件版本和对应云厂商官方页面为准。
+</footer>
+
+</div>
+</body>
+</html>

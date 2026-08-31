@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIcut 语音识别（ASR）配置帮助指南 — 阿里云百炼 Paraformer-realtime-v2</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --ink: #1f2329;
+    --sub: #5b6168;
+    --line: #e5e7eb;
+    --brand: #1677ff;
+    --brand-soft: #e8f1ff;
+    --warn-bg: #fff7e6;
+    --warn-line: #ffd591;
+    --ok-bg: #f6ffed;
+    --ok-line: #b7eb8f;
+    --code-bg: #f2f3f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 26px; margin: 0 0 8px; }
+  h2 { font-size: 20px; margin: 36px 0 14px; padding-left: 10px; border-left: 4px solid var(--brand); }
+  h3 { font-size: 16px; margin: 22px 0 10px; color: var(--ink); }
+  p { margin: 10px 0; }
+  .lead { color: var(--sub); font-size: 15px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; margin: 16px 0; }
+  .note { background: var(--brand-soft); border: 1px solid #bcdcff; border-radius: 10px; padding: 14px 18px; margin: 16px 0; }
+  .warn { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 14px 18px; margin: 16px 0; }
+  .ok { background: var(--ok-bg); border: 1px solid var(--ok-line); border-radius: 10px; padding: 14px 18px; margin: 16px 0; }
+  ol.steps { counter-reset: step; list-style: none; padding: 0; margin: 14px 0; }
+  ol.steps > li {
+    position: relative; padding: 14px 16px 14px 56px; margin: 12px 0;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  }
+  ol.steps > li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 14px; top: 14px; width: 28px; height: 28px;
+    background: var(--brand); color: #fff; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+  }
+  ul.tight { margin: 8px 0; padding-left: 22px; }
+  ul.tight li { margin: 6px 0; }
+  code, .kbd {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 13px;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 9px 12px; text-align: left; }
+  th { background: #fafbfc; font-weight: 600; }
+  .field { font-family: monospace; color: var(--brand); }
+  .tag { display: inline-block; background: var(--brand-soft); color: var(--brand); border-radius: 4px; padding: 1px 8px; font-size: 12px; margin-right: 6px; }
+  footer { margin-top: 40px; color: var(--sub); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+  a { color: var(--brand); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>AIcut 语音识别（ASR）配置帮助指南</h1>
+    <p class="lead">模型：阿里云百炼 <strong>paraformer-realtime-v2</strong>（用于「AI 自动字幕」把视频/音频里的说话内容转成字幕）</p>
+  </header>
+
+  <div class="note">
+    <strong>这篇指南是写给谁看的：</strong><br>
+    你（用户）想用 AIcut 的「AI 自动字幕」功能，需要先在阿里云百炼开通语音识别服务、拿到 API Key，再填进 AIcut。下面按「假如你就是第一次操作的用户」的步骤一步步写，照着做即可。
+  </div>
+
+  <h2>一、先确认你的 AIcut 能用 ASR</h2>
+  <div class="card">
+    <p>AIcut 的语音识别依赖一个<strong>本地 Python 运行时</strong>和 <code>dashscope</code> SDK（由 <code>python/asr/bridge.py</code> 调用百炼云端接口）。所以：</p>
+    <ul class="tight">
+      <li>✅ <span class="tag">完成版</span>软件自带 Python 和依赖，<strong>无需任何额外下载</strong>，解压即用。</li>
+      <li>✅ <span class="tag">精简版</span>需先在「AI 组件」面板点一键补全，把 Python 运行时下载下来，之后也能用。</li>
+      <li>❌ 既没用完成版、又没下载 Python 的，ASR 会无法运行。</li>
+    </ul>
+    <p class="lead">判断方法：打开 AIcut → 顶部「AI 组件」→ 看 Python 运行时状态是否显示「已就绪」。</p>
+  </div>
+
+  <div class="warn">
+    <strong>⚠️ 关于密钥安全：</strong>你的百炼 API Key 只会保存在你本机的配置文件里（<code>config.json</code>），<strong>软件不会内置任何密钥</strong>，也不会上传。用完成版还是精简版都不影响这一点。
+  </div>
+
+  <h2>二、去阿里云百炼开通语音识别（共 4 步）</h2>
+
+  <ol class="steps">
+    <li>
+      <h3>注册并实名阿里云账号</h3>
+      <p>打开 <a href="https://www.aliyun.com" target="_blank">www.aliyun.com</a>，注册账号并完成<strong>实名认证</strong>（个人/企业均可）。语音类服务要求实名后才可使用。</p>
+    </li>
+
+    <li>
+      <h3>开通百炼（DashScope）服务</h3>
+      <p>进入百炼控制台 <a href="https://bailian.console.aliyun.com" target="_blank">bailian.console.aliyun.com</a>，首次进入按提示<strong>开通百炼服务</strong>。开通后系统会自动发放「新人免费额度」。</p>
+      <p class="lead">说明：这一步只是把百炼平台打开，后面还要单独开通具体模型权限。</p>
+    </li>
+
+    <li>
+      <h3>开通 paraformer-realtime-v2 模型权限</h3>
+      <p>在百炼控制台的「模型广场 / 业务空间」中找到 <strong>paraformer-realtime-v2</strong>（语音识别类模型），点击<strong>开通</strong>。</p>
+      <div class="warn" style="margin:10px 0;">
+        ASR 类模型不是开通百炼就能直接调，必须<strong>在业务空间里逐一开通具体模型</strong>，开通后才会消耗免费额度、才能正常调用。
+      </div>
+    </li>
+
+    <li>
+      <h3>创建 API Key 并复制</h3>
+      <p>进入百炼控制台 → <strong>密钥管理（API Key）</strong> → 点击「创建 API Key」（归属选主账号 / 默认业务空间）。创建成功后会显示一串以 <code>sk-</code> 开头的密钥，<strong>复制保存好</strong>，下一步要填进 AIcut。</p>
+      <p class="lead">密钥只显示一次，复制后妥善保管，不要泄露给别人。</p>
+    </li>
+  </ol>
+
+  <h2>三、把密钥填进 AIcut</h2>
+  <div class="card">
+    <p>打开 AIcut → 顶部「<strong>AI 配置</strong>」→ 找到「<strong>语音识别（ASR）</strong>」区域，按下面填写：</p>
+    <table>
+      <thead>
+        <tr><th>字段</th><th>填什么</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="field">provider</td><td><code>bailian</code></td><td>默认就是百炼，不用改</td></tr>
+        <tr><td class="field">apiKey</td><td>你复制的 <code>sk-</code> 密钥</td><td><strong>必填</strong>，留空则无法识别</td></tr>
+        <tr><td class="field">model</td><td><code>paraformer-realtime-v2</code></td><td>可填全称；也可填 <code>paraformer</code>，软件内部会自动映射到 <code>paraformer-realtime-v2</code></td></tr>
+        <tr><td class="field">endpoint</td><td>留空</td><td>可选，留空即用百炼默认接入点</td></tr>
+      </tbody>
+    </table>
+    <p class="lead">填完后无需重启，直接去用「AI 自动字幕」即可。</p>
+  </div>
+
+  <h2>四、费用与免费额度（你最关心的）</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>项目</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>计费单价</td><td>paraformer-realtime-v2（华北2·北京）<strong>0.00024 元 / 秒</strong> 音频</td></tr>
+        <tr><td>每月免费额度</td><td>系统每月自动发放 <strong>36000 秒（约 10 小时）</strong> 免费转写额度</td></tr>
+        <tr><td>新人额外额度</td><td>开通后有 <strong>90 天新人免费额度</strong>（与月额度叠加使用）</td></tr>
+        <tr><td>免费额度适用地域</td><td>仅限 <strong>华北2·北京</strong>，其它地域按量计费</td></tr>
+        <tr><td>调用频率</td><td>RPM 1200（每分钟最多 1200 次请求，一般远够用）</td></tr>
+      </tbody>
+    </table>
+    <p class="lead">举例：一段 10 分钟的视频，按量计费约 0.144 元，通常落在每月免费额度内，等于不花钱。</p>
+  </div>
+
+  <h2>五、验证是否配置成功</h2>
+  <ol class="steps">
+    <li><h3>准备一段带人声的视频或音频</h3><p>任意你能说话录制的短片即可。</p></li>
+    <li><h3>在时间轴选中该片段 → 点「AI 自动字幕」</h3><p>选择刚才配置的百炼（bailian）识别。</p></li>
+    <li><h3>看结果</h3>
+      <div class="ok" style="margin-top:8px;">
+        ✅ 成功：时间轴自动生成带时间的字幕条，文字与说话内容一致。<br>
+        ❌ 失败常见原因：
+        <ul class="tight" style="margin-top:6px;">
+          <li>apiKey 没填或填错 → 提示鉴权失败；</li>
+          <li>模型权限没开通 → 提示模型不可用（回百炼第 3 步确认开通）；</li>
+          <li>Python 未就绪 → 回第一步检查「AI 组件」面板。</li>
+        </ul>
+      </div>
+    </li>
+  </ol>
+
+  <h2>六、常见问题</h2>
+  <div class="card">
+    <p><strong>Q：我填 <code>paraformer</code> 还是 <code>paraformer-realtime-v2</code> 都行吗？</strong><br>
+    A：都行。AIcut 内部有别名映射，<code>paraformer</code> / <code>paraformer-v1</code> / <code>paraformer-v2</code> 都会自动转成 <code>paraformer-realtime-v2</code>。填全称更直观。</p>
+
+    <p><strong>Q：key 会泄露吗？</strong><br>
+    A：不会。key 只存在你本机配置文件中，软件不内置、不上传。</p>
+
+    <p><strong>Q：精简版能用吗？</strong><br>
+    A：能，但需先在「AI 组件」面板补全 Python 运行时（一次下载）。完成版自带，最省事。</p>
+
+    <p><strong>Q：免费额度用完了会怎样？</strong><br>
+    A：超出部分按 0.00024 元/秒 从阿里云账户扣费，可在百炼控制台随时查余额和用量。</p>
+  </div>
+
+  <footer>
+    本指南依据阿里云官方文档（密钥管理 / 模型开通 / 新人免费额度）与 AIcut 源码（<code>gui/src/config/ai_config.ts</code> 的 ASRConfig、<code>python/asr/bridge.py</code> 的模型别名映射）整理，内容以实际控制台页面与软件版本为准。
+  </footer>
+
+</div>
+</body>
+</html>

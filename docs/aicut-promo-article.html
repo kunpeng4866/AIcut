@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIcut 上手与答疑 · 开发者自述</title>
+<style>
+  :root{
+    --ink:#1f2329; --sub:#5b6168; --line:#e8eaed; --bg:#ffffff;
+    --brand:#2b6cb0; --brand-soft:#eaf2fb; --ok:#2f855a; --ok-soft:#e8f5ee;
+    --warn:#c05621; --warn-soft:#fdf0e6; --gray:#8a9099; --card:#f7f9fc;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--ink);background:#f0f2f5;line-height:1.75;font-size:16px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:720px;margin:0 auto;background:var(--bg);padding:28px 22px 60px}
+  .cover{background:linear-gradient(135deg,#2b6cb0,#1a4e87);color:#fff;border-radius:16px;
+    padding:30px 24px;margin-bottom:26px}
+  .cover h1{font-size:23px;line-height:1.4;font-weight:800;letter-spacing:.3px}
+  .cover .sub{margin-top:12px;font-size:14px;opacity:.92}
+  .cover .meta{margin-top:16px;font-size:12.5px;opacity:.8}
+  h2{font-size:19px;margin:34px 0 14px;padding-left:11px;border-left:4px solid var(--brand);font-weight:800}
+  h3{font-size:16px;margin:20px 0 8px;font-weight:700;color:var(--brand)}
+  p{margin:10px 0;color:#2c333a}
+  .lead{background:var(--brand-soft);border-radius:12px;padding:16px 18px;color:#234;font-size:15px;margin:18px 0}
+  .lead b{color:var(--brand)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--card);font-weight:700;color:#334}
+  .ok{color:var(--ok);font-weight:700}
+  .no{color:var(--warn);font-weight:700}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin:14px 0}
+  .card h4{font-size:15.5px;margin-bottom:6px;color:var(--brand)}
+  .card .fix{background:var(--ok-soft);border-radius:8px;padding:8px 11px;margin-top:8px;font-size:14px;color:#234}
+  .card .fix b{color:var(--ok)}
+  .qa{margin:12px 0;padding-left:14px;position:relative}
+  .qa::before{content:"";position:absolute;left:0;top:11px;width:7px;height:7px;border-radius:50%;background:var(--brand)}
+  .qa b{color:var(--ink)}
+  .warnbox{background:var(--warn-soft);border-left:4px solid var(--warn);border-radius:8px;padding:13px 16px;margin:14px 0;font-size:14.5px}
+  .tip{background:var(--ok-soft);border-left:4px solid var(--ok);border-radius:8px;padding:13px 16px;margin:14px 0;font-size:14.5px}
+  .pill{display:inline-block;background:var(--brand-soft);color:var(--brand);font-size:12px;
+    padding:2px 9px;border-radius:20px;margin-right:6px;font-weight:700}
+  .foot{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);color:var(--gray);font-size:13px;text-align:center}
+  ul{margin:8px 0 8px 22px}
+  li{margin:5px 0}
+  .em{color:var(--brand);font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="cover">
+    <h1>我把每月的剪辑订阅费省下来了，顺手做了个开源免费的 AI 视频剪辑软件</h1>
+    <div class="sub">AIcut 上手指南与答疑 · 一个开发者掏心窝的自述</div>
+    <div class="meta">写给每一位不想被软件订阅费"割韭菜"的普通用户</div>
+  </div>
+
+  <div class="lead">
+    <b>一句话说清：</b>AIcut 是一款装在电脑上、<b>免费且开源</b>的视频剪辑软件，把"自动字幕、AI 配音、智能抠图、翻译、口播剪辑"这些常用的 AI 能力集成进来。它<b>不收软件费</b>，云端 AI 功能按需付费且很便宜，本地功能完全免费。本文把"能用什么、缺什么、会遇到什么坑、花不花钱、安不安全"一次说透。
+  </div>
+
+  <!-- 一、初衷 -->
+  <h2>一、我为什么做这个软件</h2>
+  <p>做视频的人大概都懂这种心情：剪辑软件要么买断贵、要么按月订阅；想要个"自动加字幕""一键抠图"的 AI 功能，平台还要再单独收费，而且一不留神就自动续费。</p>
+  <p>我每个月交这些软件费都觉得<b>心疼</b>。于是干脆自己动手，做了一个能覆盖日常 80% 需求的桌面剪辑工具，把常用的 AI 能力直接做进去，然后<b>开源、免费</b>给大家用——你不用再为"剪个视频"每个月往外掏钱，有能力的朋友还能在它基础上继续加功能。</p>
+
+  <!-- 二、功能全景 -->
+  <h2>二、现在能做什么（功能全景，坦诚交代）</h2>
+  <p>下面这张表，<span class="ok">绿色</span>是已经做好、开箱即用的；<span class="no">橙色</span>是这次发布里<b>暂时没有</b>的——我故意写明缺什么，不藏着掖着。</p>
+
+  <table>
+    <tr><th>功能</th><th>状态</th><th>它帮你解决什么</th><th>用到的技术 / 说明</th></tr>
+    <tr>
+      <td>基础剪辑</td><td><span class="ok">已完善</span></td>
+      <td>裁剪、拼接、变速、转场、加字幕、镜像翻转</td>
+      <td>本地处理，不上云，免费</td>
+    </tr>
+    <tr>
+      <td>AI 语音转文字 / 自动字幕</td><td><span class="ok">已完善</span></td>
+      <td>视频/音频自动生成字幕，省去手动敲字幕</td>
+      <td>阿里云百炼 Paraformer 语音识别（云端，需配置密钥）</td>
+    </tr>
+    <tr>
+      <td>AI 配音 / 语音合成</td><td><span class="ok">已完善</span></td>
+      <td>把文字变成配音，做解说、旁白</td>
+      <td>火山引擎 TTS 或 百炼 CosyVoice（纯云端，无需下载模型）</td>
+    </tr>
+    <tr>
+      <td>AI 翻译</td><td><span class="ok">已完善</span></td>
+      <td>字幕/文案一键翻译成多国语言，做出海内容</td>
+      <td>复用通用大模型（默认 DeepSeek）逐行翻译，支持英/日/韩/法/德/西等</td>
+    </tr>
+    <tr>
+      <td>智能抠像（去背景）</td><td><span class="ok">已完善</span></td>
+      <td>把人物/物体从背景里抠出来</td>
+      <td>① 内置轻量模型 MODNet（日常够用）；② 高级精细抠图 RMBG-2.0，<b>点内置链接下载</b>（约 1GB）</td>
+    </tr>
+    <tr>
+      <td>口播自动剪辑</td><td><span class="ok">已完善</span></td>
+      <td>自动去掉口播里的"嗯、啊"废话、人声/背景音分离</td>
+      <td>Whisper + Demucs（本地 Python 环境运行）</td>
+    </tr>
+    <tr>
+      <td>通用 AI 助手</td><td><span class="ok">已完善</span></td>
+      <td>脚本润色、文案生成、灵感辅助</td>
+      <td>默认 DeepSeek，可换成你自己的模型</td>
+    </tr>
+    <tr>
+      <td>美颜</td><td><span class="no">暂不包含</span></td>
+      <td>磨皮、瘦脸等</td>
+      <td>本次发布未内置；有开发能力的用户可自行接入开源美颜方案</td>
+    </tr>
+    <tr>
+      <td>超清 / 画质增强</td><td><span class="no">暂不包含</span></td>
+      <td>把模糊视频变清晰</td>
+      <td>本次发布未包含；可基于开源超分模型自行接入</td>
+    </tr>
+  </table>
+
+  <div class="warnbox">
+    <b>关于"缺的两项"，我得多说一句：</b>美颜和超清没有做进去，不是偷懒，而是想先把"剪辑 + AI 基础能力"这条主线做扎实。这两块我留了接口和空间，<b>有编程能力的朋友可以接入成熟的开源项目自己补全</b>，我也会在文档里给方向。普通用户暂时用不到也不影响日常剪辑。
+  </div>
+
+  <!-- 三、常见问题与解决路径 -->
+  <h2>三、你可能会遇到的坑，以及怎么解决</h2>
+  <p>提前把高频问题列出来，照着做基本都能解开：</p>
+
+  <div class="card">
+    <h4>1. 高级抠图要下载模型，在哪点？</h4>
+    <p>软件里打开「AI 组件 / 资产」面板，会看到 RMBG-2.0 模型的下载入口，<b>链接已经内置好</b>，不用你自己去网上找。点一下就下载，下载完自动启用。首次用会慢一点（约 1GB），之后就不用再下了。</p>
+    <div class="fix"><b>解决路径：</b>AI 组件面板 → 找到"高级抠图模型" → 点击下载 → 等进度条走完即可。</div>
+  </div>
+
+  <div class="card">
+    <h4>2. 模型下载卡住 / 失败怎么办？</h4>
+    <p>多为网络波动。软件支持<b>断点续传</b>，关掉重开再点一次通常会接着下载；大文件下载中途断了不会从头来。</p>
+    <div class="fix"><b>解决路径：</b>检查网络 → 重新打开下载面板 → 重试；仍失败可换个网络时段再试。</div>
+  </div>
+
+  <div class="card">
+    <h4>3. 语音转文字 / AI 配音要配置什么？</h4>
+    <p>这类<b>云端 AI 功能</b>需要你到对应平台（阿里云百炼 / 火山引擎）注册一个账号，拿到一串"密钥（API Key）"，填进软件的「AI 配置」里。密钥只存在你自己的电脑上。</p>
+    <div class="fix"><b>解决路径：</b>注册平台账号 → 创建 API Key → 软件「AI 配置」粘贴保存 → 即可使用。第一次配置约花 5 分钟。</div>
+  </div>
+
+  <div class="card">
+    <h4>4. 我没有 N 卡（用的是 AMD / Intel 显卡）能跑吗？</h4>
+    <p><b>能。</b>本地 AI 推理会自动适配：有 N 卡走 CUDA 加速，没有就走 DirectML，AMD / Intel 显卡照样能加速，实在不行还能用 CPU 跑。也就是说，<b>不是非得买高端显卡</b>。</p>
+    <div class="fix"><b>解决路径：</b>直接安装使用，软件会自动选最合适的运行方式，无需手动设置。</div>
+  </div>
+
+  <div class="card">
+    <h4>5. 软件体积有点大（完整版好几个 G）？</h4>
+    <p>因为它把 <b>Python 运行环境和基础 AI 模型都打包进去了</b>，这样你下载后不用再折腾环境，双击就能用。体积换来的是"省心"。</p>
+    <div class="fix"><b>解决路径：</b>接受一次性下载大文件；后续若出精简版会再说明。</div>
+  </div>
+
+  <div class="card">
+    <h4>6. 导出很慢 / 卡顿？</h4>
+    <p>导出速度和视频分辨率、是否开启 AI 功能有关。开独显加速会快很多；超长、高清视频本身就需要时间，属正常现象。</p>
+    <div class="fix"><b>解决路径：</b>确认用独显；先导出一小段测试；关掉暂时不需要的 AI 处理再导出。</div>
+  </div>
+
+  <!-- 四、打消顾虑 -->
+  <h2>四、你最该放心的三件事：钱、安全、隐私</h2>
+
+  <h3>① 费用：软件本身 0 元，云端 AI 按需付费且很便宜</h3>
+  <p>AIcut <b>软件完全免费、开源</b>，没有任何功能要你充值解锁。只有当你用到"云端 AI"（如语音识别、云端配音）时，才会产生对应服务商的费用——而且都便宜得出奇：</p>
+  <ul>
+    <li>以百炼语音识别为例，公开报价约 <b>0.00024 元 / 秒</b>，且<b>每月有数万秒免费额度</b>（按官方当前规则约 36000 秒 ≈ 10 小时）。剪一个 2 分钟短视频，费用几乎可以忽略，轻度使用一个月可能都不花一分钱。</li>
+    <li>AI 配音按字数计费，也是分厘级别。</li>
+    <li>更关键的是：<b>所有本地剪辑功能（裁剪、拼接、变速、本地抠图、口播剪辑）完全免费，且不联网</b>。你完全可以选择"只用免费部分"。</li>
+  </ul>
+  <div class="tip">具体费率以各平台官方最新公布为准，这里只是帮你建立"很便宜"的预期，别被"AI 很贵"的印象吓到。</div>
+
+  <h3>② 安全：密钥只存在你电脑，软件不偷不传</h3>
+  <p>你填的每一张平台密钥（API Key），都只保存在<b>你本机的配置文件</b>里，AIcut <b>不会内置任何密钥，也不会把你的密钥上传到任何服务器</b>。再加上代码开源，任何人都能审计它到底干了什么——这比闭源商业软件更透明。</p>
+
+  <h3>③ 隐私：你的视频默认都在本地，不上云</h3>
+  <p>所有视频剪辑、本地抠图、口播处理，都是在<b>你自己的电脑上完成</b>，素材不会离开你的机器。只有你<b>主动开启</b>的云端 AI 功能（比如"云端配音"），才会把对应的文本/音频发给对应服务商——这是这类功能本身的工作原理，且你可以完全不用它们。</p>
+
+  <h3>④ 会不会跑路、以后变收费？</h3>
+  <p>开源意味着代码公开、人人可获取。即使哪天我不维护了，你手上的软件照样能用，也能自己编译、自己改。<b>它从设计上就不依赖"我一个人养着"</b>。</p>
+
+  <!-- 五、开源自由 -->
+  <h2>五、开源，意味着你可以自由使用和改造</h2>
+  <p>这软件是<b>开源</b>的，你可以：</p>
+  <ul>
+    <li><span class="pill">免费使用</span>所有已做好的功能，没有功能阉割、没有水印勒索。</li>
+    <li><span class="pill">二次开发</span>在它基础上加功能——比如把美颜、超清用开源项目接进去，变成你专属的版本。</li>
+    <li><span class="pill">审计透明</span>看源代码，确认它没做损害你的事。</li>
+  </ul>
+  <p>我特别欢迎有能力的朋友一起完善它。你改好了，也能分享给更多人。</p>
+
+  <!-- 六、怎么开始 -->
+  <h2>六、三步开始用</h2>
+  <div class="card">
+    <h4>第一步：下载完整版</h4>
+    <p>完整版已经把 Python 运行环境和基础模型打包好，下载后双击即用，不用自己配环境。</p>
+  </div>
+  <div class="card">
+    <h4>第二步：导入视频，直接用基础功能</h4>
+    <p>裁剪、拼接、加字幕、本地抠图、口播剪辑——这些不用任何配置，打开就能用。</p>
+  </div>
+  <div class="card">
+    <h4>第三步：按需开启高级能力</h4>
+    <p>· <b>高级精细抠图</b>：在「AI 组件」面板点内置链接下载模型（约 1GB）即可。<br>
+       · <b>云端 AI（语音识别 / 配音 / 翻译 / 通用助手）</b>：去对应平台注册拿密钥，填进「AI 配置」。<br>
+       · <b>美颜 / 超清</b>：本次未内置，有开发能力可按文档接入开源方案。</p>
+  </div>
+
+  <!-- 七、补充 -->
+  <h2>七、我替你想到、但你未必会问的几件事</h2>
+  <div class="qa"><b>硬件建议：</b>做精细抠图、超清这类重活，建议用独立显卡、内存宽裕一点的电脑；轻量剪辑普通笔记本就能跑。</div>
+  <div class="qa"><b>工程记得保存：</b>导出前先保存工程文件，万一软件意外关闭，能少掉眼泪。</div>
+  <div class="qa"><b>网络要求：</b>本地功能离线可用；只有云端 AI 才需要联网。</div>
+  <div class="qa"><b>第一次配置密钥会花几分钟：</b>这是一次性的，配好之后后续全自动，别被这一步劝退。</div>
+  <div class="qa"><b>开源协议：</b>使用与二次开发请遵守项目标注的开源协议，转发时保留出处即可。</div>
+  <div class="qa"><b>反馈渠道：</b>遇到问题或想要新功能，可以到项目仓库提 issue / 留言，我会看。</div>
+
+  <div class="warnbox">
+    <b>最后一句大实话：</b>AIcut 现在不是"全能选手"，它把"剪辑 + 常用 AI"这条主线做扎实了，美颜和超清留了口子给你自己发挥。如果你要的是开箱即用的全家桶，它可能暂时差一口气；但如果你想<b>不被订阅费绑架、又能用上实用的 AI 剪辑</b>，它已经够用，而且会越用越好。
+  </div>
+
+  <div class="foot">
+    AIcut · 开源免费 · 本地优先 · 与所有不想被软件费绑架的人共勉
+  </div>
+
+</div>
+</body>
+</html>
