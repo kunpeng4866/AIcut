@@ -93,6 +93,7 @@ AIcut **软件完全免费、开源**，没有任何功能要你充值解锁。�
 **第一步：下载完整版**
 完整版（约 723 MB 压缩包）已经把 Python 运行环境和基础模型打包好，下载后双击即用，不用自己配环境。
 > 下载地址：[点击下载 AIcut 完整版（息流笔记，约 723 MB）](https://flowus.cn/carcoon/312c57a4-c532-4de0-a9e3-b41469d7c457)
+> 备用下载：[GitHub Release 直链（约 723 MB）](https://github.com/kunpeng4866/AIcut/releases/download/v1.0.0/AIcut-green-portable-win64.7z)
 
 **第二步：导入视频，直接用基础功能**
 裁剪、拼接、加字幕、蒙版、本地抠图、口播剪辑——这些不用任何配置，打开就能用。
