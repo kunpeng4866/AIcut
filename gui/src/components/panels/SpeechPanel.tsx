@@ -713,6 +713,13 @@ export default function SpeechPanel() {
                 <option value="high">高</option>
               </select>
             </label>
+            {denoise && (
+              <div style={{ fontSize: 11, color: C.textSub, marginTop: -2, marginBottom: 8, lineHeight: 1.4 }}>
+                {denoiseQuality === 'standard'
+                  ? '标准档（DFN3）只降底噪；咳嗽/呼吸/叮咚等瞬态杂音请选「高」（FRCRN，输出 16kHz）。'
+                  : '「高」档（FRCRN）可去除咳嗽/呼吸/叮咚等瞬态杂音，输出为 16kHz。'}
+              </div>
+            )}
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer' }}>
               <input type="checkbox" checked={maskSoften} onChange={(e) => setOpt(setMaskSoften, 'maskSoften', e.target.checked)} />
               DFN3 高 SNR 软化（保留干净语音）
