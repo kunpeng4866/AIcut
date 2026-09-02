@@ -1,0 +1,77 @@
+<section style="font-size:16px;line-height:1.85;color:#2b2b2b;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;padding:4px 2px;">
+  <h1 style="font-size:22px;font-weight:700;color:#1a1a2e;margin:18px 0 8px;border-left:5px solid #e94560;padding-left:12px;">AIcut 配置不求人：手把手接入阿里云百炼的语音识别与配音</h1>
+  <p style="color:#888;font-size:13px;margin:0 0 18px;">Paraformer 实时语音识别 + CosyVoice 声音复刻配音</p>
+
+  <p style="margin:14px 0;">上篇文章我介绍了 AIcut 都能做什么——<strong style="color:#e94560;">自动字幕、AI 配音、口播剪辑、智能抠像</strong>……这篇专门讲一件事：<strong>软件是免费的，但怎么把它真正用起来</strong>。核心就是接好两个云端 AI 模型。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">一、先搞清楚：要配哪两样东西</h2>
+  <p style="margin:12px 0;">AIcut 用到的语音能力，都来自<strong>阿里云百炼</strong>，而且<strong style="color:#e94560;">共用同一个 API Key</strong>：</p>
+  <table style="width:100%;border-collapse:collapse;margin:12px 0;font-size:14px;">
+    <tr style="background:#16213e;color:#fff;">
+      <td style="border:1px solid #ccc;padding:8px;font-weight:700;">能力</td>
+      <td style="border:1px solid #ccc;padding:8px;font-weight:700;">用在哪</td>
+      <td style="border:1px solid #ccc;padding:8px;font-weight:700;">百炼模型</td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #ccc;padding:8px;">语音识别 ASR</td>
+      <td style="border:1px solid #ccc;padding:8px;">语音自动转字幕</td>
+      <td style="border:1px solid #ccc;padding:8px;"><code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">paraformer-realtime-v2</code></td>
+    </tr>
+    <tr>
+      <td style="border:1px solid #ccc;padding:8px;">语音合成 TTS</td>
+      <td style="border:1px solid #ccc;padding:8px;">文字变成你的声音配音</td>
+      <td style="border:1px solid #ccc;padding:8px;"><code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">cosyvoice-v3.5-plus</code></td>
+    </tr>
+  </table>
+  <p style="margin:12px 0;background:#fff7f7;border-left:4px solid #e94560;padding:10px 12px;">你只需要准备两样：① 一个百炼 API Key（两个功能通用）；② 想用配音时，再加一个<strong>你复刻的声音 ID</strong>。软件具体功能看我<strong>上一篇文章</strong>。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">二、第一步：拿到阿里云百炼 API Key（必做，两个功能都靠它）</h2>
+  <p style="margin:12px 0;">1. 打开 <span style="color:#0f3460;font-weight:700;">bailian.console.aliyun.com</span>，用阿里云账号登录（没账号先注册，<strong>要做实名认证</strong>，不然建不了 Key）。</p>
+  <p style="margin:12px 0;">2. 第一次会弹出"开通百炼服务"，点<strong>开通</strong>（免费，会自动送一笔试用额度）。</p>
+  <p style="margin:12px 0;">3. 页面<strong>右上角点你的头像 / 齿轮</strong> → 选择「<strong>API-KEY</strong>」。</p>
+  <p style="margin:12px 0;">4. 点「<strong>创建 API-KEY</strong>」→ 选「默认业务空间」→ 创建。</p>
+  <p style="margin:12px 0;background:#fff7f7;border-left:4px solid #e94560;padding:10px 12px;"><strong style="color:#e94560;">⚠️ 关键：</strong>创建后那串 <code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">sk-...</code> 密钥<strong>只显示这一次</strong>！马上复制保存到备忘录，关掉就再也看不到了。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">三、第二步：在 AIcut 里配「语音识别（字幕）」</h2>
+  <p style="margin:12px 0;">1. 打开 AIcut，点右上角「<strong>AI 配置</strong>」（首次启动也会自动弹配置向导，选到"语音识别"那一步即可）。</p>
+  <p style="margin:12px 0;">2. <strong>语音识别(ASR)</strong> 的「服务商」选 <strong style="color:#0f3460;">阿里云百炼</strong>。</p>
+  <p style="margin:12px 0;">3. 「API Key」处粘贴刚才复制的 <code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">sk-...</code>。</p>
+  <p style="margin:12px 0;">4. 「模型」下拉里选 <strong style="color:#e94560;">paraformer-realtime-v2（实时·词级时间戳，字幕对齐最准）</strong>。</p>
+  <p style="margin:12px 0;">5. 「接口地址」<strong>留空</strong>就行（自动用百炼默认地址）。</p>
+  <p style="margin:12px 0;color:#555;font-size:14px;">到这儿字幕功能就通了——给视频加字幕时选「AI 自动字幕」就会调用它。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">四、第三步：在百炼网页上"复刻"你的声音（配音的前提）</h2>
+  <p style="margin:12px 0;background:#fff7f7;border-left:4px solid #e94560;padding:10px 12px;"><strong style="color:#e94560;">⚠️ 最重要的一点：</strong>AIcut 里<strong>没有"造声音"的按钮</strong>。必须先在百炼网页上把你的声音复刻好，再把声音 ID 抄回 AIcut。</p>
+  <p style="margin:12px 0;"><strong style="color:#0f3460;">复刻声音的路径（一步步照着点）：</strong></p>
+  <p style="margin:8px 0;padding-left:6px;">阿里云百炼 → 模型广场 → 语音模型 → 语音合成 → <strong>声音复刻</strong> → 复刻声音 → 选择复刻及合成模型 → 设置音色名 → <strong>开始复刻</strong></p>
+  <p style="margin:12px 0;">上传一段 10~20 秒你自己的原声（环境安静、少杂音），等几分钟复刻完成。</p>
+  <p style="margin:12px 0;"><strong style="color:#0f3460;">找到你的声音 ID：</strong></p>
+  <p style="margin:8px 0;padding-left:6px;">阿里云百炼 → 模型广场 → 语音模型 → 语音合成 → <strong>我的复刻</strong> → 在声音名称<strong>旁边</strong>那一栏就是「ID」，复制它。</p>
+  <p style="margin:12px 0;font-size:14px;color:#555;">这个 ID 长这样：<code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">cosyvoice-v3.5-plus-bailian-xxxxxxxx</code>，它是<strong>绑定模型家族</strong>的，别选错模型去复刻。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">五、第四步：在 AIcut 里配「语音合成（配音）」</h2>
+  <p style="margin:12px 0;">1. 还是「AI 配置」里，切到 <strong>文字转语音(TTS)</strong>。</p>
+  <p style="margin:12px 0;">2. 「服务商」选 <strong style="color:#0f3460;">阿里云百炼 CosyVoice</strong>。</p>
+  <p style="margin:12px 0;">3. 「DashScope API Key」填<strong>同一个</strong> <code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">sk-...</code>。</p>
+  <p style="margin:12px 0;background:#fff7f7;border-left:4px solid #e94560;padding:10px 12px;"><strong style="color:#e94560;">【最关键一步】</strong>「默认音色 voice（复刻音色 ID）」这里，<strong>粘贴第三步复制的 ID</strong>。别留空、别用占位符，否则配出来不是你的声音。</p>
+  <p style="margin:12px 0;">4. 「模型」留默认 <code style="background:#f3f3f3;padding:1px 4px;border-radius:3px;">cosyvoice-v3.5-plus</code>。</p>
+  <p style="margin:12px 0;color:#555;font-size:14px;">配置完，在文字 / 字幕素材上点「AI 配音」，就会用<strong>你自己的声音</strong>生成配音。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">六、三个最容易踩的坑</h2>
+  <p style="margin:10px 0;">❌ <strong>配音出来不是我的声音？</strong> → 第一反应查「默认音色 voice」是不是空着或抄错。它留空<strong>不会报错</strong>，但会悄悄用内置女声。</p>
+  <p style="margin:10px 0;">❌ <strong>找不到声音 ID？</strong> → 它在<strong>百炼网页"我的复刻"</strong>里，不在 AIcut 里生成；AIcut 只能"填"，不能"造"。</p>
+  <p style="margin:10px 0;">❌ <strong>API Key 丢了 / 想换？</strong> → 百炼后台"API-KEY"里可以<strong>禁用或重置</strong>，旧的就废了，重新建一个新的即可。</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">七、软件在哪下载（功能看上一篇文章）</h2>
+  <p style="margin:12px 0;"><strong style="color:#0f3460;">有条件的同学：</strong>从 GitHub 下载（最新最全）：</p>
+  <p style="margin:8px 0;word-break:break-all;background:#f7f7f7;padding:8px 10px;border-radius:4px;font-size:13px;">https://github.com/kunpeng4866/AIcut/releases/download/v1.0.0/AIcut-green-portable-win64.7z</p>
+  <p style="margin:12px 0;"><strong style="color:#0f3460;">确实下载困难的同学：</strong>从息流笔记下载（同一个安装包）：</p>
+  <p style="margin:8px 0;word-break:break-all;background:#f7f7f7;padding:8px 10px;border-radius:4px;font-size:13px;">https://flowus.cn/carcoon/312c57a4-c532-4de0-a9e3-b41469d7c457</p>
+  <p style="margin:12px 0;color:#555;font-size:14px;">（订阅号里链接不能直接点，请<strong>长按复制</strong>上面地址到浏览器打开。软件能做什么，请看我<strong>上一篇文章</strong>《我把每月的剪辑订阅费省下来了，顺手做了个开源免费的 AI 视频剪辑软件》。）</p>
+
+  <h2 style="font-size:18px;font-weight:700;color:#1a1a2e;margin:24px 0 10px;border-left:4px solid #0f3460;padding-left:10px;">八、下期预告</h2>
+  <p style="margin:12px 0;">下一篇我手把手教你用 AIcut 的<strong style="color:#e94560;">智能抠像（一键去背景）</strong>和<strong style="color:#e94560;">口播剪辑</strong>——怎么操作、怎么出效果，一步一步讲。</p>
+
+  <p style="margin:24px 0 8px;text-align:center;color:#0f3460;font-weight:700;font-size:16px;">学 AI，用 AI，跟大家分享 AI 相关的知识、技能、信息，欢迎交流。</p>
+  <p style="margin:4px 0;text-align:center;color:#aaa;font-size:13px;">—— 鲲南未来</p>
+</section>
