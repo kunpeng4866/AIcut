@@ -204,6 +204,36 @@ fn keying_segments(c: &Clip) -> Vec<(f64, f64, KeyingConfig)> {
     out
 }
 
+/// 段画布 / 底画布的**帧数**：按帧网格取整，N = round(t_out·fps) − round(t_in·fps)。
+///
+/// 为什么必须自己算帧数、而不是让 ffmpeg 把秒换算成帧：
+///   `color=c=black:r=fps:d=<秒>` 产出的是 **ceil(秒×fps)** 帧，而内容链
+///   `trim=start=..:duration=..` 是**上界开区间**（保留 `pts < start+duration` 的帧），
+///   对同一时长只取到 **round 帧**。前端给的时长本就等于「素材帧数 ÷ fps」（如 89/30 =
+///   2.966667），乘回 30 得 89.00001——`ceil` 把这个 1e-5 的浮点误差放大成**整整 1 帧**：
+///   实测 cdur=2.9667 → 画布 90 帧 / 内容 89 帧。多出的那 1 帧没有内容可叠，overlay 的
+///   `eof_action=pass` 便透出纯黑 = 「接缝闪黑一帧」；更隐蔽的是它同时把后一片段整体
+///   推迟 1 帧（实测视频比音频晚 32ms ≈ 1 帧），而 `tpad` 只能掩盖黑帧、掩盖不了这个偏移。
+///
+/// 与剪映（字节系非编）一致的模型：时间线是**帧栅格**，元素占据整数帧，不存在
+/// 「两套独立算长度再互相凑」的环节——画布帧数与内容帧数由同一套取整规则导出，恒等。
+fn canvas_frames(t_in: f64, t_out: f64, fps: u32) -> u32 {
+    let a = (t_in * fps as f64).round();
+    let b = (t_out * fps as f64).round();
+    ((b - a) as i64).max(1) as u32
+}
+
+/// 生成**帧精确**的黑色画布节点：无限长 color 源 + `trim=end_frame=<帧数>`。
+///
+/// ① 长度用「帧数」表达（`trim=end_frame` 上界开区间，恰好 N 帧），不再经过「秒 → 帧」的
+///    二次取整，与内容链的口径严格一致（`canvas_frames` 的注释详述了不这么做会怎样）。
+/// ② `r=<canvas.fps>` 必须显式给出：FFmpeg 的 color 源默认 25fps，而它是 overlay 的**主输入**
+///    （输出帧率随主输入），漏写会把整条轨拖到 25fps → 片段先丢帧再被 `-r/-fps_mode cfr`
+///    补帧 → 每 6 帧 1 个重复帧，接缝处顿挫。**改动本函数时切勿删掉 r=**。
+fn black_canvas(w: u32, h: u32, fps: u32, frames: u32, label: &str) -> String {
+    format!("color=c=black:s={}x{}:r={},trim=end_frame={}[{}]", w, h, fps, frames, label)
+}
+
 fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, matte_map: &HashMap<String, usize>, bg_map: &HashMap<String, usize>, w: u32, h: u32, nodes: &mut Vec<String>, fps: u32, target_w: Option<u32>, target_h: Option<u32>, video_input_idx: &HashSet<usize>) -> (Option<String>, u32, u32) {
     let base_dur = (c.timeline_out - c.timeline_in).max(0.1);
     let input = match resolve_clip_input(c, ci, asset_to_idx, w, h, fps, nodes, base_dur, video_input_idx) {
@@ -213,6 +243,24 @@ fn build_clip_chain(c: &Clip, ci: usize, asset_to_idx: &HashMap<String, usize>, 
     let label = format!("vs{}", ci);
     let (chain, out_w, out_h) = build_video_chain(c, &input, w, h, &label, fps, matte_map, bg_map, target_w, target_h);
     nodes.extend(chain);
+    // 兜底（接缝闪黑）——仅多片段轨使用本函数：**素材真的比它占用的格子短**时保持末帧。
+    //
+    // 主因已由 `black_canvas`/`canvas_frames` 从结构上消除（段画布帧数改走帧网格，与内容链
+    // 同口径，不再凭空多出 1 帧黑）。此处保留的 `tpad` 只负责另一种情况：源素材**确实**不够填满
+    // 该 clip 声明的时间段（用户在时间轴上把片段拉得比素材长）。此时段链会先于黑底画布 EOF，
+    // overlay 的 `eof_action=pass` 会透出黑底；补 1 秒克隆帧后改为"保持最后一帧"——与预览端
+    // HTML5 `<video>` 越界停末帧的行为一致（故该差异此前只在导出成片里可见）。
+    //
+    // 输出长度不受影响：它由 overlay 的主输入（黑底画布 = 该段帧数）决定，多余补帧被丢弃。
+    // 注意只对本函数（多片段轨）生效：单片段分支 / main 轨结束后的透黑是刻意行为
+    // （避免主轨结束后末帧定格），不可套用。
+    let tail_label = format!("[{}]", label);
+    if let Some(last) = nodes.last_mut() {
+        if last.ends_with(&tail_label) {
+            let pos = last.len() - tail_label.len();
+            last.insert_str(pos, ",tpad=stop_mode=clone:stop_duration=1");
+        }
+    }
     (Some(label), out_w, out_h)
 }
 
@@ -286,15 +334,26 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     let sy_a = kf_factor(c, &["transform.scaleY", "scaleY", "scale"], c.timeline_in);
     let mut nodes: Vec<String> = Vec::new();
 
-    // 1) 预抠像链：trim src_range + scale + 变速/时间重映射 + rotate + clip_filters，产出 [pre_label]
+    // 1) 预抠像链：trim src_range + 帧率归一/时间归零 + scale + 变速/时间重映射 + rotate + clip_filters，
+    // 产出 [pre_label]。
     // 源 trim 到 src_range：clip 只显示源视频 [src_start, src_end] 秒。此前静态路径
     // （speed=1 / 线性变速）不 trim，clip 从源第 0 秒起播、时长=源全长，与预览 / ExportPipeline
     // 的 clip_source_time 不一致；抠图 alphamerge 时 matte 全长会把 clip 可见时长拉成源全长
-    // （"1 秒抠图导出变 5 秒" 的根因）。trim 后 setpts=PTS-STARTPTS 把源时间重置为 0 起，
-    // 使后续变速 setpts（线性 1/speed·PTS 或曲线表达式）作用于 trim 后的 0..src_dur 域。
+    // （"1 秒抠图导出变 5 秒" 的根因）。归零后使后续变速 setpts（线性 1/speed·PTS 或曲线表达式）
+    // 作用于 trim 后的 0..src_dur 域。
+    //
+    // 归零方式（2026-10-06 健壮性修复，勿改回 setpts=PTS-STARTPTS）：
+    // 原用 `setpts=PTS-STARTPTS`。该写法依赖 ffmpeg 的 STARTPTS 变量，而 STARTPTS 在**含时间戳
+    // 不连续的输入**上会取到非首帧的值——典型来源是 `ffmpeg -f concat -c copy`（流拷贝）拼接出的
+    // mp4：各段独立编码导致拼接后 DTS 非单调、PTS 起点非零甚至为负。此时 PTS-STARTPTS 会把首段帧
+    // 的 PTS 全部压成负值被丢弃（实测：269 帧只剩 148 帧，接缝之后整段透黑底；ffprobe 看不出文件
+    // 任何异常）。改用 `fps=<canvas.fps>:start_time=0`：fps 滤镜按"第 N 帧 → 时间 N/fps"**重建**均匀
+    // CFR 时间戳并显式从 0 起，既完成帧率归一又完成时间归零，完全不依赖输入时间戳变量（输入侧
+    // -copyts/-start_at_zero/-avoid_negative_ts/-ignore_editlist 等均已实测无效）。时间域仍从 0 起，
+    // 故下方曲线 setpts 的 src_base 仍传 0。
     let src_start = c.src_range.start;
     let src_dur = (c.src_range.end - c.src_range.start).max(0.01);
-    let trim_src = format!("trim=start={}:duration={},setpts=PTS-STARTPTS", fmt(src_start), fmt(src_dur));
+    let trim_src = format!("trim=start={}:duration={},fps={}:start_time=0", fmt(src_start), fmt(src_dur), fps);
     let mut pre_label = format!("{}p", label);
     let mut pre = match (&sx_a, &sy_a) {
         (Some(ex), Some(ey)) => format!(
@@ -333,7 +392,7 @@ fn build_video_chain(c: &Clip, input: &str, w: u32, h: u32, label: &str, fps: u3
     }
     let curve = if !c.time_remap.curve.is_empty() { &c.time_remap.curve } else { &c.speed_curve };
     let dur = c.timeline_out - c.timeline_in;
-    // 源已在上方 trim 到 src_range 并 setpts=PTS-STARTPTS（时间从 0 起），
+    // 源已在上方 trim 到 src_range 并由 fps=<fps>:start_time=0 归零（时间从 0 起），
     // 故曲线 setpts 的源基准偏移改传 0（原 src_range.start 会与 trim 双重偏移）。
     if let Some(expr) = build_speed_curve_expr(curve, 0.0, dur) {
         pre.push_str(&format!(",setpts={}", expr));
@@ -847,7 +906,14 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
         // 底色流时长 = 工程时间轴长度，使最终输出严格对齐到 timeline_out 最大值，
         // 避免视频比音轨短导致末尾定格（卡顿）。
         let timeline_dur = cmd.duration.unwrap_or(1e9).max(0.1);
-        nodes.push(format!("color=c=black:s={}x{}:d={}[base]", w, h, fmt(timeline_dur)));
+        // 关键修复（接缝闪帧/顿挫）：color 源必须显式指定 r=<canvas.fps>。FFmpeg 的 color
+        // 源默认 25fps，而该黑底是 overlay 的**主输入**（overlay 输出帧率以主输入为准），
+        // 不指定会把本段画布乃至整条主轨/成片拖到 25fps：片段内容先被丢帧降到 25fps，
+        // 再被输出端 `-r <fps> -fps_mode cfr` 补帧拉回，导致每 6 帧插入 1 帧重复帧——
+        // 两个首尾相接的视频在接缝处因此出现顿挫/跳变（导出比预览明显）。
+        // 长度同样走帧网格（black_canvas/canvas_frames），与各段内容链同口径。
+        nodes.push(black_canvas(w, h, project.canvas.fps,
+            canvas_frames(0.0, timeline_dur, project.canvas.fps), "base"));
         let mut acc = "base".to_string();
         let mut vci = 0usize;
         for (track_order, clips) in &video_tracks {
@@ -898,9 +964,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                 let c0sh = (c0fit_h as f64 * c0sy).round().max(2.0) as u32;
                 let (Some(mut track_acc), tacc_w, tacc_h) = build_clip_chain(c0, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(c0sw), Some(c0sh), &video_input_idx) else { vci += 1; continue; };
                 // 归一化首片段到画布尺寸（菱形居中到 transform.(x,y)）
-                let c0dur = (c0.timeline_out - c0.timeline_in).max(0.1);
                 let c0cv = format!("cv{}", vci);
-                nodes.push(format!("color=c=black:s={}x{}:d={}[{}]", w, h, fmt(c0dur), c0cv));
+                // 画布帧数走帧网格（canvas_frames），与内容链同口径 → 不会凭空多出 1 帧黑。
+                nodes.push(black_canvas(w, h, project.canvas.fps,
+                    canvas_frames(c0.timeline_in, c0.timeline_out, project.canvas.fps), &c0cv));
                 let c0ox = offset_x(c0, w, tacc_w); let c0oy = offset_y(c0, h, tacc_h);
                 let track_acc_c = format!("cv{}o", vci);
                 nodes.push(format!("[{}][{}]overlay=x={}:y={}:eof_action=pass[{}]", c0cv, track_acc, c0ox, c0oy, track_acc_c));
@@ -924,9 +991,10 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
                     let (Some(curr_label), cur_w, cur_h) = build_clip_chain(curr, vci, &asset_to_idx, &matte_map, &bg_map, w, h, &mut nodes, project.canvas.fps, Some(csw), Some(csh), &video_input_idx) else { vci += 1; continue; };
                     vci += 1;
                     // 归一化当前片段到画布尺寸（菱形居中到 transform.(x,y)）
-                    let cdur = (curr.timeline_out - curr.timeline_in).max(0.1);
                     let ccv = format!("cv{}", vci);
-                    nodes.push(format!("color=c=black:s={}x{}:d={}[{}]", w, h, fmt(cdur), ccv));
+                    // 画布帧数走帧网格（canvas_frames），与内容链同口径 → 不会凭空多出 1 帧黑。
+                    nodes.push(black_canvas(w, h, project.canvas.fps,
+                        canvas_frames(curr.timeline_in, curr.timeline_out, project.canvas.fps), &ccv));
                     let cox = offset_x(curr, w, cur_w); let coy = offset_y(curr, h, cur_h);
                     let curr_canvas = format!("cv{}o", vci);
                     nodes.push(format!("[{}][{}]overlay=x={}:y={}:eof_action=pass[{}]", ccv, curr_label, cox, coy, curr_canvas));
@@ -1000,7 +1068,9 @@ pub fn build_render_command(project: &Project) -> ffmpeg::RenderCommand {
             // 无视频轨却含字幕/文字：先建黑底，避免滤镜图无输入绑定失败
             if sub_label.is_empty() {
                 let timeline_dur = cmd.duration.unwrap_or(1e9).max(0.1);
-                nodes.push(format!("color=c=black:s={}x{}:d={}[base]", w, h, fmt(timeline_dur)));
+                // 长度走帧网格（见 black_canvas 注释）：既保留 r=<canvas.fps>，又不会与内容链差 1 帧。
+                nodes.push(black_canvas(w, h, project.canvas.fps,
+                    canvas_frames(0.0, timeline_dur, project.canvas.fps), "base"));
                 sub_label = "[base]".to_string();
             }
             let mut sub_idx: usize = 0;
@@ -1529,5 +1599,123 @@ fn test_subtitle_no_concat_single_burn_all_segments() {
     let last = cmd.rfind("[sub3]").expect("must have [sub3] as final subtitle node");
     assert!(!cmd[last..].contains("drawtext="),
         "top node [sub3] (CN) must be final; cmd: {}", cmd);
+}
+
+/// 接缝闪帧/闪黑修复锁定：两个首尾相接的视频（A 尾帧 == B 首帧）在接缝处不得出现
+/// 顿挫或纯黑帧。此处锁定两条硬约束，防止"后来人再写 color 源时又漏 r"这类回归：
+///
+/// ① 所有 `color` 黑底源必须显式 `r=<canvas.fps>`。FFmpeg 的 color 源默认 25fps，而黑底
+///    是 overlay 的**主输入**（overlay 输出帧率随主输入），漏写会把整条主轨拖到 25fps：
+///    片段内容先被丢帧降到 25fps，再被输出端 `-r <fps> -fps_mode cfr` 补帧拉回 →
+///    每 6 帧插入 1 帧重复帧，接缝处表现为顿挫/跳变（实测平均 PSNR 由 58.4dB 掉到 53.8dB）。
+///
+/// ② 多片段段链必须带 `tpad=stop_mode=clone` 补帧。clip 时长与素材实际可用长度存在
+///    1 帧以内误差（AI 生成的首尾帧视频常为非整数帧时长）时，段链会比黑底画布早
+///    EOF 一帧，overlay 的 `eof_action=pass` 便透出黑底 → 接缝处凭空多 1 帧纯黑
+///    （实测 YAVG=16，肉眼即"闪黑一下"）。
+#[test]
+fn test_graph_multiclips_seam_no_black_frame() {
+    let json = r#"{
+      "canvas": {"width":640,"height":360,"fps":30},
+      "assets": [
+        {"id":"a1","type":"video","path":"E:/dummy1.mp4","duration":4.0,"width":640,"height":360,"codec":"h264","fps":30},
+        {"id":"a2","type":"video","path":"E:/dummy2.mp4","duration":4.0,"width":640,"height":360,"codec":"h264","fps":30}
+      ],
+      "tracks":[{"id":"t1","type":"video","order":0,"isMain":true,"clips":[
+        {"id":"c1","assetId":"a1","src_range":{"start":0,"end":4.0},"timelineIn":0,"timelineOut":4.0,
+         "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+         "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}},
+        {"id":"c2","assetId":"a2","src_range":{"start":0,"end":4.0},"timelineIn":4.0,"timelineOut":8.0,
+         "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+         "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}}
+      ],"locked":false,"visible":true,"muted":false,"solo":false,"volume":1,"pan":0}]
+    }"#;
+    let cmd = render_project_json(json).expect("build command");
+    println!("CMD: {}", cmd);
+
+    // 前置：两个相接的 clip 必须走多片段 concat 分支（否则本测试覆盖不到目标路径）
+    assert!(cmd.contains("concat=n=2"),
+        "two adjacent clips on the main track must use concat; cmd: {}", cmd);
+
+    // ① 每个 color 黑底源都要显式指定帧率 = canvas.fps
+    let colors: Vec<&str> = cmd.split(';').filter(|n| n.contains("color=c=black")).collect();
+    assert!(!colors.is_empty(), "expected color base nodes; cmd: {}", cmd);
+    for n in &colors {
+        assert!(n.contains(":r=30"),
+            "color source must set r=<canvas.fps>; FFmpeg's default 25fps would drag the whole \
+             main track to 25fps (frame drops + duplicate frames at the seam); node: {}", n);
+    }
+
+    // ①b 画布长度必须落在**帧网格**上（`trim=end_frame=<帧数>`），**不得**再用 `:d=<秒>`。
+    //     `:d=` 走 ceil(秒×fps)，而内容链 trim 是上界开区间（round 帧）：前端时长本就等于
+    //     「帧数÷fps」（89/30=2.966667），乘回 30 得 89.00001，ceil 把这个 1e-5 浮点误差放大成
+    //     整整 1 帧 → 画布 90 帧 / 内容 89 帧 → eof_action=pass 在第 90 帧透黑（接缝闪黑一帧），
+    //     并把后一片段整体推迟 1 帧（实测视频比音频晚 32ms）。
+    for n in &colors {
+        assert!(!n.contains(":d="),
+            "black canvas must NOT use ':d=<seconds>' (ceil() turns a 1e-5 float error into a whole \
+             extra frame vs the content chain's round-based trim); use trim=end_frame=<frames>; node: {}", n);
+        assert!(n.contains("trim=end_frame="),
+            "black canvas length must be expressed as a frame count on the timeline frame grid \
+             (trim=end_frame=<N>, N = round(t_out*fps) - round(t_in*fps)); node: {}", n);
+    }
+
+    // ② 多片段段链必须补帧：素材**真的**比格子短时保持末帧，而不是透出黑底
+    assert!(cmd.contains("tpad=stop_mode=clone"),
+        "multi-segment clip chain must clone its last frame (tpad) so that a source genuinely \
+         shorter than its slot holds the last frame instead of leaking black through \
+         eof_action=pass; cmd: {}", cmd);
+}
+
+/// 回归：源链的时间归零**不得**使用 `setpts=PTS-STARTPTS`，必须用 `fps=<fps>:start_time=0`。
+///
+/// 病根：`STARTPTS` 在**含时间戳不连续的输入**上会取到非首帧的值——典型来源是
+/// `ffmpeg -f concat -c copy`（流拷贝）拼接出的 mp4：各段独立编码使拼接后 DTS 非单调
+/// （实测 128/268 处）、PTS 起点非零甚至为负。此时 `PTS-STARTPTS` 把首段帧的 PTS 全部
+/// 压成负值被丢弃：实测 269 帧只剩 148 帧、接缝之后整段透黑底（117 黑帧），而 ffprobe
+/// 对该文件完全看不出异常（合法 mp4、帧率帧数时长全对）。
+///
+/// 修法：`fps=<canvas.fps>:start_time=0`——fps 滤镜按"第 N 帧 → 时间 N/fps"**重建**均匀
+/// CFR 时间戳并显式从 0 起，既完成帧率归一又完成时间归零，不依赖任何输入时间戳变量
+/// （输入侧 `-copyts` / `-start_at_zero` / `-avoid_negative_ts` / `-ignore_editlist` /
+/// `-fflags +genpts` 等均已实测无效）。位置必须在 trim 之后、变速 setpts 之前，
+/// 以保证变速与速度曲线作用在 0 起的时间域上。
+#[test]
+fn test_graph_source_chain_zeroes_pts_without_startpts() {
+    let json = r#"{
+      "canvas": {"width":640,"height":360,"fps":30},
+      "assets": [
+        {"id":"a1","type":"video","path":"E:/dummy.mp4","duration":8.0,"width":640,"height":360,"codec":"h264","fps":30}
+      ],
+      "tracks":[{"id":"t1","type":"video","order":0,"isMain":true,"clips":[
+        {"id":"c1","assetId":"a1","src_range":{"start":0,"end":8.0},"timelineIn":0,"timelineOut":8.0,
+         "transform":{"x":0.5,"y":0.5,"scale_x":1,"scale_y":1,"rotation":0,"opacity":1},
+         "volume":1,"speed":1,"effects":[],"masks":[],"filters":[],"keyframes":{}}
+      ],"locked":false,"visible":true,"muted":false,"solo":false,"volume":1,"pan":0}]
+    }"#;
+    let cmd = render_project_json(json).expect("build command");
+    println!("CMD: {}", cmd);
+
+    // ① 源链必须用 fps=<fps>:start_time=0 做时间归零
+    assert!(cmd.contains("fps=30:start_time=0"),
+        "source chain must zero the timeline via fps=<canvas.fps>:start_time=0; cmd: {}", cmd);
+
+    // ② 源链**不得**再用 setpts=PTS-STARTPTS（STARTPTS 在流拷贝拼接件上不可靠）
+    // 注意：音频链用的是 `asetpts=PTS-STARTPTS`（带 a 前缀、且其后紧跟 `[` 而非 `,`），
+    // 不在此断言范围内——音频无 B 帧重排、DTS 单调，STARTPTS 可靠。
+    assert!(!cmd.contains(",setpts=PTS-STARTPTS,"),
+        "source chain must NOT use setpts=PTS-STARTPTS: STARTPTS takes a non-first-frame value on \
+         inputs with timestamp discontinuities (e.g. `ffmpeg -f concat -c copy` output), which \
+         collapses the leading segment's PTS to negative and drops ~half the frames; cmd: {}", cmd);
+
+    // ③ 归零必须紧跟在源 trim 之后（保证变速/速度曲线作用在 0 起的时间域上）
+    let src = cmd.split(';')
+        .find(|n| n.contains("fps=30:start_time=0"))
+        .expect("a node with fps=30:start_time=0");
+    let i_trim = src.find("trim=start=").expect("source trim in same node");
+    let i_fps = src.find("fps=30:start_time=0").unwrap();
+    assert!(src[i_trim..].starts_with("trim=start=0"),
+        "zeroing must follow the source trim that starts at 0; node: {}", src);
+    assert!(i_trim < i_fps, "trim must precede the fps zeroing; node: {}", src);
 }
 }
