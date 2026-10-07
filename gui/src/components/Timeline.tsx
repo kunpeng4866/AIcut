@@ -103,6 +103,71 @@ const snapTime = (
   return Math.max(0, bestIn);
 };
 
+// 需要「同轨不重叠」约束的轨道：非主视频轨 + 音频轨。
+// 主视频轨走磁吸重排（realignProject）自带顺序排列；文字/贴纸轨允许叠放，故不约束。
+const needsNoOverlap = (t: { type: string; isMain?: boolean }): boolean =>
+  (t.type === 'video' && !t.isMain) || t.type === 'audio';
+
+// 同轨不重叠：给定期望起点与片段时长，返回**最近的合法位置**。
+// 合法 = 落在某个「空隙」内（空隙 = 相邻片段之间，含首段之前与末段之后），即 [g0, g1-dur]。
+// 拖到前一段尾部时会被夹在 g0（= 前一段 timelineOut）上贴齐停住，绝不重叠；
+// 拖过头越过某段时会跳到相邻的另一个空隙，而不是硬卡死。所有空隙都装不下（轨道已满）时维持原位。
+const resolveNoOverlap = (
+  proposedIn: number,
+  clipDuration: number,
+  clipsOnTrack: ClipConfig[],
+  currentClipId: string,
+  fallbackIn: number,
+): number => {
+  const others = clipsOnTrack.filter((c) => c.id !== currentClipId);
+  if (others.length === 0) return Math.max(0, proposedIn);
+  const sorted = [...others].sort((a, b) => a.timelineIn - b.timelineIn);
+  const gaps: [number, number][] = [];
+  let cursor = 0;
+  for (const c of sorted) {
+    if (c.timelineIn > cursor) gaps.push([cursor, c.timelineIn]);
+    cursor = Math.max(cursor, c.timelineOut);
+  }
+  gaps.push([cursor, Number.POSITIVE_INFINITY]); // 末段之后无限长
+  const target = Math.max(0, proposedIn);
+  let best: number | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const [g0, g1] of gaps) {
+    const hi = g1 - clipDuration;
+    if (hi < g0 - 1e-9) continue; // 该空隙装不下本片段
+    const pos = Math.min(Math.max(target, g0), hi);
+    const dist = Math.abs(pos - target);
+    if (dist < bestDist) { bestDist = dist; best = pos; }
+  }
+  if (best === null) return Math.max(0, fallbackIn); // 无处可放：维持原位
+  return Math.max(0, best);
+};
+
+// 同轨不重叠（拉伸边缘版）：**只夹正在拖动的那条边**——左缘向左扩时不得越过
+// 「位于片段当前右边界之内」的片段尾部；右缘向右扩时不得越过「越过左边界」的片段头部。
+// 必须区分边：若同时套用两侧限制，左缘拖拽会被右侧限制误判为无空间而整段作废。
+const clampResizeNoOverlap = (
+  clipsOnTrack: ClipConfig[],
+  clipId: string,
+  newIn: number,
+  newOut: number,
+  edge: 'left' | 'right',
+): { newIn: number; newOut: number } => {
+  const others = clipsOnTrack.filter((c) => c.id !== clipId);
+  if (edge === 'left') {
+    let leftLimit = 0;
+    for (const c of others) {
+      if (c.timelineIn < newOut - 1e-9 && c.timelineOut > leftLimit) leftLimit = c.timelineOut;
+    }
+    return { newIn: Math.max(newIn, leftLimit), newOut };
+  }
+  let rightLimit = Number.POSITIVE_INFINITY;
+  for (const c of others) {
+    if (c.timelineOut > newIn + 1e-9 && c.timelineIn < rightLimit) rightLimit = c.timelineIn;
+  }
+  return { newIn, newOut: Math.min(newOut, rightLimit) };
+};
+
 const btnStyle: React.CSSProperties = { padding: '2px 8px', background: '#0f3460', color: '#eee', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11 };
 const iconBtn: React.CSSProperties = { padding: '0 2px', background: 'transparent', color: '#aaa', border: 'none', cursor: 'pointer', fontSize: 12 };
 const menuItem: React.CSSProperties = { padding: '4px 8px', cursor: 'pointer', fontSize: 12, color: '#eee' };
@@ -545,7 +610,12 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
             // 命中同类型未锁轨道内部：直接移入（保留「放到已有轨道」行为，素材跟随到该轨）
             pendingInsertIdx = null;
             setDragTrackId(hoverTrackId);
-            useProjectStore.getState().moveClipToTrackLive(clipTrack.id, clip.id, hoverTrackId, newIn);
+            // 非主视频轨 / 音频轨：拖动过程中即夹到空隙里 —— 往前拖顶到前一段尾部就贴齐停住，绝不重叠。
+            const cdur = clip.timelineOut - clip.timelineIn;
+            const destIn = needsNoOverlap(ht)
+              ? resolveNoOverlap(newIn, cdur, ht.clips, clip.id, newIn)
+              : newIn;
+            useProjectStore.getState().moveClipToTrackLive(clipTrack.id, clip.id, hoverTrackId, destIn);
           } else {
             // 类型不符/锁定：在同类分组边界处显示绿线，松手建轨承载（保持素材不丢失）
             pendingInsertIdx = clampToGroup(trackIndex, clipTrack.type);
@@ -581,6 +651,17 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
         if (clipTrack) {
           const c = clipTrack.clips.find(c => c.id === clip.id);
           if (c) {
+            // 非主视频轨 / 音频轨收尾：①夹进空隙（同轨不重叠）②「片段吸附」开启时贴到相邻片段边缘，
+            // ③再夹一次（吸附候选里含其他片段内沿，可能落到重叠位，必须兜住）。
+            const settleNonMain = (trackId: string, clipsNow: ClipConfig[], fallbackIn: number) => {
+              const cdur = c.timelineOut - c.timelineIn;
+              let pos = resolveNoOverlap(fallbackIn, cdur, clipsNow, clip.id, fallbackIn);
+              pos = snapTime(pos, cdur, clipsNow, clip.id, playhead, clipSnap);
+              pos = resolveNoOverlap(pos, cdur, clipsNow, clip.id, fallbackIn);
+              if (Math.abs(pos - fallbackIn) > 0.001) {
+                useProjectStore.getState().updateClipLive(trackId, clip.id, { timelineIn: pos, timelineOut: pos + cdur });
+              }
+            };
             if (pendingInsertIdx !== null && pendingInsertIdx >= 0) {
               // 延迟建轨：在松手处新建一条同类型轨道并把素材放入（与初次拖入一致：绿线 → 松手建轨）。
               const newId = useProjectStore.getState().addTrackLiveAt(pendingInsertIdx, clipTrack.type);
@@ -589,24 +670,16 @@ function ClipItem({ clip, track, color, selected, zoom, magneticSnap, clipSnap, 
               if (destTrack) {
                 if (destTrack.isMain) {
                   realignProject();
-                } else if (destTrack.type === 'video') {
-                  const cdur = c.timelineOut - c.timelineIn;
-                  const snapped = snapTime(c.timelineIn, cdur, destTrack.clips, clip.id, playhead, clipSnap);
-                  if (Math.abs(snapped - c.timelineIn) > 0.001) {
-                    useProjectStore.getState().updateClipLive(destTrack.id, clip.id, { timelineIn: snapped, timelineOut: snapped + cdur });
-                  }
+                } else if (destTrack.type === 'video' || destTrack.type === 'audio') {
+                  settleNonMain(destTrack.id, destTrack.clips, c.timelineIn);
                 }
               }
             } else if (clipTrack.isMain) {
               // 主轨：拖后一次性磁吸重排（拖动过程不重排，避免主轨被吸附抖动）
               realignProject();
-            } else if (clipTrack.type === 'video') {
-              // Video (non-main): 拖后吸附到 0.5s 网格
-              const cdur = c.timelineOut - c.timelineIn;
-              const snapped = snapTime(c.timelineIn, cdur, clipTrack.clips, clip.id, playhead, clipSnap);
-              if (Math.abs(snapped - c.timelineIn) > 0.001) {
-                useProjectStore.getState().updateClipLive(clipTrack.id, clip.id, { timelineIn: snapped, timelineOut: snapped + cdur });
-              }
+            } else if (clipTrack.type === 'video' || clipTrack.type === 'audio') {
+              // Video (non-main) / Audio：不重叠 + 拖后吸附到相邻片段边缘
+              settleNonMain(clipTrack.id, clipTrack.clips, c.timelineIn);
             }
           }
         }
@@ -917,7 +990,14 @@ export default function Timeline() {
         if (hoverTrack && hoverTrack.type === targetTrackType && !hoverTrack.locked) {
           targetTrack = hoverTrack;
           const clipDur = asset.duration || 5;
-          dropTime = snapTime(time, clipDur, hoverTrack.clips, '', currentTime, clipSnap);
+          // 非主视频轨 / 音频轨：新片段落点同样不得与已有片段重叠（夹进空隙 → 吸附 → 再夹一次）。
+          if (needsNoOverlap(hoverTrack)) {
+            dropTime = resolveNoOverlap(time, clipDur, hoverTrack.clips, '', time);
+          }
+          dropTime = snapTime(dropTime, clipDur, hoverTrack.clips, '', currentTime, clipSnap);
+          if (needsNoOverlap(hoverTrack)) {
+            dropTime = resolveNoOverlap(dropTime, clipDur, hoverTrack.clips, '', time);
+          }
         } else {
           const newId = addTrack(targetTrackType);
           targetTrack = useProjectStore.getState().project.tracks.find(t => t.id === newId);
@@ -1317,7 +1397,19 @@ export default function Timeline() {
                         onSplit={() => splitClip(track.id, clip.id, currentTime)}
                         onMove={(newIn) => moveClipLive(track.id, clip.id, newIn)}
                         onMoveToTrack={(destTrackId, newIn) => moveClipToTrackLive(track.id, clip.id, destTrackId, newIn)}
-                        onResize={(newIn, newOut) => updateClipLive(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut })}
+                        onResize={(newIn, newOut) => {
+                          // 非主视频轨 / 音频轨：拉伸边缘同样不得压到相邻片段（顶到前一段尾部/后一段头部即停）
+                          if (needsNoOverlap(track)) {
+                            // 判定被拖动的是哪条边：两种拉伸互斥，另一条边恒等于当前值
+                            const edge: 'left' | 'right' =
+                              Math.abs(newIn - clip.timelineIn) > 1e-6 ? 'left' : 'right';
+                            const r = clampResizeNoOverlap(track.clips, clip.id, newIn, newOut, edge);
+                            if (r.newOut - r.newIn < 0.1) return; // 夹到无空间：忽略本次拉伸
+                            updateClipLive(track.id, clip.id, { timelineIn: r.newIn, timelineOut: r.newOut });
+                            return;
+                          }
+                          updateClipLive(track.id, clip.id, { timelineIn: newIn, timelineOut: newOut });
+                        }}
                         onContext={(e) => onClipContext(e, track.id, clip.id)}
                         setDragOver={setDragOver} />
                       {clip.transition && (clip.transition.transitionType ?? 'none') !== 'none' && (clip.transition.duration ?? 0) > 0 && (
