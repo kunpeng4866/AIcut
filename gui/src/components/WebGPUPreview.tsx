@@ -495,22 +495,27 @@ export function useWebGPUPreview({
         }
       }
       if (items.length === 0) {
-        // 当前无就绪视频（播放头位于素材空白区或仅有文字/音频）：清空画布为黑色，
-        // 避免上一帧视频定格残留，与 CapCut 一致（无画面处显示黑底）。
-        const ctx = canvas.getContext('webgpu');
-        if (ctx) {
-          const cmd = device.createCommandEncoder();
-          const view = ctx.getCurrentTexture().createView();
-          const clearPass = cmd.beginRenderPass({
-            colorAttachments: [{
-              view,
-              clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              loadOp: 'clear',
-              storeOp: 'store',
-            }],
-          });
-          clearPass.end();
-          device.queue.submit([cmd.finish()]);
+        // 时间线上存在活跃视频片段、但其 <video> 尚未就绪（典型：接缝瞬间入片段仍在 seek）：
+        // 跳过绘制、保留上一帧合成结果——剪映同款「闸门」语义：取不到帧就不呈现新帧，
+        // 宁可定格上一帧也绝不留黑洞（清黑会让接缝处闪现 1~N 帧纯黑）。
+        // 仅当时间线上根本没有活跃视频片段（真空白区/纯文字/纯音频）才清黑——
+        // 这才是 CapCut「无画面处显示黑底」的适用场景。
+        if (activeClips.length === 0) {
+          const ctx = canvas.getContext('webgpu');
+          if (ctx) {
+            const cmd = device.createCommandEncoder();
+            const view = ctx.getCurrentTexture().createView();
+            const clearPass = cmd.beginRenderPass({
+              colorAttachments: [{
+                view,
+                clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                loadOp: 'clear',
+                storeOp: 'store',
+              }],
+            });
+            clearPass.end();
+            device.queue.submit([cmd.finish()]);
+          }
         }
         return;
       }

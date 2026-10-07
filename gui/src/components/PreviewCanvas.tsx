@@ -531,11 +531,15 @@ export default function PreviewCanvas() {
     for (const track of tracks) {
       const outClip = track.clips.find((c) => currentTime >= c.timelineIn && currentTime < c.timelineOut);
       if (!outClip) continue;
+      // 两类接缝统一预加载：①带转场（窗口起点 = outT - 转场时长）②无转场的普通首尾相接
+      // （窗口起点 = outT）。不区分的话，普通接缝的入片段 <video> 要到 currentTime ≥ timelineIn
+      // 才挂载 + seek（异步），接缝瞬间 WebGPU 合成器会因 seeking/未就绪跳过它 → 闪黑。
+      // 提前 2 秒挂载并 seek 到素材起点，接缝瞬间首帧已就绪，与转场路径行为一致。
       const tr = outClip.transition;
-      if (!tr || tr.transitionType === undefined || tr.transitionType === 'none') continue;
-      const dur = tr.duration && tr.duration > 0 ? tr.duration : 0.5;
+      const hasTr = !!tr && tr.transitionType !== undefined && tr.transitionType !== 'none';
+      const dur = hasTr ? (tr!.duration && tr!.duration > 0 ? tr!.duration : 0.5) : 0;
       const outT = outClip.timelineOut;
-      const windowStart = outT - dur;       // 转场窗起点
+      const windowStart = outT - dur;       // 转场窗起点；无转场时 = outT（接缝点）
       const preloadStart = windowStart - 2.0; // 预加载起点（提前 2 秒）
       if (currentTime < preloadStart || currentTime >= windowStart) continue;
       // 同轨下一片段：timelineIn 最接近 outT（邻接）的那个
